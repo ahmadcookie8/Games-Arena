@@ -3,7 +3,7 @@ version: '3.8'
 services:
   node:
     image: ${BACKEND_IMAGE:-games-arena-backend:local}
-    build: .
+    build: . 
     ports:
       - "3000:3000"
     environment:
@@ -11,6 +11,8 @@ services:
       - MONGODB_URI=${MONGODB_URI}
       - REDIS_URL=redis://redis:6379
       - JWT_SECRET=${JWT_SECRET}
+      - CORS_ORIGIN=${CORS_ORIGIN}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
       - PORT=3000
     depends_on:
       - redis
