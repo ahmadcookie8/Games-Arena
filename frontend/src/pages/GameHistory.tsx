@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import Header from '../components/Header'
 import { useAuth } from '../hooks/useAuth'
-import { Game, GameType } from '../types/game'
 import api from '../lib/api'
 import { getGameLabel } from '../lib/gameRules'
+import { Game, GameType } from '../types/game'
 
 export default function GameHistory() {
   const { user } = useAuth()
@@ -20,54 +21,71 @@ export default function GameHistory() {
   const filtered = filter === 'all' ? games : games.filter((g) => g.gameType === filter)
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-6">
-      <header className="flex justify-between items-center mb-8">
-        <h1 className="text-2xl font-bold">Game History</h1>
-        <button onClick={() => navigate('/')} className="text-gray-400 hover:text-white">← Dashboard</button>
-      </header>
-
-      <div className="flex gap-2 mb-6">
-        {(['all', 'chess', 'ticTacToe', 'wisecracker', 'checkers', 'uno', 'president'] as const).map((type) => (
-          <button
-            key={type}
-            onClick={() => setFilter(type)}
-            className={`px-3 py-1 rounded-full text-sm ${filter === type ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}
-          >
-            {type === 'all' ? 'All' : getGameLabel(type)}
-          </button>
-        ))}
-      </div>
-
-      <div className="space-y-2">
-        {filtered.map((game) => (
-          <div
-            key={game._id}
-            className="flex items-center justify-between bg-gray-800 rounded-xl px-4 py-3"
-          >
-            <div>
-              <span className="font-medium">{getGameLabel(game.gameType)}</span>
-              <span className="ml-3 text-sm text-gray-400">{game.players.map((p) => p.username).join(' vs ')}</span>
-            </div>
-            <div className="flex items-center gap-4">
-              {game.status === 'completed' && (
-                <span className={`text-sm ${game.result?.winnerName === user?.username ? 'text-green-400' : game.result?.isDraw ? 'text-yellow-400' : 'text-red-400'}`}>
-                  {game.result?.isDraw ? 'Draw' : game.result?.winnerName === user?.username ? 'Win' : 'Loss'}
-                </span>
-              )}
-              {game.status === 'active' && (
-                <button
-                  onClick={() => navigate(`/game/${game._id}`)}
-                  className="text-sm px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded-lg"
-                >
-                  Resume
-                </button>
-              )}
-              <span className="text-xs text-gray-500">{new Date(game.lastMoveAt).toLocaleDateString()}</span>
-            </div>
+    <div className="min-h-screen bg-page text-text-primary">
+      <Header />
+      <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-text-primary">Game History</h1>
+            <p className="mt-1 text-sm text-text-secondary">Review completed games and resume active matches.</p>
           </div>
-        ))}
-        {filtered.length === 0 && <p className="text-gray-400 text-center py-8">No games found.</p>}
-      </div>
+          <button onClick={() => navigate('/')} className="w-fit rounded-lg px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary">
+            Dashboard
+          </button>
+        </div>
+
+        <div className="mb-6 flex flex-wrap gap-2">
+          {(['all', 'chess', 'ticTacToe', 'wisecracker', 'checkers', 'uno', 'president'] as const).map((type) => (
+            <button
+              key={type}
+              onClick={() => setFilter(type)}
+              className={`min-h-11 rounded-full px-3 py-1 text-sm font-medium transition-colors duration-150 md:min-h-0 ${
+                filter === type ? 'bg-accent text-text-on-accent' : 'bg-elevated text-text-secondary hover:bg-overlay hover:text-text-primary'
+              }`}
+            >
+              {type === 'all' ? 'All' : getGameLabel(type)}
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-2">
+          {filtered.map((game) => (
+            <div
+              key={game._id}
+              className="flex flex-col gap-3 rounded-xl border border-border bg-surface px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between"
+            >
+              <div className="min-w-0">
+                <span className="block font-medium text-text-primary">{getGameLabel(game.gameType)}</span>
+                <span className="block truncate text-sm text-text-muted">{game.players.map((p) => p.username).join(' vs ')}</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                {game.status === 'completed' && (
+                  <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                    game.result?.winnerName === user?.username
+                      ? 'bg-success-subtle text-success-text'
+                      : game.result?.isDraw
+                        ? 'bg-warning-subtle text-warning-text'
+                        : 'bg-danger-subtle text-danger-text'
+                  }`}
+                  >
+                    {game.result?.isDraw ? 'Draw' : game.result?.winnerName === user?.username ? 'Win' : 'Loss'}
+                  </span>
+                )}
+                {game.status === 'active' && (
+                  <button
+                    onClick={() => navigate(`/game/${game._id}`)}
+                    className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:bg-accent-hover"
+                  >
+                    Resume
+                  </button>
+                )}
+                <span className="text-xs text-text-muted">{new Date(game.lastMoveAt).toLocaleDateString()}</span>
+              </div>
+            </div>
+          ))}
+          {filtered.length === 0 && <p className="rounded-2xl border border-border bg-surface px-4 py-10 text-center text-sm text-text-muted shadow-sm">No games found.</p>}
+        </div>
+      </main>
     </div>
   )
 }

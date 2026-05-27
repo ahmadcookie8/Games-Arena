@@ -14,13 +14,13 @@ export default function GameInvite({ gameCode }: Props) {
   }
 
   return (
-    <div className="bg-gray-800 rounded-xl p-4 text-center">
-      <p className="text-gray-400 text-sm mb-2">Share this code to invite a friend</p>
-      <div className="flex items-center gap-2 justify-center">
-        <span className="text-2xl font-mono font-bold tracking-widest">{gameCode}</span>
+    <div className="rounded-2xl border border-warning/30 bg-warning-subtle p-4 text-center shadow-sm">
+      <p className="mb-2 text-sm text-warning-text">Share this code to invite a player</p>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <span className="font-mono text-2xl font-bold tracking-widest text-text-primary">{gameCode}</span>
         <button
           onClick={copyCode}
-          className="text-sm px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded-lg"
+          className="rounded-lg bg-surface px-3 py-1.5 text-sm font-medium text-text-primary transition-colors duration-150 hover:bg-overlay"
         >
           {copied ? 'Copied!' : 'Copy'}
         </button>

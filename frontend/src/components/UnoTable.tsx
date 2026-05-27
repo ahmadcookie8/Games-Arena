@@ -14,8 +14,11 @@ interface UnoState {
 }
 
 const COLOR_CLASS: Record<string, string> = {
-  red: 'bg-red-500', green: 'bg-green-500', blue: 'bg-blue-500',
-  yellow: 'bg-yellow-400', wild: 'bg-gray-600',
+  red: 'bg-red-500',
+  green: 'bg-emerald-500',
+  blue: 'bg-blue-500',
+  yellow: 'bg-amber-400 text-amber-900',
+  wild: 'bg-gradient-to-br from-red-500 via-emerald-500 to-blue-500',
 }
 
 interface Props {
@@ -47,22 +50,22 @@ export default function UnoTable({ gameState, isMyTurn, playerIndex, onMove }: P
 
   return (
     <div className="flex flex-col items-center gap-6 py-4">
-      <div className="flex gap-6 items-center">
-        <div className={`w-16 h-24 rounded-xl ${topCard ? COLOR_CLASS[topCard.color] : 'bg-gray-700'} flex items-center justify-center text-white font-bold text-lg shadow-lg`}>
+      <div className="flex items-center justify-center gap-6">
+        <div className={`flex h-24 w-16 flex-shrink-0 items-center justify-center rounded-xl ${topCard ? COLOR_CLASS[topCard.color] : 'bg-elevated text-text-muted'} text-lg font-bold text-white shadow-md`}>
           {topCard?.value}
         </div>
-        <button onClick={drawCard} disabled={!isMyTurn} className="w-16 h-24 rounded-xl bg-gray-700 hover:bg-gray-600 text-white text-sm disabled:opacity-50 shadow-lg">
+        <button onClick={drawCard} disabled={!isMyTurn} className="h-24 w-16 flex-shrink-0 rounded-xl border-2 border-border bg-elevated text-sm font-bold text-text-muted shadow-md transition-transform duration-100 hover:scale-105 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100">
           Draw
         </button>
       </div>
 
-      <div className="flex flex-wrap gap-2 justify-center max-w-2xl">
+      <div className="flex w-full max-w-2xl flex-wrap justify-center gap-2 px-2">
         {myHand.map((card, i) => (
           <button
             key={i}
             onClick={() => isMyTurn && playCard(i)}
             disabled={!isMyTurn}
-            className={`w-14 h-20 rounded-xl ${COLOR_CLASS[card.color]} text-white text-xs font-bold shadow disabled:opacity-60 hover:scale-105 transition-transform`}
+            className={`h-20 w-14 rounded-xl ${COLOR_CLASS[card.color]} text-xs font-bold text-white shadow-md transition-transform duration-100 hover:-translate-y-2 hover:scale-110 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:scale-100`}
           >
             {card.value}
           </button>
@@ -75,7 +78,8 @@ export default function UnoTable({ gameState, isMyTurn, playerIndex, onMove }: P
             <button
               key={color}
               onClick={() => playCard(showColorPicker, color)}
-              className={`w-12 h-12 rounded-full ${COLOR_CLASS[color]} hover:scale-110 transition-transform`}
+              aria-label={`Choose ${color}`}
+              className={`h-12 w-12 rounded-full ${COLOR_CLASS[color]} shadow-md transition-transform duration-100 hover:scale-110`}
             />
           ))}
         </div>

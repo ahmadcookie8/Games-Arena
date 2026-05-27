@@ -4,10 +4,18 @@ const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
 const RANKS = ['8', '7', '6', '5', '4', '3', '2', '1']
 
 const PIECE_SYMBOLS: Record<string, string> = {
-  'white-king': '♔', 'white-queen': '♕', 'white-rook': '♖',
-  'white-bishop': '♗', 'white-knight': '♘', 'white-pawn': '♙',
-  'black-king': '♚', 'black-queen': '♛', 'black-rook': '♜',
-  'black-bishop': '♝', 'black-knight': '♞', 'black-pawn': '♟',
+  'white-king': '♔',
+  'white-queen': '♕',
+  'white-rook': '♖',
+  'white-bishop': '♗',
+  'white-knight': '♘',
+  'white-pawn': '♙',
+  'black-king': '♚',
+  'black-queen': '♛',
+  'black-rook': '♜',
+  'black-bishop': '♝',
+  'black-knight': '♞',
+  'black-pawn': '♟',
 }
 
 interface Piece { type: string; color: string }
@@ -29,9 +37,7 @@ export default function ChessBoard({ gameState, isMyTurn, playerColor, onMove }:
     const piece = state.board?.[square]
 
     if (selected) {
-      if (selected !== square) {
-        onMove(`${selected}-${square}`)
-      }
+      if (selected !== square) onMove(`${selected}-${square}`)
       setSelected(null)
     } else if (piece?.color === playerColor) {
       setSelected(square)
@@ -39,9 +45,9 @@ export default function ChessBoard({ gameState, isMyTurn, playerColor, onMove }:
   }
 
   return (
-    <div className="inline-block border-2 border-gray-600 rounded">
+    <div className="mx-auto w-full max-w-[28rem] overflow-hidden rounded-xl border border-border-strong shadow-md">
       {RANKS.map((rank) => (
-        <div key={rank} className="flex">
+        <div key={rank} className="grid grid-cols-8">
           {FILES.map((file) => {
             const square = `${file}${rank}`
             const isLight = (FILES.indexOf(file) + RANKS.indexOf(rank)) % 2 === 0
@@ -49,18 +55,17 @@ export default function ChessBoard({ gameState, isMyTurn, playerColor, onMove }:
             const isSelected = selected === square
 
             return (
-              <div
+              <button
                 key={square}
+                type="button"
                 onClick={() => handleSquareClick(square)}
-                className={`
-                  w-14 h-14 flex items-center justify-center text-3xl cursor-pointer select-none
-                  ${isLight ? 'bg-amber-100' : 'bg-amber-800'}
-                  ${isSelected ? 'ring-4 ring-yellow-400 ring-inset' : ''}
-                  hover:brightness-110
-                `}
+                aria-label={`Square ${square}${piece ? `, ${piece.color} ${piece.type}` : ', empty'}`}
+                className={`aspect-square text-3xl transition-all duration-150 hover:brightness-110 ${isLight ? 'bg-[#E6D3A3]' : 'bg-[#6B4E2E]'} ${isSelected ? 'ring-4 ring-warning ring-inset' : ''}`}
               >
-                {piece && PIECE_SYMBOLS[`${piece.color}-${piece.type}`]}
-              </div>
+                <span className={piece?.color === 'white' ? 'select-none [text-shadow:0_1px_2px_rgba(0,0,0,0.8)]' : 'select-none [text-shadow:0_1px_2px_rgba(255,255,255,0.3)]'}>
+                  {piece && PIECE_SYMBOLS[`${piece.color}-${piece.type}`]}
+                </span>
+              </button>
             )
           })}
         </div>

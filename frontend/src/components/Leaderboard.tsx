@@ -20,25 +20,25 @@ export default function Leaderboard() {
   }, [gameType])
 
   return (
-    <div className="bg-gray-800 rounded-xl p-4">
-      <div className="flex justify-between items-center mb-4">
-        <h3 className="font-semibold">Leaderboard</h3>
-        <span className="text-sm text-gray-400">Tic Tac Toe</span>
+    <div className="rounded-2xl border border-border bg-surface p-4 shadow-sm">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h3 className="text-base font-semibold text-text-primary">Leaderboard</h3>
+        <span className="rounded-full bg-accent-subtle px-2.5 py-0.5 text-xs font-medium text-accent">Tic Tac Toe</span>
       </div>
 
       <div className="space-y-1">
         {entries.map((entry) => (
           <div
             key={entry.rank}
-            className={`flex items-center gap-3 py-2 px-2 rounded-lg ${entry.username === user?.username ? 'bg-blue-900' : ''}`}
+            className={`flex items-center gap-3 rounded-lg px-2 py-2 ${entry.username === user?.username ? 'bg-accent-subtle' : 'hover:bg-elevated'}`}
           >
-            <span className="w-6 text-center text-gray-400 text-sm">#{entry.rank}</span>
-            <span className="flex-1 font-medium">{entry.username}</span>
-            <span className="text-green-400 text-sm">{entry.wins}W</span>
-            <span className="text-gray-400 text-xs">{(entry.winRate * 100).toFixed(0)}%</span>
+            <span className="w-7 text-center text-sm text-text-muted">#{entry.rank}</span>
+            <span className="min-w-0 flex-1 truncate font-medium text-text-primary">{entry.username}</span>
+            <span className="text-sm font-medium text-success">{entry.wins}W</span>
+            <span className="font-mono text-xs text-text-muted">{(entry.winRate * 100).toFixed(0)}%</span>
           </div>
         ))}
-        {entries.length === 0 && <p className="text-gray-500 text-sm text-center py-4">No data yet</p>}
+        {entries.length === 0 && <p className="rounded-lg bg-page px-3 py-6 text-center text-sm text-text-muted">No data yet</p>}
       </div>
     </div>
   )

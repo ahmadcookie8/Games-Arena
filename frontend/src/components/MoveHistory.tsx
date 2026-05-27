@@ -6,15 +6,15 @@ interface Props {
 
 export default function MoveHistory({ moves }: Props) {
   return (
-    <div className="bg-gray-800 rounded-xl p-4">
-      <h3 className="font-semibold mb-3">Move History</h3>
-      <div className="space-y-1 max-h-64 overflow-y-auto">
-        {moves.length === 0 && <p className="text-gray-500 text-sm">No moves yet</p>}
+    <div className="rounded-2xl border border-border bg-surface p-4 shadow-sm">
+      <h3 className="mb-3 text-base font-semibold text-text-primary">Move History</h3>
+      <div className="max-h-64 space-y-1 overflow-y-auto">
+        {moves.length === 0 && <p className="rounded-lg bg-page px-3 py-6 text-center text-sm text-text-muted">No moves yet</p>}
         {[...moves].reverse().map((m) => (
-          <div key={m.moveNumber} className="flex justify-between text-sm py-1 border-b border-gray-700">
-            <span className="text-gray-400">#{m.moveNumber}</span>
-            <span className="font-mono">{m.move}</span>
-            <span className="text-gray-500">{m.playerName}</span>
+          <div key={m.moveNumber} className="grid grid-cols-[3rem_minmax(0,1fr)_minmax(0,5rem)] gap-2 border-b border-border py-2 text-sm last:border-b-0">
+            <span className="text-text-muted">#{m.moveNumber}</span>
+            <span className="truncate font-mono text-text-primary">{m.move}</span>
+            <span className="truncate text-right text-text-muted">{m.playerName}</span>
           </div>
         ))}
       </div>

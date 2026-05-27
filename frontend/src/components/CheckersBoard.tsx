@@ -5,10 +5,10 @@ interface Props {
 }
 
 export default function CheckersBoard(_props: Props) {
-  // TODO: implement full checkers board UI
   return (
-    <div className="text-white text-center p-8">
-      <p className="text-gray-400">Checkers board coming soon...</p>
+    <div className="rounded-2xl border border-dashed border-border bg-elevated p-12 text-center">
+      <p className="text-lg font-semibold text-text-primary">Checkers</p>
+      <p className="mt-1 text-sm text-text-muted">Coming soon</p>
     </div>
   )
 }

@@ -7,17 +7,17 @@ interface Props {
 
 export default function PlayerCard({ player, isCurrentTurn }: Props) {
   return (
-    <div className={`flex items-center gap-3 p-3 rounded-xl ${isCurrentTurn ? 'bg-green-900 border border-green-600' : 'bg-gray-800'}`}>
-      <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-sm font-bold">
+    <div className={`flex items-center gap-3 rounded-xl border p-3 ${isCurrentTurn ? 'border-accent bg-accent-subtle' : 'border-border bg-elevated'}`}>
+      <div className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-sm font-bold text-text-on-accent">
         {player.username[0].toUpperCase()}
       </div>
-      <div>
-        <p className="font-medium">{player.username}</p>
-        <p className={`text-xs ${player.isConnected ? 'text-green-400' : 'text-gray-500'}`}>
+      <div className="min-w-0">
+        <p className="truncate font-medium text-text-primary">{player.username}</p>
+        <p className={`text-xs ${player.isConnected ? 'text-success' : 'text-text-muted'}`}>
           {player.isConnected ? 'Online' : 'Offline'}
         </p>
       </div>
-      {isCurrentTurn && <span className="ml-auto text-xs text-green-400">Playing</span>}
+      {isCurrentTurn && <span className="ml-auto rounded-full bg-surface px-2 py-0.5 text-xs font-medium text-accent">Playing</span>}
     </div>
   )
 }

@@ -8,7 +8,11 @@ import { useAuth } from './hooks/useAuth'
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
   if (loading) {
-    return <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white">Loading...</div>
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">
+        <div className="rounded-2xl border border-border bg-surface px-5 py-4 text-sm shadow-sm">Loading Games Arena...</div>
+      </div>
+    )
   }
   return user ? <>{children}</> : <Navigate to="/auth" replace />
 }

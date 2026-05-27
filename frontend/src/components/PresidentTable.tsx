@@ -6,10 +6,10 @@ interface Props {
 }
 
 export default function PresidentTable(_props: Props) {
-  // TODO: implement President card game UI
   return (
-    <div className="text-white text-center p-8">
-      <p className="text-gray-400">President card game coming soon...</p>
+    <div className="rounded-2xl border border-dashed border-border bg-elevated p-12 text-center">
+      <p className="text-lg font-semibold text-text-primary">President</p>
+      <p className="mt-1 text-sm text-text-muted">Coming soon</p>
     </div>
   )
 }

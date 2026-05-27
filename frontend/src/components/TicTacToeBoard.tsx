@@ -14,18 +14,25 @@ export default function TicTacToeBoard({ gameState, isMyTurn, onMove }: Props) {
 
   return (
     <div className="flex flex-col items-center gap-6">
-      <p className="text-gray-400">Next: {state.currentSymbol}</p>
-      <div className="grid grid-cols-3 gap-2">
-        {state.board.map((cell, i) => (
-          <button
-            key={i}
-            onClick={() => isMyTurn && !cell && onMove(String(i))}
-            disabled={!isMyTurn || !!cell}
-            className="w-24 h-24 text-4xl font-bold rounded-xl bg-gray-700 hover:bg-gray-600 disabled:cursor-not-allowed flex items-center justify-center"
-          >
-            <span className={cell === 'X' ? 'text-blue-400' : 'text-red-400'}>{cell}</span>
-          </button>
-        ))}
+      <div className={`rounded-full px-3 py-1 text-sm font-medium ${isMyTurn ? 'bg-accent-subtle text-accent' : 'bg-overlay text-text-secondary'}`}>
+        Next: <span className="font-mono font-bold">{state.currentSymbol}</span>
+      </div>
+      <div className="grid w-full max-w-[22rem] grid-cols-3 gap-2">
+        {state.board.map((cell, i) => {
+          const row = Math.floor(i / 3) + 1
+          const column = (i % 3) + 1
+          return (
+            <button
+              key={i}
+              onClick={() => isMyTurn && !cell && onMove(String(i))}
+              disabled={!isMyTurn || !!cell}
+              aria-label={`Row ${row}, Column ${column}${cell ? `, ${cell}` : ', empty'}`}
+              className="aspect-square rounded-xl border border-border bg-elevated text-4xl font-bold shadow-sm transition-all duration-150 hover:border-border-strong hover:bg-overlay disabled:cursor-not-allowed disabled:hover:bg-elevated"
+            >
+              <span className={`inline-block animate-scale-in ${cell === 'X' ? 'text-accent' : cell === 'O' ? 'text-warning' : ''}`}>{cell}</span>
+            </button>
+          )
+        })}
       </div>
     </div>
   )
