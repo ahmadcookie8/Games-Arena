@@ -23,8 +23,10 @@ export async function getUserStats(req: Request, res: Response, next: NextFuncti
 
 export async function getLeaderboard(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const leaderboard = await userService.getGlobalLeaderboard()
-    res.json(leaderboard)
+    const limit = parseInt(String(req.query.limit || '10'), 10)
+    const page = parseInt(String(req.query.page || '1'), 10)
+    const leaderboard = await userService.getGlobalLeaderboard(limit, page)
+    res.json({ leaderboard })
   } catch (err) {
     next(err)
   }

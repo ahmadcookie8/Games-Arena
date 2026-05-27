@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
+import { useSocket } from '../hooks/useSocket'
 import api from '../lib/api'
 
 interface LeaderboardEntry {
@@ -12,18 +13,30 @@ interface LeaderboardEntry {
 
 export default function Leaderboard() {
   const { user } = useAuth()
+  const { on } = useSocket()
   const [entries, setEntries] = useState<LeaderboardEntry[]>([])
-  const gameType = 'ticTacToe'
+
+  const fetchLeaderboard = useCallback(() => {
+    void api.get('/api/leaderboards').then((res) => setEntries(res.data.leaderboard || []))
+  }, [])
 
   useEffect(() => {
-    api.get(`/api/leaderboards/${gameType}`).then((res) => setEntries(res.data.leaderboard || []))
-  }, [gameType])
+    fetchLeaderboard()
+  }, [fetchLeaderboard])
+
+  useEffect(() => {
+    return on('gamesChanged', () => {
+      fetchLeaderboard()
+    })
+  }, [fetchLeaderboard, on])
 
   return (
     <div className="rounded-2xl border border-border bg-surface p-4 shadow-sm">
       <div className="mb-4 flex items-center justify-between gap-3">
-        <h3 className="text-base font-semibold text-text-primary">Leaderboard</h3>
-        <span className="rounded-full bg-accent-subtle px-2.5 py-0.5 text-xs font-medium text-accent">Tic Tac Toe</span>
+        <div>
+          <h3 className="text-base font-semibold text-text-primary">Global Leaderboard</h3>
+          <p className="text-xs text-text-muted">Wins across all completed games</p>
+        </div>
       </div>
 
       <div className="space-y-1">

@@ -11,6 +11,7 @@ import { Uno } from '../games/Uno'
 import { President } from '../games/President'
 import { Wisecracker, WisecrackerAction, WisecrackerState } from '../games/Wisecracker'
 import { emitGameOver, emitGameUpdated, emitGamesChanged, emitMoveMade } from './socketNotifier'
+import { userService } from './userService'
 
 function generateGameCode(): string {
   return Math.random().toString(36).substring(2, 8).toUpperCase()
@@ -196,6 +197,11 @@ class GameService {
 
     await game.save()
     await this.cacheGame(game)
+
+    if (game.status === 'completed') {
+      await this.updateStatsForCompletedGame(game)
+    }
+
     emitMoveMade(game, move)
     emitGameUpdated(game)
     emitGamesChanged(game)
@@ -254,6 +260,11 @@ class GameService {
 
     await game.save()
     await this.cacheGame(game)
+
+    if (game.status === 'completed') {
+      await this.updateStatsForCompletedGame(game)
+    }
+
     emitMoveMade(game, Wisecracker.getMoveDescription(action))
     emitGameUpdated(game)
     emitGamesChanged(game)
@@ -282,6 +293,11 @@ class GameService {
     }
     await game.save()
     await redisDel(`game:${game.gameType}:${gameId}`)
+    await userService.updateStatsAfterGame({
+      winnerId: opponent.userId.toString(),
+      loserIds: [userId],
+    })
+    await userService.invalidateLeaderboardCache(game.gameType)
     emitGameUpdated(game)
     emitGamesChanged(game)
 
@@ -345,6 +361,28 @@ class GameService {
 
   shouldSnapshot(moveCount: number): boolean {
     return moveCount % SNAPSHOT_INTERVAL === 0
+  }
+
+  private async updateStatsForCompletedGame(game: IGameDocument): Promise<void> {
+    if (!game.result) {
+      return
+    }
+
+    if (game.result.isDraw) {
+      await userService.updateStatsAfterGame({
+        drawPlayerIds: game.players.map((player) => player.userId.toString()),
+      })
+    } else if (game.result.winner) {
+      const winnerId = game.result.winner.toString()
+      await userService.updateStatsAfterGame({
+        winnerId,
+        loserIds: game.players
+          .map((player) => player.userId.toString())
+          .filter((playerId) => playerId !== winnerId),
+      })
+    }
+
+    await userService.invalidateLeaderboardCache(game.gameType)
   }
 }
 
