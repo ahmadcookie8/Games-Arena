@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  node:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - MONGODB_URI=${MONGODB_URI}
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET}
+      - PORT=3000
+    depends_on:
+      - redis
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - app-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+volumes:
+  redis-data:
+
+networks:
+  app-network:
+    driver: bridge

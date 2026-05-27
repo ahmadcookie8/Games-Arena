@@ -1,0 +1,38 @@
+name: Deploy Backend to EC2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Build Docker image
+        run: |
+          cd backend
+          docker build -t multiplayer-games:${{ github.sha }} .
+          docker tag multiplayer-games:${{ github.sha }} multiplayer-games:latest
+
+      - name: Push to Docker Hub
+        run: |
+          echo ${{ secrets.DOCKER_HUB_PASSWORD }} | docker login -u ${{ secrets.DOCKER_HUB_USERNAME }} --password-stdin
+          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/multiplayer-games:latest
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script: |
+            cd /home/ec2-user/multiplayer-games
+            git pull origin main
+            docker pull ${{ secrets.DOCKER_HUB_USERNAME }}/multiplayer-games:latest
+            docker-compose down
+            docker-compose up -d
