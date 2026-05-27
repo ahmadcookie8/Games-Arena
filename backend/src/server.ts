@@ -97,9 +97,9 @@ io.on('connection', (socket) => {
     }
   })
 
-  socket.on('makeMove', async ({ gameId, move }: { gameId: string; move: string }, callback?: (response: { success: boolean; game?: unknown; error?: string }) => void) => {
+  socket.on('makeMove', async ({ gameId, move }: { gameId: string; move: unknown }, callback?: (response: { success: boolean; game?: unknown; error?: string }) => void) => {
     try {
-      const game = await gameService.makeTicTacToeMove(gameId, user.userId, move)
+      const game = await gameService.makeMove(gameId, user.userId, move)
       callback?.({ success: true, game })
     } catch (err) {
       callback?.({ success: false, error: err instanceof Error ? err.message : 'Move failed' })

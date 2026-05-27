@@ -1,4 +1,4 @@
-export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president'
+export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker'
 export type GameStatus = 'active' | 'paused' | 'completed' | 'abandoned'
 export type WinType = 'checkmate' | 'resignation' | 'timeout' | 'draw'
 

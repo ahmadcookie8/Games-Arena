@@ -4,20 +4,30 @@ import { useGameState } from '../hooks/useGameState'
 import { useSocket } from '../hooks/useSocket'
 import { useAuth } from '../hooks/useAuth'
 import TicTacToeBoard from '../components/TicTacToeBoard'
+import WisecrackerBoard from '../components/WisecrackerBoard'
 import MoveHistory from '../components/MoveHistory'
 import PlayerCard from '../components/PlayerCard'
 import { Game } from '../types/game'
+import { getGameLabel } from '../lib/gameRules'
+
+interface MoveResponse {
+  success: boolean
+  game?: Game
+  error?: string
+}
 
 export default function GameBoard() {
   const { gameId } = useParams<{ gameId: string }>()
   const navigate = useNavigate()
   const { user } = useAuth()
   const { game, loading, setGame } = useGameState(gameId)
-  const { emit, on } = useSocket()
+  const { emit, on, connected } = useSocket()
 
   useEffect(() => {
-    if (!gameId) return
-    emit('joinRoom', { gameId })
+    if (!gameId || !connected) return
+    emit('joinRoom', { gameId }, (res: { game?: Game; error?: string }) => {
+      if (res.game) setGame(res.game)
+    })
 
     const offGameUpdated = on('gameUpdated', (data: unknown) => {
       const { game: updatedGame } = data as { game: Game }
@@ -39,20 +49,28 @@ export default function GameBoard() {
       offMoveMade()
       offGameOver()
     }
-  }, [gameId])
+  }, [gameId, connected, emit, on, setGame])
 
-  function handleMove(move: string) {
-    emit('makeMove', { gameId, move }, (res: { success: boolean; game?: Game; error?: string }) => {
-      if (res.game) setGame(res.game)
-      if (!res.success) alert(res.error)
+  function handleMove(move: unknown): Promise<MoveResponse> {
+    return new Promise((resolve) => {
+      emit('makeMove', { gameId, move }, (res: MoveResponse) => {
+        if (res.game) setGame(res.game)
+        if (!res.success) alert(res.error)
+        resolve(res)
+      })
     })
+  }
+
+  function handleTicTacToeMove(move: string) {
+    void handleMove(move)
   }
 
   if (loading) return <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white">Loading...</div>
   if (!game) return <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white">Game not found</div>
 
   const myIndex = game.players.findIndex((p) => p.userId === user?._id)
-  const isWaitingForPlayer = game.players.length < 2
+  const minPlayers = game.gameType === 'wisecracker' ? 3 : 2
+  const isWaitingForPlayer = game.players.length < minPlayers && game.gameType !== 'wisecracker'
   const isCompleted = game.status === 'completed'
   const isMyTurn = !isWaitingForPlayer && !isCompleted && game.currentTurnIndex === myIndex
   const currentPlayer = game.players[game.currentTurnIndex]
@@ -67,11 +85,11 @@ export default function GameBoard() {
       <header className="flex justify-between items-center mb-6">
         <button onClick={() => navigate('/')} className="text-gray-400 hover:text-white">← Back</button>
         <div className="text-center">
-          <h1 className="text-xl font-semibold">Tic Tac Toe</h1>
+          <h1 className="text-xl font-semibold">{getGameLabel(game.gameType)}</h1>
           <p className="text-sm text-gray-400">Code: {game.gameCode}</p>
         </div>
         <div className={`px-3 py-1 rounded-full text-sm ${isMyTurn ? 'bg-green-600' : 'bg-gray-700'}`}>
-          {isCompleted ? resultText : isWaitingForPlayer ? 'Waiting for player' : isMyTurn ? 'Your turn' : `${currentPlayer?.username}'s turn`}
+          {game.gameType === 'wisecracker' ? game.status : isCompleted ? resultText : isWaitingForPlayer ? 'Waiting for player' : isMyTurn ? 'Your turn' : `${currentPlayer?.username}'s turn`}
         </div>
       </header>
 
@@ -87,7 +105,8 @@ export default function GameBoard() {
               Game over: {resultText}
             </div>
           )}
-          <TicTacToeBoard gameState={game.gameState} isMyTurn={isMyTurn} onMove={handleMove} />
+          {game.gameType === 'ticTacToe' && <TicTacToeBoard gameState={game.gameState} isMyTurn={isMyTurn} onMove={handleTicTacToeMove} />}
+          {game.gameType === 'wisecracker' && <WisecrackerBoard game={game} user={user} onMove={handleMove} />}
         </div>
         <aside className="w-64">
           <div className="space-y-2 mb-4">

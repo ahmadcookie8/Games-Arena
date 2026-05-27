@@ -1,4 +1,4 @@
-export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president'
+export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker'
 export type GameStatus = 'active' | 'paused' | 'completed' | 'abandoned'
 
 export interface Player {
@@ -34,4 +34,24 @@ export interface Game {
     isDraw: boolean
     winType: string
   }
+}
+
+export type WisecrackerPhase = 'lobby' | 'prompt' | 'answering' | 'revealing' | 'roundResult' | 'completed'
+
+export interface WisecrackerState {
+  phase: WisecrackerPhase
+  hostUserId: string
+  maxScore: number
+  chooserUserId: string | null
+  chooserIndex: number
+  activePlayerIds: string[]
+  waitingPlayerIds: string[]
+  prompt: string
+  answerSlots: number
+  submittedAnswers: Record<string, string[]>
+  answerOrder: string[]
+  revealedCount: number
+  scores: Record<string, number>
+  roundWinnerUserId: string | null
+  matchWinnerUserId: string | null
 }

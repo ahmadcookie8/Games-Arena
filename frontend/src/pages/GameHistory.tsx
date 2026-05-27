@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { Game, GameType } from '../types/game'
 import api from '../lib/api'
+import { getGameLabel } from '../lib/gameRules'
 
 export default function GameHistory() {
   const { user } = useAuth()
@@ -26,13 +27,13 @@ export default function GameHistory() {
       </header>
 
       <div className="flex gap-2 mb-6">
-        {(['all', 'chess', 'ticTacToe', 'checkers', 'uno', 'president'] as const).map((type) => (
+        {(['all', 'chess', 'ticTacToe', 'wisecracker', 'checkers', 'uno', 'president'] as const).map((type) => (
           <button
             key={type}
             onClick={() => setFilter(type)}
-            className={`px-3 py-1 rounded-full text-sm capitalize ${filter === type ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}
+            className={`px-3 py-1 rounded-full text-sm ${filter === type ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}
           >
-            {type}
+            {type === 'all' ? 'All' : getGameLabel(type)}
           </button>
         ))}
       </div>
@@ -44,7 +45,7 @@ export default function GameHistory() {
             className="flex items-center justify-between bg-gray-800 rounded-xl px-4 py-3"
           >
             <div>
-              <span className="font-medium capitalize">{game.gameType}</span>
+              <span className="font-medium">{getGameLabel(game.gameType)}</span>
               <span className="ml-3 text-sm text-gray-400">{game.players.map((p) => p.username).join(' vs ')}</span>
             </div>
             <div className="flex items-center gap-4">

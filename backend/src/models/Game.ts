@@ -1,7 +1,7 @@
 import mongoose, { Schema, Document } from 'mongoose'
 
 export interface IGameDocument extends Document {
-  gameType: 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president'
+  gameType: 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker'
   status: 'active' | 'paused' | 'completed' | 'abandoned'
   gameCode: string
   players: Array<{
@@ -44,7 +44,7 @@ export interface IGameDocument extends Document {
 
 const GameSchema = new Schema<IGameDocument>(
   {
-    gameType: { type: String, enum: ['chess', 'checkers', 'ticTacToe', 'uno', 'president'], required: true },
+    gameType: { type: String, enum: ['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker'], required: true },
     status: { type: String, enum: ['active', 'paused', 'completed', 'abandoned'], default: 'active' },
     gameCode: { type: String, required: true, unique: true },
     players: [

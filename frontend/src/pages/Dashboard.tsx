@@ -5,8 +5,9 @@ import { Game, GameType } from '../types/game'
 import api from '../lib/api'
 import Leaderboard from '../components/Leaderboard'
 import { useSocket } from '../hooks/useSocket'
+import { getGameLabel } from '../lib/gameRules'
 
-const GAME_TYPES: GameType[] = ['ticTacToe']
+const GAME_TYPES: GameType[] = ['ticTacToe', 'wisecracker']
 
 export default function Dashboard() {
   const { user, logout } = useAuth()
@@ -65,9 +66,9 @@ export default function Dashboard() {
                 <button
                   key={type}
                   onClick={() => handleCreate(type)}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg capitalize"
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg"
                 >
-                  {type}
+                  {getGameLabel(type)}
                 </button>
               ))}
             </div>
@@ -95,10 +96,13 @@ export default function Dashboard() {
                   <button
                     key={game._id}
                     onClick={() => navigate(`/game/${game._id}`)}
-                    className="w-full flex justify-between items-center px-4 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg"
+                    className="w-full flex justify-between items-center gap-4 px-4 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg text-left"
                   >
-                    <span className="font-medium">Tic Tac Toe</span>
-                    <span className="text-gray-400 text-sm">{game.gameCode}</span>
+                    <span>
+                      <span className="block font-medium">{getGameLabel(game.gameType)}</span>
+                      <span className="block text-xs text-gray-400">{game.players.length} player{game.players.length === 1 ? '' : 's'}</span>
+                    </span>
+                    <span className="font-mono text-gray-400 text-sm">{game.gameCode}</span>
                   </button>
                 ))}
               </div>
@@ -109,7 +113,7 @@ export default function Dashboard() {
             <h2 className="text-xl font-semibold mb-4">Completed Games</h2>
             {games.completed.slice(0, 5).map((game) => (
               <div key={game._id} className="flex justify-between items-center py-2 border-b border-gray-700">
-                <span className="capitalize">{game.gameType}</span>
+                <span>{getGameLabel(game.gameType)}</span>
                 <span className={`text-sm ${game.result?.winnerName === user?.username ? 'text-green-400' : 'text-red-400'}`}>
                   {game.result?.isDraw ? 'Draw' : game.result?.winnerName === user?.username ? 'Win' : 'Loss'}
                 </span>

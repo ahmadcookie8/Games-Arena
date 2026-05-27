@@ -1,14 +1,24 @@
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { Socket } from 'socket.io-client'
 import { connectSocket, disconnectSocket } from '../lib/socket'
 
 export function useSocket() {
   const socketRef = useRef<Socket | null>(null)
+  const [connected, setConnected] = useState(false)
 
   useEffect(() => {
-    socketRef.current = connectSocket()
+    const socket = connectSocket()
+    socketRef.current = socket
+    setConnected(socket.connected)
+
+    const handleConnect = () => setConnected(true)
+    const handleDisconnect = () => setConnected(false)
+    socket.on('connect', handleConnect)
+    socket.on('disconnect', handleDisconnect)
 
     return () => {
+      socket.off('connect', handleConnect)
+      socket.off('disconnect', handleDisconnect)
       disconnectSocket()
     }
   }, [])
@@ -24,5 +34,5 @@ export function useSocket() {
     }
   }, [])
 
-  return { socket: socketRef.current, emit, on }
+  return { socket: socketRef.current, emit, on, connected }
 }

@@ -9,19 +9,21 @@ import { Chess } from '../games/Chess'
 import { Checkers } from '../games/Checkers'
 import { Uno } from '../games/Uno'
 import { President } from '../games/President'
+import { Wisecracker, WisecrackerAction, WisecrackerState } from '../games/Wisecracker'
 import { emitGameOver, emitGameUpdated, emitGamesChanged, emitMoveMade } from './socketNotifier'
 
 function generateGameCode(): string {
   return Math.random().toString(36).substring(2, 8).toUpperCase()
 }
 
-function getInitialState(gameType: GameType): unknown {
+function getInitialState(gameType: GameType, hostUserId: string): unknown {
   switch (gameType) {
     case 'ticTacToe': return TicTacToe.createInitialState()
     case 'chess': return Chess.createInitialState()
     case 'checkers': return Checkers.createInitialState()
     case 'uno': return Uno.createInitialState(2)
     case 'president': return President.createInitialState(5)
+    case 'wisecracker': return Wisecracker.createInitialState(hostUserId)
   }
 }
 
@@ -30,7 +32,7 @@ const SNAPSHOT_INTERVAL = 10
 class GameService {
   async createGame(userId: string, username: string, gameType: GameType, opponentUserId?: string): Promise<IGameDocument> {
     const gameCode = generateGameCode()
-    const initialState = getInitialState(gameType)
+    const initialState = getInitialState(gameType, userId)
 
     const game = await Game.create({
       gameType,
@@ -74,8 +76,9 @@ class GameService {
   async joinGame(gameCode: string, userId: string, username: string): Promise<IGameDocument> {
     const game = await Game.findOne({ gameCode })
     if (!game) throw new NotFoundError('Game')
-    if (game.players.length >= 2) throw new BadRequestError('Game is full')
     if (game.players.some((p) => p.userId.toString() === userId)) throw new BadRequestError('Already in this game')
+    if (game.gameType !== 'wisecracker' && game.players.length >= 2) throw new BadRequestError('Game is full')
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
 
     game.players.push({
       userId: new mongoose.Types.ObjectId(userId),
@@ -86,6 +89,9 @@ class GameService {
     game.players.forEach((player, index) => {
       player.index = index
     })
+    if (game.gameType === 'wisecracker') {
+      game.gameState = Wisecracker.addPlayer(game.gameState as unknown as WisecrackerState, userId) as unknown as Record<string, unknown>
+    }
     await game.save()
 
     await this.cacheGame(game)
@@ -93,6 +99,22 @@ class GameService {
     emitGamesChanged(game)
 
     return game
+  }
+
+  async makeMove(gameId: string, userId: string, move: unknown): Promise<IGameDocument> {
+    const game = await Game.findById(gameId)
+    if (!game) throw new NotFoundError('Game')
+
+    if (game.gameType === 'ticTacToe') {
+      if (typeof move !== 'string') throw new BadRequestError('Invalid Tic Tac Toe move')
+      return this.makeTicTacToeMoveOnGame(game, userId, move)
+    }
+
+    if (game.gameType === 'wisecracker') {
+      return this.makeWisecrackerMoveOnGame(game, userId, move)
+    }
+
+    throw new BadRequestError('Only Tic Tac Toe and Wisecracker are available right now')
   }
 
   async setPlayerConnection(gameId: string, userId: string, isConnected: boolean): Promise<IGameDocument | null> {
@@ -120,6 +142,10 @@ class GameService {
   async makeTicTacToeMove(gameId: string, userId: string, move: string): Promise<IGameDocument> {
     const game = await Game.findById(gameId)
     if (!game) throw new NotFoundError('Game')
+    return this.makeTicTacToeMoveOnGame(game, userId, move)
+  }
+
+  private async makeTicTacToeMoveOnGame(game: IGameDocument, userId: string, move: string): Promise<IGameDocument> {
     if (game.gameType !== 'ticTacToe') throw new BadRequestError('Only Tic Tac Toe is available right now')
     if (game.status !== 'active') throw new BadRequestError('Game is not active')
     if (game.players.length !== 2) throw new BadRequestError('Waiting for another player')
@@ -181,6 +207,64 @@ class GameService {
     return game
   }
 
+  private async makeWisecrackerMoveOnGame(game: IGameDocument, userId: string, move: unknown): Promise<IGameDocument> {
+    const action = parseWisecrackerAction(move)
+    if (game.status !== 'active' && !(game.status === 'completed' && action.type === 'returnToLobby')) {
+      throw new BadRequestError('Game is not active')
+    }
+    const playerIndex = game.players.findIndex((p) => p.userId.toString() === userId)
+    if (playerIndex === -1) throw new BadRequestError('You are not in this game')
+
+    const players = game.players.map((player) => ({
+      userId: player.userId.toString(),
+      username: player.username,
+    }))
+    const nextState = Wisecracker.applyAction(game.gameState as unknown as WisecrackerState, action, userId, players)
+    const player = game.players[playerIndex]
+
+    game.gameState = nextState as unknown as Record<string, unknown>
+    game.currentTurn = nextState.chooserUserId ? new mongoose.Types.ObjectId(nextState.chooserUserId) : player.userId
+    game.currentTurnIndex = nextState.chooserUserId
+      ? Math.max(game.players.findIndex((p) => p.userId.toString() === nextState.chooserUserId), 0)
+      : 0
+    game.moveHistory.push({
+      moveNumber: game.moveHistory.length + 1,
+      playerId: player.userId,
+      playerName: player.username,
+      move: Wisecracker.getMoveDescription(action),
+      timestamp: new Date(),
+    })
+    game.lastMoveAt = new Date()
+
+    if (nextState.phase === 'completed' && nextState.matchWinnerUserId) {
+      const winner = game.players.find((p) => p.userId.toString() === nextState.matchWinnerUserId)
+      game.status = 'completed'
+      game.completedAt = new Date()
+      game.result = {
+        winner: winner?.userId,
+        winnerName: winner?.username,
+        isDraw: false,
+        winType: 'score_limit',
+      }
+    } else if (action.type === 'returnToLobby') {
+      game.status = 'active'
+      game.completedAt = undefined
+      game.result = undefined
+    }
+
+    await game.save()
+    await this.cacheGame(game)
+    emitMoveMade(game, Wisecracker.getMoveDescription(action))
+    emitGameUpdated(game)
+    emitGamesChanged(game)
+
+    if (game.status === 'completed') {
+      emitGameOver(game)
+    }
+
+    return game
+  }
+
   async resignGame(gameId: string, userId: string): Promise<{ winner: string; reason: string }> {
     const game = await Game.findById(gameId)
     if (!game) throw new NotFoundError('Game')
@@ -217,7 +301,9 @@ class GameService {
       game.gameState = snapshot.gameState
     }
 
-    game.status = 'active'
+    if (game.status !== 'completed') {
+      game.status = 'active'
+    }
     await game.save()
 
     await redisSet(`game:${game.gameType}:${gameId}`, {
@@ -263,3 +349,29 @@ class GameService {
 }
 
 export const gameService = new GameService()
+
+function parseWisecrackerAction(move: unknown): WisecrackerAction {
+  if (!move || typeof move !== 'object') throw new BadRequestError('Invalid Wisecracker action')
+  const action = move as Record<string, unknown>
+
+  switch (action.type) {
+    case 'startMatch':
+      return { type: 'startMatch', maxScore: typeof action.maxScore === 'number' ? action.maxScore : Number(action.maxScore) }
+    case 'refreshPrompt':
+      return { type: 'refreshPrompt' }
+    case 'setPrompt':
+      return { type: 'setPrompt', prompt: String(action.prompt || '') }
+    case 'submitAnswers':
+      return { type: 'submitAnswers', answers: Array.isArray(action.answers) ? action.answers.map(String) : [] }
+    case 'revealNextAnswer':
+      return { type: 'revealNextAnswer' }
+    case 'selectRoundWinner':
+      return { type: 'selectRoundWinner', userId: String(action.userId || '') }
+    case 'startNextRound':
+      return { type: 'startNextRound' }
+    case 'returnToLobby':
+      return { type: 'returnToLobby' }
+    default:
+      throw new BadRequestError('Unknown Wisecracker action')
+  }
+}
