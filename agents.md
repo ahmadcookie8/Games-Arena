@@ -265,6 +265,15 @@ Important local note:
 - `backend/docker-compose.yml` should not force production cookies during local HTTP development.
 - The current setup uses development mode locally so the auth cookie is usable on `http://localhost`.
 
+Current public deployment layout:
+
+- Frontend: `https://games-arena.penguincookie.ca` on Vercel
+- Backend API: `https://api.penguincookie.ca` on EC2 behind Nginx
+- Backend CORS origin in production: `https://games-arena.penguincookie.ca`
+- Vercel frontend env vars should point at `https://api.penguincookie.ca`
+- EC2 Nginx proxies `api.penguincookie.ca` to the Node container on `127.0.0.1:3000`
+- Certbot/Let's Encrypt is used for HTTPS on the API domain
+
 ## Important Practical Notes
 
 1. The `getting_started/` docs are useful context, but they are broader than the current implementation.
@@ -275,6 +284,9 @@ Important local note:
    - the browser is not sending/keeping the cookie, or
    - the wrong database is being used.
 5. The project uses Docker for the backend in development/verification, so rebuilds matter when source changes.
+6. For production deploys, the GitHub Actions backend workflow builds a Docker image, pushes it to Docker Hub, then SSHes into EC2 and runs `docker compose pull` / `docker compose up -d --no-build`.
+7. The EC2 host does not automatically `git pull` repo files during deploy, so host-side config files like `backend/docker-compose.yml` must be synced manually if they change.
+8. `backend/docker-compose.yml` must pass `CORS_ORIGIN` into the container so production CORS follows `games-arena.penguincookie.ca`.
 
 ## Useful Commands
 
@@ -322,4 +334,3 @@ Then inspect:
 - cookie helpers in `backend/src/utils/authToken.ts`
 - client auth in `frontend/src/hooks/useAuth.ts`
 - socket client setup in `frontend/src/lib/socket.ts`
-
