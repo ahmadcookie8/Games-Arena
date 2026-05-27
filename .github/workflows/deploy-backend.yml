@@ -10,29 +10,29 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Build Docker image
         run: |
           cd backend
-          docker build -t multiplayer-games:${{ github.sha }} .
-          docker tag multiplayer-games:${{ github.sha }} multiplayer-games:latest
+          docker build -t ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:latest .
+          docker tag ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:latest ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:${{ github.sha }}
 
       - name: Push to Docker Hub
         run: |
-          echo ${{ secrets.DOCKER_HUB_PASSWORD }} | docker login -u ${{ secrets.DOCKER_HUB_USERNAME }} --password-stdin
-          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/multiplayer-games:latest
+          echo "${{ secrets.DOCKER_HUB_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" --password-stdin
+          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:latest
+          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:${{ github.sha }}
 
       - name: Deploy to EC2
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
+          username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           port: 22
           script: |
-            cd /home/ec2-user/multiplayer-games
-            git pull origin main
-            docker pull ${{ secrets.DOCKER_HUB_USERNAME }}/multiplayer-games:latest
-            docker-compose down
-            docker-compose up -d
+            cd /home/ubuntu/Games-Arena/backend
+            export BACKEND_IMAGE=${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:latest
+            docker compose pull
+            docker compose up -d --no-build
