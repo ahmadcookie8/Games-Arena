@@ -3,7 +3,7 @@ import { GameSnapshot } from '../models/GameSnapshot'
 import mongoose from 'mongoose'
 import { redisGet, redisSet, redisDel } from '../utils/redis'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
-import { GameType } from '../types/game'
+import { GameMode, GameType, TicTacToeDifficulty } from '../types/game'
 import { TicTacToe } from '../games/TicTacToe'
 import { Chess } from '../games/Chess'
 import { Checkers } from '../games/Checkers'
@@ -29,9 +29,112 @@ function getInitialState(gameType: GameType, hostUserId: string): unknown {
 }
 
 const SNAPSHOT_INTERVAL = 10
+const COMPUTER_USER_ID = new mongoose.Types.ObjectId('000000000000000000000000')
+
+interface TicTacToeState {
+  board: (string | null)[]
+  currentSymbol: 'X' | 'O'
+}
+
+function getGameMode(game: IGameDocument): GameMode {
+  return game.metadata?.mode || 'multiplayer'
+}
+
+function getComputerName(difficulty: TicTacToeDifficulty): string {
+  return `Computer (${difficulty[0].toUpperCase()}${difficulty.slice(1)})`
+}
+
+function getAvailableTicTacToeMoves(state: TicTacToeState): string[] {
+  return state.board
+    .map((cell, index) => (cell === null ? String(index) : null))
+    .filter((move): move is string => move !== null)
+}
+
+function chooseRandomMove(moves: string[]): string {
+  return moves[Math.floor(Math.random() * moves.length)]
+}
+
+function findImmediateTicTacToeMove(state: TicTacToeState, symbol: 'X' | 'O'): string | null {
+  const ticTacToe = new TicTacToe([])
+
+  for (const move of getAvailableTicTacToeMoves(state)) {
+    const candidate = ticTacToe.applyMove({ ...state, board: [...state.board], currentSymbol: symbol }, move)
+    const result = ticTacToe.isGameOver(candidate)
+    if (result.isGameOver && !result.isDraw) {
+      return move
+    }
+  }
+
+  return null
+}
+
+function scoreTicTacToeState(state: TicTacToeState, depth: number): number {
+  const result = new TicTacToe([]).isGameOver(state)
+  if (!result.isGameOver || result.isDraw) return 0
+  return result.winner === 1 ? 10 - depth : depth - 10
+}
+
+function minimaxTicTacToe(state: TicTacToeState, depth: number, isMaximizing: boolean): number {
+  const result = new TicTacToe([]).isGameOver(state)
+  if (result.isGameOver) {
+    return scoreTicTacToeState(state, depth)
+  }
+
+  const ticTacToe = new TicTacToe([])
+  const moves = getAvailableTicTacToeMoves(state)
+
+  if (isMaximizing) {
+    let bestScore = -Infinity
+    for (const move of moves) {
+      const nextState = ticTacToe.applyMove({ ...state, board: [...state.board], currentSymbol: 'O' }, move)
+      bestScore = Math.max(bestScore, minimaxTicTacToe(nextState, depth + 1, false))
+    }
+    return bestScore
+  }
+
+  let bestScore = Infinity
+  for (const move of moves) {
+    const nextState = ticTacToe.applyMove({ ...state, board: [...state.board], currentSymbol: 'X' }, move)
+    bestScore = Math.min(bestScore, minimaxTicTacToe(nextState, depth + 1, true))
+  }
+  return bestScore
+}
+
+function chooseHardTicTacToeMove(state: TicTacToeState): string {
+  const moves = getAvailableTicTacToeMoves(state)
+  const ticTacToe = new TicTacToe([])
+  let bestMove = moves[0]
+  let bestScore = -Infinity
+
+  for (const move of moves) {
+    const nextState = ticTacToe.applyMove({ ...state, board: [...state.board], currentSymbol: 'O' }, move)
+    const score = minimaxTicTacToe(nextState, 0, false)
+    if (score > bestScore) {
+      bestScore = score
+      bestMove = move
+    }
+  }
+
+  return bestMove
+}
+
+function chooseComputerTicTacToeMove(state: TicTacToeState, difficulty: TicTacToeDifficulty): string {
+  const moves = getAvailableTicTacToeMoves(state)
+  if (moves.length === 0) throw new BadRequestError('No moves available')
+
+  if (difficulty === 'easy') return chooseRandomMove(moves)
+
+  if (difficulty === 'medium') {
+    return findImmediateTicTacToeMove(state, 'O')
+      || findImmediateTicTacToeMove(state, 'X')
+      || chooseRandomMove(moves)
+  }
+
+  return chooseHardTicTacToeMove(state)
+}
 
 class GameService {
-  async createGame(userId: string, username: string, gameType: GameType, opponentUserId?: string): Promise<IGameDocument> {
+  async createGame(userId: string, username: string, gameType: GameType, _opponentUserId?: string): Promise<IGameDocument> {
     const gameCode = generateGameCode()
     const initialState = getInitialState(gameType, userId)
 
@@ -44,7 +147,7 @@ class GameService {
       gameState: initialState,
       moveHistory: [],
       lastMoveAt: new Date(),
-      metadata: { ratedGame: false },
+      metadata: { ratedGame: false, mode: 'multiplayer' },
     })
 
     await redisSet(`game:${gameType}:${game._id}`, {
@@ -54,6 +157,39 @@ class GameService {
       currentTurnIndex: 0,
       gameState: initialState,
       status: 'active',
+      metadata: game.metadata,
+    })
+
+    emitGamesChanged(game)
+
+    return game
+  }
+
+  async createSinglePlayerGame(userId: string, username: string, gameType: 'ticTacToe', difficulty: TicTacToeDifficulty): Promise<IGameDocument> {
+    const gameCode = generateGameCode()
+    const initialState = TicTacToe.createInitialState()
+
+    const game = await Game.create({
+      gameType,
+      gameCode,
+      players: [{ userId, username, index: 0 }],
+      currentTurnIndex: 0,
+      currentTurn: userId,
+      gameState: initialState,
+      moveHistory: [],
+      startedAt: new Date(),
+      lastMoveAt: new Date(),
+      metadata: { ratedGame: false, mode: 'singlePlayer', difficulty },
+    })
+
+    await redisSet(`game:${gameType}:${game._id}`, {
+      gameId: game._id,
+      gameType,
+      players: game.players,
+      currentTurnIndex: 0,
+      gameState: initialState,
+      status: 'active',
+      metadata: game.metadata,
     })
 
     emitGamesChanged(game)
@@ -65,11 +201,14 @@ class GameService {
     return Game.findById(gameId)
   }
 
-  async listGamesForUser(userId: string): Promise<{ active: IGameDocument[]; waiting: IGameDocument[]; completed: IGameDocument[] }> {
-    const games = await Game.find({ 'players.userId': userId }).sort({ lastMoveAt: -1 }).limit(50)
+  async listGamesForUser(userId: string, mode: GameMode = 'multiplayer'): Promise<{ active: IGameDocument[]; waiting: IGameDocument[]; completed: IGameDocument[] }> {
+    const modeFilter = mode === 'singlePlayer'
+      ? { 'metadata.mode': 'singlePlayer' }
+      : { $or: [{ 'metadata.mode': 'multiplayer' }, { 'metadata.mode': { $exists: false } }] }
+    const games = await Game.find({ 'players.userId': userId, ...modeFilter }).sort({ lastMoveAt: -1 }).limit(50)
     return {
       active: games.filter((g) => g.status === 'active'),
-      waiting: games.filter((g) => g.status === 'active' && g.players.length < 2),
+      waiting: mode === 'singlePlayer' ? [] : games.filter((g) => g.status === 'active' && g.players.length < 2),
       completed: games.filter((g) => g.status === 'completed'),
     }
   }
@@ -148,6 +287,7 @@ class GameService {
 
   private async makeTicTacToeMoveOnGame(game: IGameDocument, userId: string, move: string): Promise<IGameDocument> {
     if (game.gameType !== 'ticTacToe') throw new BadRequestError('Only Tic Tac Toe is available right now')
+    if (getGameMode(game) === 'singlePlayer') throw new BadRequestError('Use the single player move endpoint for solo games')
     if (game.status !== 'active') throw new BadRequestError('Game is not active')
     if (game.players.length !== 2) throw new BadRequestError('Waiting for another player')
 
@@ -206,11 +346,109 @@ class GameService {
     emitGameUpdated(game)
     emitGamesChanged(game)
 
-    if (game.status === 'completed') {
+    if (gameOver.isGameOver) {
       emitGameOver(game)
     }
 
     return game
+  }
+
+  async makeSinglePlayerTicTacToeMove(gameId: string, userId: string, move: string): Promise<IGameDocument> {
+    const game = await Game.findById(gameId)
+    if (!game) throw new NotFoundError('Game')
+    if (game.gameType !== 'ticTacToe') throw new BadRequestError('Only Tic Tac Toe is available right now')
+    if (getGameMode(game) !== 'singlePlayer') throw new BadRequestError('This is not a single player game')
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
+
+    const player = game.players.find((p) => p.userId.toString() === userId)
+    if (!player) throw new BadRequestError('You are not in this game')
+
+    const ticTacToe = new TicTacToe([])
+    const validation = ticTacToe.validateMove(game.gameState, move)
+    if (!validation.isValid) throw new BadRequestError(validation.reason || 'Invalid move')
+
+    const difficulty = game.metadata.difficulty || 'easy'
+    const humanState = ticTacToe.applyMove(game.gameState, move) as unknown as TicTacToeState
+    game.gameState = humanState as unknown as Record<string, unknown>
+    game.moveHistory.push({
+      moveNumber: game.moveHistory.length + 1,
+      playerId: player.userId,
+      playerName: player.username,
+      move,
+      timestamp: new Date(),
+    })
+
+    let gameOver = ticTacToe.isGameOver(humanState)
+    if (gameOver.isGameOver) {
+      this.completeSinglePlayerTicTacToe(game, gameOver)
+    } else {
+      const computerMove = chooseComputerTicTacToeMove(humanState, difficulty)
+      const computerState = ticTacToe.applyMove(humanState, computerMove) as unknown as TicTacToeState
+      game.gameState = computerState as unknown as Record<string, unknown>
+      game.moveHistory.push({
+        moveNumber: game.moveHistory.length + 1,
+        playerId: COMPUTER_USER_ID,
+        playerName: getComputerName(difficulty),
+        move: computerMove,
+        timestamp: new Date(),
+      })
+
+      gameOver = ticTacToe.isGameOver(computerState)
+      if (gameOver.isGameOver) {
+        this.completeSinglePlayerTicTacToe(game, gameOver)
+      } else {
+        game.currentTurnIndex = 0
+        game.currentTurn = player.userId
+      }
+    }
+
+    game.lastMoveAt = new Date()
+    await game.save()
+    await this.cacheGame(game)
+
+    if (gameOver.isGameOver) {
+      await userService.invalidateLeaderboardCache(game.gameType)
+    }
+
+    emitMoveMade(game, move)
+    emitGameUpdated(game)
+    emitGamesChanged(game)
+
+    if (gameOver.isGameOver) {
+      emitGameOver(game)
+    }
+
+    return game
+  }
+
+  private completeSinglePlayerTicTacToe(game: IGameDocument, gameOver: { isDraw?: boolean; winner?: number }): void {
+    const player = game.players[0]
+    const difficulty = game.metadata.difficulty || 'easy'
+    game.status = 'completed'
+    game.completedAt = new Date()
+
+    if (gameOver.isDraw) {
+      game.result = { isDraw: true, winType: 'draw' }
+      return
+    }
+
+    if (gameOver.winner === 0) {
+      game.result = {
+        winner: player.userId,
+        winnerName: player.username,
+        isDraw: false,
+        winType: 'three_in_a_row',
+      }
+      return
+    }
+
+    game.result = {
+      winnerName: getComputerName(difficulty),
+      loser: player.userId,
+      loserName: player.username,
+      isDraw: false,
+      winType: 'three_in_a_row',
+    }
   }
 
   private async makeWisecrackerMoveOnGame(game: IGameDocument, userId: string, move: unknown): Promise<IGameDocument> {
@@ -352,6 +590,7 @@ class GameService {
       currentTurnIndex: game.currentTurnIndex,
       gameState: game.gameState,
       status: 'active',
+      metadata: game.metadata,
     })
 
     return game
@@ -365,6 +604,7 @@ class GameService {
       currentTurnIndex: game.currentTurnIndex,
       gameState: game.gameState,
       status: game.status,
+      metadata: game.metadata,
     })
   }
 
@@ -387,6 +627,10 @@ class GameService {
   }
 
   private async updateStatsForCompletedGame(game: IGameDocument): Promise<void> {
+    if (getGameMode(game) === 'singlePlayer') {
+      return
+    }
+
     if (!game.result) {
       return
     }

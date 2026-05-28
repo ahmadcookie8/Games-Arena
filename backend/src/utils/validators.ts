@@ -16,11 +16,20 @@ export const createGameSchema = z.object({
   opponentUserId: z.string().optional(),
 })
 
+export const createSinglePlayerGameSchema = z.object({
+  gameType: z.literal('ticTacToe'),
+  difficulty: z.enum(['easy', 'medium', 'hard']),
+})
+
 export const joinGameSchema = z.object({
   gameCode: z.string().length(6),
 })
 
 export const makeMoveSchema = z.object({
   gameId: z.string(),
+  move: z.string(),
+})
+
+export const singlePlayerMoveSchema = z.object({
   move: z.string(),
 })

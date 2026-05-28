@@ -1,5 +1,7 @@
 export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker'
 export type GameStatus = 'active' | 'paused' | 'completed' | 'abandoned'
+export type GameMode = 'multiplayer' | 'singlePlayer'
+export type TicTacToeDifficulty = 'easy' | 'medium' | 'hard'
 
 export interface Player {
   userId: string
@@ -33,6 +35,11 @@ export interface Game {
     winnerName?: string
     isDraw: boolean
     winType: string
+  }
+  metadata?: {
+    ratedGame?: boolean
+    mode?: GameMode
+    difficulty?: TicTacToeDifficulty
   }
 }
 

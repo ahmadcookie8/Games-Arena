@@ -3,6 +3,7 @@ import Auth from './pages/Auth'
 import Dashboard from './pages/Dashboard'
 import GameBoard from './pages/GameBoard'
 import GameHistory from './pages/GameHistory'
+import SinglePlayerGame from './pages/SinglePlayerGame'
 import { useAuth } from './hooks/useAuth'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/auth" element={<Auth />} />
         <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
         <Route path="/game/:gameId" element={<ProtectedRoute><GameBoard /></ProtectedRoute>} />
+        <Route path="/single-player/tic-tac-toe/:gameId" element={<ProtectedRoute><SinglePlayerGame /></ProtectedRoute>} />
         <Route path="/history" element={<ProtectedRoute><GameHistory /></ProtectedRoute>} />
       </Routes>
     </BrowserRouter>

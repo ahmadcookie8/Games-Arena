@@ -14,6 +14,12 @@ export interface LeaderboardEntry {
   winRate: number
 }
 
+export interface SinglePlayerLeaderboardEntry extends LeaderboardEntry {
+  difficulty: 'easy' | 'medium' | 'hard'
+  draws: number
+  gamesPlayed: number
+}
+
 interface CompletedGameForLeaderboard {
   players: Array<{
     userId: { toString(): string } | string
@@ -22,6 +28,20 @@ interface CompletedGameForLeaderboard {
   result?: {
     winner?: { toString(): string } | string
     winnerName?: string
+    isDraw: boolean
+  }
+}
+
+interface CompletedSinglePlayerGame {
+  players: Array<{
+    userId: { toString(): string } | string
+    username: string
+  }>
+  metadata?: {
+    difficulty?: 'easy' | 'medium' | 'hard'
+  }
+  result?: {
+    winner?: { toString(): string } | string
     isDraw: boolean
   }
 }
@@ -157,6 +177,76 @@ class UserService {
     return leaderboard.slice(start, start + limit)
   }
 
+  async getSinglePlayerLeaderboard(gameType: 'ticTacToe', limit: number, page: number): Promise<SinglePlayerLeaderboardEntry[]> {
+    const cacheKey = `leaderboard:singlePlayer:${gameType}`
+    const cached = await redisGet<SinglePlayerLeaderboardEntry[]>(cacheKey)
+    if (cached) {
+      const start = (page - 1) * limit
+      return cached.slice(start, start + limit)
+    }
+
+    const games = await Game.find({
+      gameType,
+      status: 'completed',
+      'metadata.mode': 'singlePlayer',
+    })
+      .select('players metadata result')
+      .lean<CompletedSinglePlayerGame[]>()
+
+    const statsByUserAndDifficulty = new Map<string, Omit<SinglePlayerLeaderboardEntry, 'rank' | 'winRate'>>()
+
+    for (const game of games) {
+      const player = game.players[0]
+      if (!player || !game.result) continue
+
+      const difficulty = game.metadata?.difficulty || 'easy'
+      const playerId = String(player.userId)
+      const key = `${playerId}:${difficulty}`
+      const entry = statsByUserAndDifficulty.get(key) || {
+        username: player.username,
+        difficulty,
+        wins: 0,
+        losses: 0,
+        draws: 0,
+        gamesPlayed: 0,
+      }
+
+      entry.username = player.username
+      entry.gamesPlayed += 1
+      if (game.result.isDraw) {
+        entry.draws += 1
+      } else if (game.result.winner && String(game.result.winner) === playerId) {
+        entry.wins += 1
+      } else {
+        entry.losses += 1
+      }
+      statsByUserAndDifficulty.set(key, entry)
+    }
+
+    const difficultyRank = { hard: 3, medium: 2, easy: 1 }
+    const leaderboard = Array.from(statsByUserAndDifficulty.values())
+      .map((entry) => ({
+        ...entry,
+        rank: 0,
+        winRate: entry.gamesPlayed > 0 ? entry.wins / entry.gamesPlayed : 0,
+      }))
+      .sort((left, right) => {
+        if (difficultyRank[right.difficulty] !== difficultyRank[left.difficulty]) {
+          return difficultyRank[right.difficulty] - difficultyRank[left.difficulty]
+        }
+        if (right.wins !== left.wins) return right.wins - left.wins
+        if (right.winRate !== left.winRate) return right.winRate - left.winRate
+        if (left.losses !== right.losses) return left.losses - right.losses
+        return left.username.localeCompare(right.username)
+      })
+      .map((entry, index) => ({ ...entry, rank: index + 1 }))
+
+    await redisSet(cacheKey, leaderboard, LEADERBOARD_TTL)
+
+    const start = (page - 1) * limit
+    return leaderboard.slice(start, start + limit)
+  }
+
   async updateStatsAfterGame({ winnerId, loserIds = [], drawPlayerIds = [] }: UpdateStatsAfterGameOptions): Promise<void> {
     const participantIds = new Set<string>()
 
@@ -190,7 +280,7 @@ class UserService {
   }
 
   async invalidateLeaderboardCache(gameType: string): Promise<void> {
-    await Promise.all([redisDel(GLOBAL_LEADERBOARD_CACHE_KEY), redisDel(`leaderboard:${gameType}`)])
+    await Promise.all([redisDel(GLOBAL_LEADERBOARD_CACHE_KEY), redisDel(`leaderboard:${gameType}`), redisDel(`leaderboard:singlePlayer:${gameType}`)])
   }
 }
 

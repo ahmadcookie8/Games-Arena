@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express'
 import { AuthRequest } from '../middleware/auth'
 import { gameService } from '../services/gameService'
-import { createGameSchema, joinGameSchema } from '../utils/validators'
+import { createGameSchema, createSinglePlayerGameSchema, joinGameSchema, singlePlayerMoveSchema } from '../utils/validators'
 import { NotFoundError } from '../utils/errors'
 
 export async function createGame(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
@@ -9,6 +9,16 @@ export async function createGame(req: AuthRequest, res: Response, next: NextFunc
     const { gameType, opponentUserId } = createGameSchema.parse(req.body)
     const game = await gameService.createGame(req.user!.userId, req.user!.username, gameType, opponentUserId)
     res.status(201).json({ gameId: game._id, gameCode: game.gameCode, players: game.players })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function createSinglePlayerGame(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { gameType, difficulty } = createSinglePlayerGameSchema.parse(req.body)
+    const game = await gameService.createSinglePlayerGame(req.user!.userId, req.user!.username, gameType, difficulty)
+    res.status(201).json({ gameId: game._id, game, gameState: game.gameState, moveHistory: game.moveHistory })
   } catch (err) {
     next(err)
   }
@@ -26,7 +36,8 @@ export async function getGame(req: AuthRequest, res: Response, next: NextFunctio
 
 export async function listGames(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const games = await gameService.listGamesForUser(req.user!.userId)
+    const mode = req.query.mode === 'singlePlayer' ? 'singlePlayer' : 'multiplayer'
+    const games = await gameService.listGamesForUser(req.user!.userId, mode)
     res.json(games)
   } catch (err) {
     next(err)
@@ -38,6 +49,16 @@ export async function joinGame(req: AuthRequest, res: Response, next: NextFuncti
     const { gameCode } = joinGameSchema.parse(req.body)
     const game = await gameService.joinGame(gameCode, req.user!.userId, req.user!.username)
     res.json({ game, gameState: game.gameState })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function makeSinglePlayerMove(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { move } = singlePlayerMoveSchema.parse(req.body)
+    const game = await gameService.makeSinglePlayerTicTacToeMove(req.params.gameId, req.user!.userId, move)
+    res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
   } catch (err) {
     next(err)
   }

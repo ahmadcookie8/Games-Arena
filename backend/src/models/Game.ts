@@ -38,6 +38,8 @@ export interface IGameDocument extends Document {
   }
   metadata: {
     ratedGame: boolean
+    mode?: 'multiplayer' | 'singlePlayer'
+    difficulty?: 'easy' | 'medium' | 'hard'
     tournament?: string
   }
 }
@@ -84,6 +86,8 @@ const GameSchema = new Schema<IGameDocument>(
     },
     metadata: {
       ratedGame: { type: Boolean, default: false },
+      mode: { type: String, enum: ['multiplayer', 'singlePlayer'], default: 'multiplayer' },
+      difficulty: { type: String, enum: ['easy', 'medium', 'hard'] },
       tournament: String,
     },
   },

@@ -149,7 +149,7 @@ export default function GameBoard() {
     try {
       await api.post(`/api/games/${game._id}/close`)
       closeModal()
-      navigate('/', { replace: true })
+      navigate('/?tab=multiplayer', { replace: true })
     } catch (err: unknown) {
       const message = axios.isAxiosError(err)
         ? err.response?.data?.error || err.message || 'Could not close game'
@@ -179,7 +179,7 @@ export default function GameBoard() {
       variant: 'info',
       primaryAction: {
         label: 'Return to dashboard',
-        onClick: () => navigate('/', { replace: true }),
+        onClick: () => navigate('/?tab=multiplayer', { replace: true }),
       },
     })
   }, [game, navigate])
@@ -207,7 +207,7 @@ export default function GameBoard() {
       <main className="relative z-10 mx-auto max-w-7xl px-4 py-6 sm:px-6">
         <div className="mb-6 flex flex-col gap-4 rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-5">
           <button
-            onClick={() => navigate('/')}
+            onClick={() => navigate('/?tab=multiplayer')}
             className="w-fit cursor-pointer rounded-lg px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary"
           >
             Back

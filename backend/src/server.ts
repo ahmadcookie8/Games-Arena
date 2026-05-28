@@ -8,7 +8,7 @@ import { connectMongoDB } from './utils/mongoose'
 import { getRedisClient } from './utils/redis'
 import { gameService } from './services/gameService'
 import { Game } from './models/Game'
-import { getLeaderboard, getLeaderboardByType } from './controllers/userController'
+import { getLeaderboard, getLeaderboardByType, getSinglePlayerLeaderboard } from './controllers/userController'
 import { getTokenFromHeaders, verifyAuthToken } from './utils/authToken'
 import { setSocketServer } from './services/socketNotifier'
 import { AuthPayload } from './types/api'
@@ -57,6 +57,7 @@ app.use('/api/auth', authRoutes)
 app.use('/api/games', gameRoutes)
 app.use('/api/users', userRoutes)
 app.get('/api/leaderboards', getLeaderboard)
+app.get('/api/leaderboards/single-player/ticTacToe', getSinglePlayerLeaderboard)
 app.get('/api/leaderboards/:gameType', getLeaderboardByType)
 
 app.use(errorHandler)

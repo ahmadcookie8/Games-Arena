@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import axios from 'axios'
 import { useAuth } from '../hooks/useAuth'
-import { Game, GameType } from '../types/game'
+import { Game, GameType, TicTacToeDifficulty } from '../types/game'
 import api from '../lib/api'
 import Leaderboard from '../components/Leaderboard'
+import SinglePlayerLeaderboard from '../components/SinglePlayerLeaderboard'
 import Header from '../components/Header'
 import Modal, { ModalVariant } from '../components/Modal'
 import PageBackdrop from '../components/PageBackdrop'
@@ -15,9 +16,18 @@ import ticTacToeThumb from '../assets/game-tic-tac-toe.png'
 import wisecrackerThumb from '../assets/game-wisecracker.png'
 
 const GAME_TYPES: GameType[] = ['ticTacToe', 'wisecracker']
+const DIFFICULTIES: TicTacToeDifficulty[] = ['easy', 'medium', 'hard']
 const THUMBNAILS: Partial<Record<GameType, string>> = {
   ticTacToe: ticTacToeThumb,
   wisecracker: wisecrackerThumb,
+}
+
+type DashboardTab = 'multiplayer' | 'singlePlayer'
+
+interface GameLists {
+  active: Game[]
+  waiting: Game[]
+  completed: Game[]
 }
 
 interface ModalState {
@@ -35,9 +45,12 @@ interface ModalState {
 }
 
 function getCloseGameModal(game: Game, onConfirm: () => void, onCancel: () => void): ModalState {
+  const isSinglePlayer = game.metadata?.mode === 'singlePlayer'
   return {
-    title: 'Close this game?',
-    message: `This will close the ${getGameLabel(game.gameType)} room and remove it from your active games list. Other players will no longer be able to join or continue it.`,
+    title: isSinglePlayer ? 'Close this solo game?' : 'Close this game?',
+    message: isSinglePlayer
+      ? 'This will close the active solo match and remove it from your Single Player active games list.'
+      : `This will close the ${getGameLabel(game.gameType)} room and remove it from your active games list. Other players will no longer be able to join or continue it.`,
     variant: 'warning',
     primaryAction: {
       label: 'Close game',
@@ -50,27 +63,47 @@ function getCloseGameModal(game: Game, onConfirm: () => void, onCancel: () => vo
   }
 }
 
+function getDifficultyLabel(difficulty?: TicTacToeDifficulty): string {
+  if (!difficulty) return 'Easy'
+  return `${difficulty[0].toUpperCase()}${difficulty.slice(1)}`
+}
+
 export default function Dashboard() {
   useReveal()
   const { user } = useAuth()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const { on } = useSocket()
-  const [games, setGames] = useState<{ active: Game[]; waiting: Game[]; completed: Game[] }>({ active: [], waiting: [], completed: [] })
+  const activeTab: DashboardTab = searchParams.get('tab') === 'singlePlayer' ? 'singlePlayer' : 'multiplayer'
+  const [games, setGames] = useState<GameLists>({ active: [], waiting: [], completed: [] })
+  const [soloGames, setSoloGames] = useState<GameLists>({ active: [], waiting: [], completed: [] })
   const [joinCode, setJoinCode] = useState('')
+  const [difficulty, setDifficulty] = useState<TicTacToeDifficulty>('easy')
   const [modal, setModal] = useState<ModalState | null>(null)
+
+  function setActiveTab(tab: DashboardTab) {
+    navigate(tab === 'singlePlayer' ? '/?tab=singlePlayer' : '/?tab=multiplayer')
+  }
 
   async function fetchGames() {
     const res = await api.get('/api/games')
     setGames(res.data)
   }
 
+  async function fetchSoloGames() {
+    const res = await api.get('/api/games?mode=singlePlayer')
+    setSoloGames(res.data)
+  }
+
   useEffect(() => {
-    fetchGames()
+    void fetchGames()
+    void fetchSoloGames()
   }, [])
 
   useEffect(() => {
     return on('gamesChanged', () => {
-      fetchGames()
+      void fetchGames()
+      void fetchSoloGames()
     })
   }, [on])
 
@@ -80,6 +113,15 @@ export default function Dashboard() {
       navigate(`/game/${res.data.gameId}`)
     } catch (err: unknown) {
       showGenericErrorModal(err, `Could not create ${getGameLabel(gameType)}`)
+    }
+  }
+
+  async function handleCreateSolo() {
+    try {
+      const res = await api.post('/api/games/single-player/create', { gameType: 'ticTacToe', difficulty })
+      navigate(`/single-player/tic-tac-toe/${res.data.gameId}`)
+    } catch (err: unknown) {
+      showGenericErrorModal(err, 'Could not create solo Tic Tac Toe')
     }
   }
 
@@ -98,7 +140,11 @@ export default function Dashboard() {
     try {
       await api.post(`/api/games/${game._id}/close`)
       closeModal()
-      await fetchGames()
+      if (game.metadata?.mode === 'singlePlayer') {
+        await fetchSoloGames()
+      } else {
+        await fetchGames()
+      }
     } catch (err: unknown) {
       showGenericErrorModal(err, 'Could not close game')
     }
@@ -186,6 +232,163 @@ export default function Dashboard() {
     })
   }
 
+  function renderMultiplayer() {
+    return (
+      <>
+        <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
+          <h2 className="mb-3 text-lg font-semibold text-text-primary">Play Now</h2>
+          <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {GAME_TYPES.map((type) => (
+              <button
+                key={type}
+                onClick={() => handleCreate(type)}
+                className="card-glow group cursor-pointer overflow-hidden rounded-xl border border-border bg-elevated text-left shadow-sm"
+              >
+                <img src={THUMBNAILS[type]} alt="" className="h-28 w-full object-cover transition-transform duration-100 group-hover:scale-[1.02]" />
+                <div className="flex items-center justify-between gap-3 p-3">
+                  <span>
+                    <span className="block text-base font-semibold text-text-primary">{getGameLabel(type)}</span>
+                    <span className="block text-xs text-text-muted">Create a multiplayer room</span>
+                  </span>
+                  <span className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-text-on-accent shadow-accent">Create</span>
+                </div>
+              </button>
+            ))}
+          </div>
+          <form onSubmit={handleJoin} className="flex flex-col gap-2 sm:flex-row">
+            <input
+              value={joinCode}
+              onChange={(e) => setJoinCode(e.target.value)}
+              placeholder="Game code (e.g. ABC123)"
+              maxLength={6}
+              className="min-h-11 flex-1 rounded-lg border border-border bg-overlay px-3 py-2 font-mono text-text-primary placeholder:font-sans placeholder:text-text-muted transition-colors duration-150 focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-[var(--border-focus)]/20"
+            />
+            <button type="submit" className="min-h-11 cursor-pointer rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:opacity-90">
+              Join
+            </button>
+          </form>
+        </section>
+
+        <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
+          <h2 className="mb-4 text-lg font-semibold text-text-primary">Active Games ({games.active.length})</h2>
+          {games.active.length === 0 ? (
+            <p className="rounded-lg border border-border bg-page px-4 py-6 text-center text-sm text-text-muted">No active games. Create one above.</p>
+          ) : (
+            <div className="space-y-2">
+              {games.active.map((game) => (
+                <div key={game._id} className="card-glow flex items-center justify-between gap-4 rounded-xl border border-border bg-elevated px-4 py-3">
+                  <button onClick={() => navigate(`/game/${game._id}`)} className="min-w-0 flex-1 cursor-pointer text-left">
+                    <span className="block truncate font-medium text-text-primary">{getGameLabel(game.gameType)}</span>
+                    <span className="block text-xs text-text-muted">{game.players.length} player{game.players.length === 1 ? '' : 's'}</span>
+                  </button>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full bg-accent-subtle px-2.5 py-0.5 font-mono text-xs font-medium text-accent">{game.gameCode}</span>
+                    <button
+                      type="button"
+                      onClick={() => promptCloseGame(game)}
+                      className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-1.5 text-xs font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-text-primary">Completed Games</h2>
+            <button onClick={() => navigate('/history')} className="cursor-pointer rounded-lg px-3 py-1.5 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary">
+              View all
+            </button>
+          </div>
+          <CompletedGamesList games={games.completed} username={user?.username} />
+        </section>
+      </>
+    )
+  }
+
+  function renderSinglePlayer() {
+    return (
+      <>
+        <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
+          <h2 className="mb-3 text-lg font-semibold text-text-primary">Solo Tic Tac Toe</h2>
+          <div className="card-glow overflow-hidden rounded-xl border border-border bg-elevated shadow-sm">
+            <img src={ticTacToeThumb} alt="" className="h-32 w-full object-cover" />
+            <div className="space-y-4 p-4">
+              <div>
+                <span className="block text-base font-semibold text-text-primary">Tic Tac Toe</span>
+                <span className="block text-xs text-text-muted">Play against the computer and save your result</span>
+              </div>
+              <div className="flex flex-wrap gap-2" aria-label="Difficulty">
+                {DIFFICULTIES.map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    onClick={() => setDifficulty(level)}
+                    className={`min-h-10 cursor-pointer rounded-lg px-3 py-2 text-sm font-medium capitalize transition-colors duration-150 ${
+                      difficulty === level ? 'bg-accent text-text-on-accent shadow-accent' : 'bg-page text-text-secondary hover:bg-overlay hover:text-text-primary'
+                    }`}
+                  >
+                    {level}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={handleCreateSolo}
+                className="min-h-11 w-full cursor-pointer rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:opacity-90"
+              >
+                Start Solo Game
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
+          <h2 className="mb-4 text-lg font-semibold text-text-primary">Active Solo Games ({soloGames.active.length})</h2>
+          {soloGames.active.length === 0 ? (
+            <p className="rounded-lg border border-border bg-page px-4 py-6 text-center text-sm text-text-muted">No active solo games. Start one above.</p>
+          ) : (
+            <div className="space-y-2">
+              {soloGames.active.map((game) => (
+                <div key={game._id} className="card-glow flex items-center justify-between gap-4 rounded-xl border border-border bg-elevated px-4 py-3">
+                  <button onClick={() => navigate(`/single-player/tic-tac-toe/${game._id}`)} className="min-w-0 flex-1 cursor-pointer text-left">
+                    <span className="block truncate font-medium text-text-primary">Tic Tac Toe</span>
+                    <span className="block text-xs text-text-muted">{getDifficultyLabel(game.metadata?.difficulty)} difficulty</span>
+                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/single-player/tic-tac-toe/${game._id}`)}
+                      className="cursor-pointer rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-text-on-accent transition-colors duration-150 hover:bg-accent-hover"
+                    >
+                      Resume
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => promptCloseGame(game)}
+                      className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-1.5 text-xs font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
+          <h2 className="mb-4 text-lg font-semibold text-text-primary">Recent Solo Results</h2>
+          <CompletedGamesList games={soloGames.completed.slice(0, 5)} username={user?.username} showDifficulty />
+        </section>
+      </>
+    )
+  }
+
   return (
     <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
       <PageBackdrop intensity="subtle" />
@@ -201,99 +404,30 @@ export default function Dashboard() {
               </div>
               <span className="inline-flex w-fit items-center rounded-full bg-accent-subtle px-2.5 py-0.5 text-xs font-medium text-accent">Live lobby</span>
             </div>
-
-            <h2 className="mb-3 text-lg font-semibold text-text-primary">Play Now</h2>
-            <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {GAME_TYPES.map((type) => (
+            <div className="grid grid-cols-2 gap-2 rounded-xl bg-page p-1">
+              {([
+                ['multiplayer', 'Multiplayer'],
+                ['singlePlayer', 'Single Player'],
+              ] as const).map(([tab, label]) => (
                 <button
-                  key={type}
-                  onClick={() => handleCreate(type)}
-                  className="card-glow group cursor-pointer overflow-hidden rounded-xl border border-border bg-elevated text-left shadow-sm"
+                  key={tab}
+                  type="button"
+                  onClick={() => setActiveTab(tab)}
+                  className={`min-h-11 cursor-pointer rounded-lg px-3 py-2 text-sm font-semibold transition-colors duration-150 ${
+                    activeTab === tab ? 'bg-accent text-text-on-accent shadow-accent' : 'text-text-secondary hover:bg-overlay hover:text-text-primary'
+                  }`}
                 >
-                  <img src={THUMBNAILS[type]} alt="" className="h-28 w-full object-cover transition-transform duration-100 group-hover:scale-[1.02]" />
-                  <div className="flex items-center justify-between gap-3 p-3">
-                    <span>
-                      <span className="block text-base font-semibold text-text-primary">{getGameLabel(type)}</span>
-                      <span className="block text-xs text-text-muted">Create a multiplayer room</span>
-                    </span>
-                    <span className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-text-on-accent shadow-accent">Create</span>
-                  </div>
+                  {label}
                 </button>
               ))}
             </div>
-            <form onSubmit={handleJoin} className="flex flex-col gap-2 sm:flex-row">
-              <input
-                value={joinCode}
-                onChange={(e) => setJoinCode(e.target.value)}
-                placeholder="Game code (e.g. ABC123)"
-                maxLength={6}
-                className="min-h-11 flex-1 rounded-lg border border-border bg-overlay px-3 py-2 font-mono text-text-primary placeholder:font-sans placeholder:text-text-muted transition-colors duration-150 focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-[var(--border-focus)]/20"
-              />
-              <button type="submit" className="min-h-11 cursor-pointer rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:opacity-90">
-                Join
-              </button>
-            </form>
           </section>
 
-          <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
-            <h2 className="mb-4 text-lg font-semibold text-text-primary">Active Games ({games.active.length})</h2>
-            {games.active.length === 0 ? (
-              <p className="rounded-lg border border-border bg-page px-4 py-6 text-center text-sm text-text-muted">No active games. Create one above.</p>
-            ) : (
-              <div className="space-y-2">
-                {games.active.map((game) => (
-                  <div
-                    key={game._id}
-                    className="card-glow flex items-center justify-between gap-4 rounded-xl border border-border bg-elevated px-4 py-3"
-                  >
-                    <button
-                      onClick={() => navigate(`/game/${game._id}`)}
-                      className="min-w-0 flex-1 cursor-pointer text-left"
-                    >
-                      <span className="block truncate font-medium text-text-primary">{getGameLabel(game.gameType)}</span>
-                      <span className="block text-xs text-text-muted">{game.players.length} player{game.players.length === 1 ? '' : 's'}</span>
-                    </button>
-                    <div className="flex items-center gap-2">
-                      <span className="rounded-full bg-accent-subtle px-2.5 py-0.5 font-mono text-xs font-medium text-accent">{game.gameCode}</span>
-                      <button
-                        type="button"
-                        onClick={() => promptCloseGame(game)}
-                        className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-1.5 text-xs font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
-                      >
-                        Close
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold text-text-primary">Completed Games</h2>
-              <button onClick={() => navigate('/history')} className="cursor-pointer rounded-lg px-3 py-1.5 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary">
-                View all
-              </button>
-            </div>
-            <div className="space-y-2">
-              {games.completed.slice(0, 5).map((game) => {
-                const label = game.result?.isDraw ? 'Draw' : game.result?.winnerName === user?.username ? 'Win' : 'Loss'
-                const labelClass = game.result?.isDraw ? 'bg-warning-subtle text-warning-text' : label === 'Win' ? 'bg-success-subtle text-success-text' : 'bg-danger-subtle text-danger-text'
-                return (
-                  <div key={game._id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-page/80 px-3 py-2">
-                    <span className="min-w-0 truncate text-sm font-medium text-text-primary">{getGameLabel(game.gameType)}</span>
-                    <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${labelClass}`}>{label}</span>
-                  </div>
-                )
-              })}
-              {games.completed.length === 0 && <p className="rounded-lg border border-border bg-page px-4 py-6 text-center text-sm text-text-muted">No completed games yet.</p>}
-            </div>
-          </section>
+          {activeTab === 'multiplayer' ? renderMultiplayer() : renderSinglePlayer()}
         </div>
 
         <aside className="reveal space-y-6">
-          <Leaderboard />
+          {activeTab === 'multiplayer' ? <Leaderboard /> : <SinglePlayerLeaderboard />}
         </aside>
       </main>
 
@@ -307,6 +441,27 @@ export default function Dashboard() {
       >
         {modal?.message}
       </Modal>
+    </div>
+  )
+}
+
+function CompletedGamesList({ games, username, showDifficulty = false }: { games: Game[]; username?: string; showDifficulty?: boolean }) {
+  return (
+    <div className="space-y-2">
+      {games.map((game) => {
+        const label = game.result?.isDraw ? 'Draw' : game.result?.winnerName === username ? 'Win' : 'Loss'
+        const labelClass = game.result?.isDraw ? 'bg-warning-subtle text-warning-text' : label === 'Win' ? 'bg-success-subtle text-success-text' : 'bg-danger-subtle text-danger-text'
+        return (
+          <div key={game._id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-page/80 px-3 py-2">
+            <span className="min-w-0 truncate text-sm font-medium text-text-primary">
+              {getGameLabel(game.gameType)}
+              {showDifficulty && <span className="ml-2 text-xs font-normal text-text-muted">{getDifficultyLabel(game.metadata?.difficulty)}</span>}
+            </span>
+            <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${labelClass}`}>{label}</span>
+          </div>
+        )
+      })}
+      {games.length === 0 && <p className="rounded-lg border border-border bg-page px-4 py-6 text-center text-sm text-text-muted">No completed games yet.</p>}
     </div>
   )
 }

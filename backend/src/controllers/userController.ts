@@ -42,3 +42,14 @@ export async function getLeaderboardByType(req: Request, res: Response, next: Ne
     next(err)
   }
 }
+
+export async function getSinglePlayerLeaderboard(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const limit = parseInt(String(req.query.limit || '10'), 10)
+    const page = parseInt(String(req.query.page || '1'), 10)
+    const leaderboard = await userService.getSinglePlayerLeaderboard('ticTacToe', limit, page)
+    res.json({ leaderboard })
+  } catch (err) {
+    next(err)
+  }
+}
