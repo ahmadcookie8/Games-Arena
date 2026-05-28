@@ -20,7 +20,7 @@ export default function GameInvite({ gameCode }: Props) {
         <span className="font-mono text-2xl font-bold tracking-widest text-text-primary">{gameCode}</span>
         <button
           onClick={copyCode}
-          className="rounded-lg bg-surface px-3 py-1.5 text-sm font-medium text-text-primary transition-colors duration-150 hover:bg-overlay"
+          className="cursor-pointer rounded-lg bg-surface px-3 py-1.5 text-sm font-medium text-text-primary transition-colors duration-150 hover:bg-overlay"
         >
           {copied ? 'Copied!' : 'Copy'}
         </button>

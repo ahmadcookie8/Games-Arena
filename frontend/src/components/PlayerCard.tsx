@@ -7,7 +7,7 @@ interface Props {
 
 export default function PlayerCard({ player, isCurrentTurn }: Props) {
   return (
-    <div className={`flex items-center gap-3 rounded-xl border p-3 ${isCurrentTurn ? 'border-accent bg-accent-subtle' : 'border-border bg-elevated'}`}>
+    <div className={`flex items-center gap-3 rounded-xl border p-3 transition-all duration-150 ${isCurrentTurn ? 'border-accent bg-accent-subtle shadow-accent' : 'border-border bg-elevated'}`}>
       <div className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-sm font-bold text-text-on-accent">
         {player.username[0].toUpperCase()}
       </div>

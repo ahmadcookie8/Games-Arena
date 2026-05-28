@@ -27,7 +27,7 @@ export default function TicTacToeBoard({ gameState, isMyTurn, onMove }: Props) {
               onClick={() => isMyTurn && !cell && onMove(String(i))}
               disabled={!isMyTurn || !!cell}
               aria-label={`Row ${row}, Column ${column}${cell ? `, ${cell}` : ', empty'}`}
-              className="aspect-square rounded-xl border border-border bg-elevated text-4xl font-bold shadow-sm transition-all duration-150 hover:border-border-strong hover:bg-overlay disabled:cursor-not-allowed disabled:hover:bg-elevated"
+              className="aspect-square cursor-pointer rounded-xl border border-border bg-elevated text-4xl font-bold shadow-sm transition-all duration-150 hover:border-accent-muted hover:bg-overlay hover:shadow-accent disabled:cursor-not-allowed disabled:hover:border-border disabled:hover:bg-elevated disabled:hover:shadow-sm"
             >
               <span className={`inline-block animate-scale-in ${cell === 'X' ? 'text-accent' : cell === 'O' ? 'text-warning' : ''}`}>{cell}</span>
             </button>

@@ -4,6 +4,7 @@ import GameInvite from '../components/GameInvite'
 import Header from '../components/Header'
 import Modal, { ModalVariant } from '../components/Modal'
 import MoveHistory from '../components/MoveHistory'
+import PageBackdrop from '../components/PageBackdrop'
 import PlayerCard from '../components/PlayerCard'
 import TicTacToeBoard from '../components/TicTacToeBoard'
 import WisecrackerBoard from '../components/WisecrackerBoard'
@@ -132,18 +133,19 @@ export default function GameBoard() {
       : null
 
   return (
-    <div className="min-h-screen bg-page text-text-primary">
+    <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
+      <PageBackdrop intensity="quiet" />
       <Header />
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
-        <div className="mb-6 flex flex-col gap-4 rounded-2xl border border-border bg-surface p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:p-5">
+      <main className="relative z-10 mx-auto max-w-7xl px-4 py-6 sm:px-6">
+        <div className="mb-6 flex flex-col gap-4 rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-5">
           <button
             onClick={() => navigate('/')}
-            className="w-fit rounded-lg px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary"
+            className="w-fit cursor-pointer rounded-lg px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary"
           >
             Back
           </button>
           <div className="min-w-0 sm:text-center">
-            <h1 className="truncate text-xl font-semibold text-text-primary">{getGameLabel(game.gameType)}</h1>
+            <h1 className="text-gradient truncate text-xl font-semibold">{getGameLabel(game.gameType)}</h1>
             <p className="text-sm text-text-muted">
               Code: <span className="font-mono font-medium text-accent">{game.gameCode}</span>
             </p>
@@ -184,13 +186,13 @@ export default function GameBoard() {
                 Game over: {resultText}
               </div>
             )}
-            <section className="rounded-2xl border border-border bg-surface p-4 shadow-sm sm:p-5">
+            <section className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl sm:p-5">
               {game.gameType === 'ticTacToe' && <TicTacToeBoard gameState={game.gameState} isMyTurn={isMyTurn} onMove={handleTicTacToeMove} />}
               {game.gameType === 'wisecracker' && <WisecrackerBoard game={game} user={user} onMove={handleMove} />}
             </section>
           </div>
           <aside className="min-w-0 space-y-4">
-            <div className="rounded-2xl border border-border bg-surface p-4 shadow-sm">
+            <div className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl">
               <h3 className="mb-3 text-base font-semibold text-text-primary">Players</h3>
               <div className="space-y-2">
                 {game.players.map((p, i) => (

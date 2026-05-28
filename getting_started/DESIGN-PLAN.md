@@ -163,7 +163,7 @@ Replace `frontend/src/index.css` entirely with the following. Every CSS custom p
   /* Borders */
   --border:         oklch(89% 0.012 256);    /* slate-200 */
   --border-strong:  oklch(83% 0.016 256);    /* slate-300 */
-  --border-focus:   oklch(58% 0.24 277);     /* violet-500 */
+  --border-focus:   oklch(56% 0.20 245);     /* brand blue */
 
   /* Text */
   --text-primary:   oklch(13% 0.02 256);     /* slate-900 */
@@ -173,10 +173,10 @@ Replace `frontend/src/index.css` entirely with the following. Every CSS custom p
   --text-on-accent: oklch(100% 0 0);         /* white — text on colored buttons */
 
   /* Accent — Violet */
-  --accent:         oklch(52% 0.28 277);     /* violet-600 */
-  --accent-hover:   oklch(46% 0.27 277);     /* violet-700 */
-  --accent-subtle:  oklch(93% 0.05 277);     /* violet-50 */
-  --accent-muted:   oklch(80% 0.12 277);     /* violet-300 */
+  --accent:         oklch(52% 0.20 245);     /* brand blue */
+  --accent-hover:   oklch(46% 0.20 245);     /* deeper brand blue */
+  --accent-subtle:  oklch(93% 0.045 245);    /* pale blue tint */
+  --accent-muted:   oklch(78% 0.12 245);     /* soft blue outline */
 
   /* Semantic — Status */
   --success:        oklch(55% 0.18 160);     /* emerald-600 */
@@ -198,7 +198,8 @@ Replace `frontend/src/index.css` entirely with the following. Every CSS custom p
   --shadow-sm:  0 1px 3px oklch(0% 0 0 / 0.08), 0 1px 2px oklch(0% 0 0 / 0.06);
   --shadow-md:  0 4px 12px oklch(0% 0 0 / 0.10), 0 2px 4px oklch(0% 0 0 / 0.06);
   --shadow-lg:  0 10px 30px oklch(0% 0 0 / 0.12), 0 4px 8px oklch(0% 0 0 / 0.08);
-  --shadow-accent: 0 0 20px oklch(52% 0.28 277 / 0.25);
+  --shadow-accent: 0 0 20px oklch(52% 0.20 245 / 0.25);
+  --glow-hero: 0 0 60px oklch(52% 0.20 245 / 0.22), 0 0 120px oklch(52% 0.20 245 / 0.10);
 }
 
 /* ─── Dark mode overrides ─── */
@@ -213,7 +214,7 @@ Replace `frontend/src/index.css` entirely with the following. Every CSS custom p
   /* Borders */
   --border:         oklch(33% 0.032 262);    /* subtle border */
   --border-strong:  oklch(41% 0.032 262);    /* emphasized */
-  --border-focus:   oklch(65% 0.26 277);     /* violet-400 */
+  --border-focus:   oklch(72% 0.18 252);     /* bright brand blue */
 
   /* Text */
   --text-primary:   oklch(91% 0.008 256);    /* calm off-white */
@@ -223,10 +224,10 @@ Replace `frontend/src/index.css` entirely with the following. Every CSS custom p
   --text-on-accent: oklch(100% 0 0);
 
   /* Accent — Violet (slightly brighter in dark) */
-  --accent:         oklch(65% 0.26 277);     /* violet-400 */
-  --accent-hover:   oklch(72% 0.24 277);     /* violet-300 */
-  --accent-subtle:  oklch(20% 0.06 277);     /* dark violet tint */
-  --accent-muted:   oklch(45% 0.20 277);     /* violet-600 */
+  --accent:         oklch(68% 0.18 252);     /* brand blue */
+  --accent-hover:   oklch(74% 0.17 252);     /* brighter brand blue */
+  --accent-subtle:  oklch(18% 0.055 252);    /* dark blue tint */
+  --accent-muted:   oklch(44% 0.16 252);     /* blue outline */
 
   /* Semantic */
   --success:        oklch(72% 0.18 160);     /* emerald-400 */
@@ -248,7 +249,8 @@ Replace `frontend/src/index.css` entirely with the following. Every CSS custom p
   --shadow-sm:  0 0 0 1px oklch(100% 0 0 / 0.035);
   --shadow-md:  0 4px 18px oklch(0% 0 0 / 0.30), 0 0 0 1px oklch(100% 0 0 / 0.035);
   --shadow-lg:  0 8px 34px oklch(0% 0 0 / 0.38), 0 0 0 1px oklch(100% 0 0 / 0.05);
-  --shadow-accent: 0 0 22px oklch(65% 0.26 277 / 0.26);
+  --shadow-accent: 0 0 22px oklch(68% 0.18 252 / 0.30);
+  --glow-hero: 0 0 80px oklch(68% 0.18 252 / 0.24), 0 0 160px oklch(68% 0.18 252 / 0.10);
 }
 
 /* ─── Tailwind 4 theme bridge (makes CSS vars usable as Tailwind utilities) ─── */
@@ -293,6 +295,7 @@ Replace `frontend/src/index.css` entirely with the following. Every CSS custom p
   --shadow-md:     var(--shadow-md);
   --shadow-lg:     var(--shadow-lg);
   --shadow-accent: var(--shadow-accent);
+  --shadow-hero:   var(--glow-hero);
 
   --radius-sm:  4px;
   --radius-md:  8px;
@@ -305,6 +308,9 @@ Replace `frontend/src/index.css` entirely with the following. Every CSS custom p
   --animate-slide-up:    slide-up 200ms ease-out;
   --animate-scale-in:    scale-in 150ms ease-out;
   --animate-pulse-once:  pulse-once 400ms ease-out;
+  --animate-float:       float 4s ease-in-out infinite;
+  --animate-twinkle:     twinkle 3s ease-in-out infinite;
+  --animate-gradient-x:  gradient-x 6s ease infinite;
 }
 
 /* ─── Base reset ─── */
@@ -361,6 +367,65 @@ body {
   40%  { transform: scale(1.12); }
   70%  { transform: scale(0.95); }
   100% { transform: scale(1); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-12px); }
+}
+
+@keyframes twinkle {
+  0%, 100% { opacity: 0.08; }
+  50%      { opacity: 0.55; }
+}
+
+@keyframes gradient-x {
+  0%, 100% { background-position: 0% 50%; }
+  50%      { background-position: 100% 50%; }
+}
+
+.text-gradient {
+  background: linear-gradient(135deg, oklch(38% 0.18 240), oklch(52% 0.20 245), oklch(68% 0.16 252));
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: gradient-x 6s ease infinite;
+}
+
+.arena-overlay {
+  background:
+    radial-gradient(ellipse 68% 42% at 50% 0%, oklch(52% 0.20 245 / 0.14) 0%, transparent 60%),
+    radial-gradient(ellipse 44% 30% at 85% 18%, oklch(68% 0.16 252 / 0.12) 0%, transparent 68%),
+    linear-gradient(180deg, oklch(100% 0 0 / 0.64), var(--bg-page) 74%);
+}
+
+.arena-grid {
+  background-image:
+    linear-gradient(oklch(30% 0.045 265 / 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, oklch(30% 0.045 265 / 0.035) 1px, transparent 1px);
+  background-size: 60px 60px;
+}
+
+.card-glow {
+  transition: border-color 200ms ease, box-shadow 200ms ease, transform 200ms ease, background-color 200ms ease;
+}
+
+.card-glow:hover {
+  border-color: var(--accent-muted);
+  box-shadow: var(--shadow-accent);
+  transform: translateY(-3px);
+}
+
+.reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 560ms ease, transform 560ms ease;
+}
+
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
 }
 ```
 
@@ -627,7 +692,7 @@ Shape: `w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold 
 
 Default background (based on first char hash, cycles through):
 ```
-bg-violet-600, bg-sky-600, bg-emerald-600, bg-amber-600, bg-rose-600
+bg-accent, bg-sky-600, bg-emerald-600, bg-amber-600, bg-rose-600
 ```
 Text: `text-white`
 
@@ -1270,7 +1335,7 @@ Use these rules consistently to avoid misuse of semantic colors.
 
 | Color | Token | Use for |
 |-------|-------|---------|
-| Accent (violet) | `text-accent`, `bg-accent` | Primary actions, selected states, links, "your turn" |
+| Accent (brand blue) | `text-accent`, `bg-accent` | Primary actions, selected states, links, "your turn" |
 | Success (emerald) | `text-success`, `bg-success` | Win results, online status, successful actions, submitted state |
 | Danger (red) | `text-danger`, `bg-danger` | Loss results, errors, destructive actions, form validation errors |
 | Warning (amber) | `text-warning`, `bg-warning` | Draw results, alerts, "waiting" states, Uno yellow cards |
@@ -1348,18 +1413,26 @@ In index.css, add:
 
 ---
 
-## 15. Image Generation Guide
+## 15. Asset & Image Guide
 
 The following images can be generated by an AI image generation agent to enhance the design. They are all optional enhancements — the design works without them, but they significantly elevate the visual quality.
 
-### 15.1 Logo / Brand Mark — HIGH PRIORITY
+The PenguinCookie shared assets are part of the Games Arena visual system:
 
-**What to generate**: A logo for "Games Arena" combining competitive gaming energy with a clean, modern aesthetic.
+- `frontend/public/favicon.png`: copied from PenguinCookie `favicon.png`; used by `frontend/index.html`.
+- `frontend/src/assets/penguin-mascot.png`: shared PenguinCookie mascot; used in Header and Auth branding while keeping "Games Arena" as the product name.
+- `frontend/src/assets/hero-bg-light.png`: light-mode page atmosphere and Auth background.
+- `frontend/src/assets/hero-bg.png`: dark-mode page atmosphere and Auth background.
+
+Use the background images through a shared page-backdrop pattern: light image visible in light mode, dark image visible in dark mode, plus a low-opacity radial blue overlay and subtle grid. Auth may use the strongest treatment. Dashboard should use a subtler treatment. GameBoard and History should use quiet overlays so game state stays readable.
+### 15.1 Logo / Brand Mark
+
+**Default**: Use `penguin-mascot.png` as the shared identity mark in Header and Auth. Optional future generation can create a logo for "Games Arena" combining competitive gaming energy with a clean, modern aesthetic.
 
 **Spec for generation**:
 - Style: Flat / geometric, minimal gradients, works on both dark and light backgrounds
 - Concept: A stylized shield or arena shape containing a small collection of recognizable game pieces (chess knight, playing card suit, tic-tac-toe grid)
-- Colors: Primary violet (#7C3AED), white, and dark navy (#070B14)
+- Colors: Brand blue, white, and soft navy-slate
 - Deliver as: SVG preferred, PNG at 512×512px minimum
 - Usage: In `<Header />` left side + Auth card top. Must look good at 40px height.
 
@@ -1367,15 +1440,15 @@ The following images can be generated by an AI image generation agent to enhance
 
 ---
 
-### 15.2 Auth Page Background — MEDIUM PRIORITY
+### 15.2 Page Backgrounds
 
 **What to generate**: A subtle, atmospheric background texture or pattern for the Auth page.
 
 **Spec**:
 - Style: Abstract geometric/isometric, very subtle (will be used at low opacity or as a very muted background)
 - Content: Faint silhouettes of game elements (chess pieces, cards, dice, game controllers)
-- Colors for dark mode: Deep navy with violet highlights, very low contrast
-- Colors for light mode: Light slate with barely-visible violet shapes
+- Colors for dark mode: Soft navy-slate with blue highlights, very low contrast
+- Colors for light mode: Light slate with barely-visible blue shapes
 - Deliver as: Two versions — dark and light, as SVG or large PNG (1920×1080)
 - Usage: `background-image` on Auth page's `min-h-screen` container
 
@@ -1391,9 +1464,9 @@ The following images can be generated by an AI image generation agent to enhance
 
 **Individual specs**:
 
-1. **Tic Tac Toe** (`ticTacToe.png`): Bold X and O symbols in violet/amber on a dark grid. Clean, iconic.
+1. **Tic Tac Toe** (`ticTacToe.png`): Bold X and O symbols in brand blue/amber on a dark grid. Clean, iconic.
 2. **Wisecracker** (`wisecracker.png`): Two speech bubbles with a laughing face or microphone, colorful and playful. This is a party/humor game.
-3. **Chess** (`chess.png`): A single chess knight piece, dramatic lighting, violet accent, on dark background.
+3. **Chess** (`chess.png`): A single chess knight piece, dramatic lighting, blue accent, on dark background.
 4. **Checkers** (`checkers.png`): Top-down view of a checkerboard in play with a few red and black pieces.
 5. **Uno** (`uno.png`): A fan of colorful Uno cards (red, green, blue, yellow) spread out.
 6. **President** (`president.png`): A gold crown above a hand of playing cards.
@@ -1428,7 +1501,7 @@ The following images can be generated by an AI image generation agent to enhance
 
 **What to generate**: A default avatar image used when a player has no custom avatar.
 
-**Spec**: Simple geometric avatar or silhouette style, in brand violet color, neutral. Should look good in a small circle (40×40px).
+**Spec**: Simple geometric avatar or silhouette style, in brand blue, neutral. Should look good in a small circle (40×40px).
 
 **Deliver as**: SVG circle-shaped icon.
 
@@ -1482,7 +1555,7 @@ Every new page/component must be visually reviewed in both dark and light mode b
 Every authenticated page uses the `<Header />` component. Do not rebuild the header inline in a page component.
 
 ### Rule 9: Animation is subtle
-Use the four animation keyframes defined in index.css (`fade-in`, `slide-up`, `scale-in`, `pulse-once`). Do not add new keyframes without adding them to index.css. Do not use animations on elements that update frequently (e.g., live counters, clocks).
+Use the animation utilities defined in index.css (`fade-in`, `slide-up`, `scale-in`, `pulse-once`, `float`, `twinkle`, `gradient-x`, and reveal-on-scroll). Do not add new keyframes without adding them to index.css and this document. Do not use animations on elements that update frequently (e.g., live counters, clocks).
 
 ### Rule 10: Spacing is intentional
 - Page-level padding: `px-4 sm:px-6 py-6`
@@ -1516,6 +1589,10 @@ After implementing, verify the following:
 - [ ] Semantic colors (win/loss/draw) are visible and accessible in both light and dark mode
 - [ ] Dark mode reads as soft navy-slate, not near-black or harshly contrasty
 - [ ] Modals are readable and correctly spaced at 320px, tablet, and desktop widths
+- [ ] Favicon loads from `frontend/public/favicon.png`
+- [ ] Header and Auth use `penguin-mascot.png`
+- [ ] Light mode page atmosphere uses `hero-bg-light.png`; dark mode uses `hero-bg.png`
+- [ ] Blue glow, gradient text, cursor, and reveal motion states are visible where specified
 
 ### Component checks
 - [ ] Buttons show hover state, focus ring, and disabled state
@@ -1524,7 +1601,7 @@ After implementing, verify the following:
 - [ ] Modals close via close button, Escape, and backdrop click
 - [ ] Modal focus moves into the dialog on open and returns to the trigger on close
 - [ ] PlayerCard highlights current turn in accent color
-- [ ] Tic Tac Toe X is accent (violet), O is warning (amber)
+- [ ] Tic Tac Toe X is Accent (brand blue), O is warning (amber)
 - [ ] Game codes always render in `font-mono`
 - [ ] Wisecracker phase label badge updates with each phase
 
@@ -1533,3 +1610,4 @@ After implementing, verify the following:
 - [ ] No references to old Tailwind config file remain
 - [ ] `tailwind.config.js` is deleted
 - [ ] `postcss.config.js` is deleted (or updated for v4 if PostCSS still needed)
+

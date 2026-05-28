@@ -2,8 +2,8 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import { useAuth } from '../hooks/useAuth'
-import brandMark from '../assets/brand-mark.png'
-import authBg from '../assets/auth-bg-dark.png'
+import mascot from '../assets/penguin-mascot.png'
+import PageBackdrop from '../components/PageBackdrop'
 import { ThemeToggle } from '../components/ThemeToggle'
 
 export default function Auth() {
@@ -42,29 +42,28 @@ export default function Auth() {
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-page px-4 py-8">
-      <div className="absolute inset-0 bg-cover bg-center opacity-25 dark:opacity-45" style={{ backgroundImage: `url(${authBg})` }} />
-      <div className="absolute inset-0 bg-page/65" />
+      <PageBackdrop intensity="strong" />
       <div className="absolute right-4 top-4 z-10">
         <ThemeToggle />
       </div>
 
-      <div className="relative z-10 w-full max-w-md animate-slide-up rounded-2xl border border-border bg-surface/95 p-5 shadow-lg backdrop-blur sm:p-6">
+      <div className="relative z-10 w-full max-w-md animate-slide-up rounded-2xl border border-border/90 bg-surface/92 p-5 shadow-lg backdrop-blur-xl sm:p-6">
         <div className="mb-6 text-center">
-          <img src={brandMark} alt="" className="mx-auto mb-3 h-16 w-16 rounded-2xl object-cover shadow-accent" />
-          <h1 className="text-4xl font-extrabold text-text-primary">Games Arena</h1>
+          <img src={mascot} alt="" className="mx-auto mb-3 h-20 w-20 animate-float object-contain drop-shadow-[0_0_24px_oklch(68%_0.18_252_/_0.55)]" />
+          <h1 className="text-gradient text-4xl font-extrabold">Games Arena</h1>
           <p className="mt-2 text-sm text-text-secondary">Jump back into live multiplayer matches.</p>
         </div>
 
         <div className="mb-6 grid grid-cols-2 rounded-lg bg-overlay p-1">
           <button
-            className={`min-h-11 rounded-md px-3 py-2 text-sm font-medium transition-colors duration-150 ${mode === 'login' ? 'bg-surface text-text-primary shadow-sm' : 'text-text-secondary hover:text-text-primary'}`}
+            className={`min-h-11 cursor-pointer rounded-md px-3 py-2 text-sm font-medium transition-colors duration-150 ${mode === 'login' ? 'bg-surface text-text-primary shadow-sm' : 'text-text-secondary hover:text-text-primary'}`}
             onClick={() => setMode('login')}
             type="button"
           >
             Login
           </button>
           <button
-            className={`min-h-11 rounded-md px-3 py-2 text-sm font-medium transition-colors duration-150 ${mode === 'signup' ? 'bg-surface text-text-primary shadow-sm' : 'text-text-secondary hover:text-text-primary'}`}
+            className={`min-h-11 cursor-pointer rounded-md px-3 py-2 text-sm font-medium transition-colors duration-150 ${mode === 'signup' ? 'bg-surface text-text-primary shadow-sm' : 'text-text-secondary hover:text-text-primary'}`}
             onClick={() => setMode('signup')}
             type="button"
           >
@@ -135,7 +134,7 @@ export default function Auth() {
           <button
             type="submit"
             disabled={loading}
-            className="flex min-h-11 w-full items-center justify-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex min-h-11 w-full cursor-pointer items-center justify-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
           >
             {loading ? 'Loading...' : mode === 'login' ? 'Login' : 'Create Account'}
           </button>

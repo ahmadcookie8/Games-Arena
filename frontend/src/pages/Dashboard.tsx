@@ -7,7 +7,9 @@ import api from '../lib/api'
 import Leaderboard from '../components/Leaderboard'
 import Header from '../components/Header'
 import Modal, { ModalVariant } from '../components/Modal'
+import PageBackdrop from '../components/PageBackdrop'
 import { useSocket } from '../hooks/useSocket'
+import { useReveal } from '../hooks/useReveal'
 import { getGameLabel } from '../lib/gameRules'
 import ticTacToeThumb from '../assets/game-tic-tac-toe.png'
 import wisecrackerThumb from '../assets/game-wisecracker.png'
@@ -33,6 +35,7 @@ interface ModalState {
 }
 
 export default function Dashboard() {
+  useReveal()
   const { user } = useAuth()
   const navigate = useNavigate()
   const { on } = useSocket()
@@ -152,16 +155,17 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-page text-text-primary">
+    <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
+      <PageBackdrop intensity="subtle" />
       <Header />
 
-      <main className="mx-auto grid max-w-7xl grid-cols-1 gap-6 px-4 py-6 sm:px-6 lg:grid-cols-3">
+      <main className="relative z-10 mx-auto grid max-w-7xl grid-cols-1 gap-6 px-4 py-6 sm:px-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
-          <section className="animate-fade-in rounded-2xl border border-border bg-surface p-4 shadow-sm sm:p-5">
+          <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
             <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <p className="text-sm font-medium text-accent">Welcome back, @{user?.username}</p>
-                <h1 className="text-3xl font-bold text-text-primary">Games Arena</h1>
+                <h1 className="text-gradient text-3xl font-extrabold">Games Arena</h1>
               </div>
               <span className="inline-flex w-fit items-center rounded-full bg-accent-subtle px-2.5 py-0.5 text-xs font-medium text-accent">Live lobby</span>
             </div>
@@ -172,7 +176,7 @@ export default function Dashboard() {
                 <button
                   key={type}
                   onClick={() => handleCreate(type)}
-                  className="group overflow-hidden rounded-xl border border-border bg-elevated text-left shadow-sm transition-all duration-150 hover:border-border-strong hover:bg-overlay"
+                  className="card-glow group cursor-pointer overflow-hidden rounded-xl border border-border bg-elevated text-left shadow-sm"
                 >
                   <img src={THUMBNAILS[type]} alt="" className="h-28 w-full object-cover transition-transform duration-100 group-hover:scale-[1.02]" />
                   <div className="flex items-center justify-between gap-3 p-3">
@@ -180,7 +184,7 @@ export default function Dashboard() {
                       <span className="block text-base font-semibold text-text-primary">{getGameLabel(type)}</span>
                       <span className="block text-xs text-text-muted">Create a multiplayer room</span>
                     </span>
-                    <span className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-text-on-accent">Create</span>
+                    <span className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-text-on-accent shadow-accent">Create</span>
                   </div>
                 </button>
               ))}
@@ -193,13 +197,13 @@ export default function Dashboard() {
                 maxLength={6}
                 className="min-h-11 flex-1 rounded-lg border border-border bg-overlay px-3 py-2 font-mono text-text-primary placeholder:font-sans placeholder:text-text-muted transition-colors duration-150 focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-[var(--border-focus)]/20"
               />
-              <button type="submit" className="min-h-11 rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:opacity-90">
+              <button type="submit" className="min-h-11 cursor-pointer rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:opacity-90">
                 Join
               </button>
             </form>
           </section>
 
-          <section className="rounded-2xl border border-border bg-surface p-4 shadow-sm sm:p-5">
+          <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
             <h2 className="mb-4 text-lg font-semibold text-text-primary">Active Games ({games.active.length})</h2>
             {games.active.length === 0 ? (
               <p className="rounded-lg border border-border bg-page px-4 py-6 text-center text-sm text-text-muted">No active games. Create one above.</p>
@@ -209,7 +213,7 @@ export default function Dashboard() {
                   <button
                     key={game._id}
                     onClick={() => navigate(`/game/${game._id}`)}
-                    className="flex w-full items-center justify-between gap-4 rounded-xl border border-border bg-elevated px-4 py-3 text-left transition-all duration-150 hover:border-border-strong hover:bg-overlay"
+                    className="card-glow flex w-full cursor-pointer items-center justify-between gap-4 rounded-xl border border-border bg-elevated px-4 py-3 text-left"
                   >
                     <span className="min-w-0">
                       <span className="block truncate font-medium text-text-primary">{getGameLabel(game.gameType)}</span>
@@ -222,10 +226,10 @@ export default function Dashboard() {
             )}
           </section>
 
-          <section className="rounded-2xl border border-border bg-surface p-4 shadow-sm sm:p-5">
+          <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
             <div className="mb-4 flex items-center justify-between gap-3">
               <h2 className="text-lg font-semibold text-text-primary">Completed Games</h2>
-              <button onClick={() => navigate('/history')} className="rounded-lg px-3 py-1.5 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary">
+              <button onClick={() => navigate('/history')} className="cursor-pointer rounded-lg px-3 py-1.5 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary">
                 View all
               </button>
             </div>
@@ -234,7 +238,7 @@ export default function Dashboard() {
                 const label = game.result?.isDraw ? 'Draw' : game.result?.winnerName === user?.username ? 'Win' : 'Loss'
                 const labelClass = game.result?.isDraw ? 'bg-warning-subtle text-warning-text' : label === 'Win' ? 'bg-success-subtle text-success-text' : 'bg-danger-subtle text-danger-text'
                 return (
-                  <div key={game._id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-page px-3 py-2">
+                  <div key={game._id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-page/80 px-3 py-2">
                     <span className="min-w-0 truncate text-sm font-medium text-text-primary">{getGameLabel(game.gameType)}</span>
                     <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${labelClass}`}>{label}</span>
                   </div>
@@ -245,7 +249,7 @@ export default function Dashboard() {
           </section>
         </div>
 
-        <aside className="space-y-6">
+        <aside className="reveal space-y-6">
           <Leaderboard />
         </aside>
       </main>

@@ -1,6 +1,6 @@
 import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import brandMark from '../assets/brand-mark.png'
+import mascot from '../assets/penguin-mascot.png'
 import { ThemeToggle } from './ThemeToggle'
 
 export default function Header() {
@@ -18,12 +18,12 @@ export default function Header() {
     }`
 
   return (
-    <header className="sticky top-0 z-20 border-b border-border bg-page/90 backdrop-blur">
+    <header className="sticky top-0 z-20 border-b border-border/80 bg-page/85 backdrop-blur-xl">
       <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
-        <Link to="/" className="flex min-w-0 items-center gap-3">
-          <img src={brandMark} alt="" className="h-10 w-10 rounded-lg object-cover shadow-accent" />
+        <Link to="/" className="group flex min-w-0 cursor-pointer items-center gap-3">
+          <img src={mascot} alt="" className="h-10 w-10 object-contain drop-shadow-[0_0_18px_oklch(68%_0.18_252_/_0.45)] transition-transform duration-200 group-hover:scale-105" />
           <div className="min-w-0">
-            <p className="truncate text-base font-bold text-text-primary">Games Arena</p>
+            <p className="truncate text-base font-bold text-text-primary">Games <span className="text-accent">Arena</span></p>
             <p className="hidden text-xs text-text-muted sm:block">Live multiplayer lobby</p>
           </div>
         </Link>
@@ -39,7 +39,7 @@ export default function Header() {
           <button
             type="button"
             onClick={handleLogout}
-            className="min-h-11 rounded-lg px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary md:min-h-0"
+            className="min-h-11 cursor-pointer rounded-lg px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary md:min-h-0"
           >
             Logout
           </button>

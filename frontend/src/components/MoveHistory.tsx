@@ -6,7 +6,7 @@ interface Props {
 
 export default function MoveHistory({ moves }: Props) {
   return (
-    <div className="rounded-2xl border border-border bg-surface p-4 shadow-sm">
+    <div className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl">
       <h3 className="mb-3 text-base font-semibold text-text-primary">Move History</h3>
       <div className="max-h-64 space-y-1 overflow-y-auto">
         {moves.length === 0 && <p className="rounded-lg bg-page px-3 py-6 text-center text-sm text-text-muted">No moves yet</p>}
