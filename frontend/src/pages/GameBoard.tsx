@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import axios from 'axios'
 import GameInvite from '../components/GameInvite'
 import Header from '../components/Header'
 import Modal, { ModalVariant } from '../components/Modal'
@@ -11,6 +12,7 @@ import WisecrackerBoard from '../components/WisecrackerBoard'
 import { useAuth } from '../hooks/useAuth'
 import { useGameState } from '../hooks/useGameState'
 import { useSocket } from '../hooks/useSocket'
+import api from '../lib/api'
 import { getGameLabel } from '../lib/gameRules'
 import { Game } from '../types/game'
 
@@ -24,6 +26,30 @@ interface ModalState {
   title: string
   message: string
   variant: ModalVariant
+  primaryAction?: {
+    label: string
+    onClick: () => void
+  }
+  secondaryAction?: {
+    label: string
+    onClick: () => void
+  }
+}
+
+function getCloseGameModal(game: Game, onConfirm: () => void, onCancel: () => void): ModalState {
+  return {
+    title: 'Close this game?',
+    message: `This will close the ${getGameLabel(game.gameType)} room and remove it from your active games list. Other players will no longer be able to join or continue it.`,
+    variant: 'warning',
+    primaryAction: {
+      label: 'Close game',
+      onClick: onConfirm,
+    },
+    secondaryAction: {
+      label: 'Cancel',
+      onClick: onCancel,
+    },
+  }
 }
 
 export default function GameBoard() {
@@ -117,14 +143,56 @@ export default function GameBoard() {
     setModal(null)
   }
 
+  async function confirmCloseGame() {
+    if (!game) return
+
+    try {
+      await api.post(`/api/games/${game._id}/close`)
+      closeModal()
+      navigate('/', { replace: true })
+    } catch (err: unknown) {
+      const message = axios.isAxiosError(err)
+        ? err.response?.data?.error || err.message || 'Could not close game'
+        : err instanceof Error
+          ? err.message
+          : 'Could not close game'
+      setModal({
+        title: 'Could not close game',
+        message,
+        variant: 'danger',
+      })
+    }
+  }
+
+  function promptCloseGame() {
+    if (!game || game.status !== 'active') return
+    setModal(getCloseGameModal(game, () => {
+      void confirmCloseGame()
+    }, closeModal))
+  }
+
+  useEffect(() => {
+    if (!game || game.status !== 'abandoned') return
+    setModal({
+      title: 'Game closed',
+      message: 'This game was closed and is no longer available. Return to the dashboard to start or join another game.',
+      variant: 'info',
+      primaryAction: {
+        label: 'Return to dashboard',
+        onClick: () => navigate('/', { replace: true }),
+      },
+    })
+  }, [game, navigate])
+
   if (loading) return <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">Loading game...</div>
   if (!game) return <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">Game not found</div>
 
   const myIndex = game.players.findIndex((p) => p.userId === user?._id)
   const minPlayers = game.gameType === 'wisecracker' ? 3 : 2
-  const isWaitingForPlayer = game.players.length < minPlayers && game.gameType !== 'wisecracker'
+  const isActive = game.status === 'active'
+  const isWaitingForPlayer = isActive && game.players.length < minPlayers && game.gameType !== 'wisecracker'
   const isCompleted = game.status === 'completed'
-  const isMyTurn = !isWaitingForPlayer && !isCompleted && game.currentTurnIndex === myIndex
+  const isMyTurn = isActive && !isWaitingForPlayer && !isCompleted && game.currentTurnIndex === myIndex
   const currentPlayer = game.players[game.currentTurnIndex]
   const resultText = game.result?.isDraw
     ? 'Draw'
@@ -150,27 +218,42 @@ export default function GameBoard() {
               Code: <span className="font-mono font-medium text-accent">{game.gameCode}</span>
             </p>
           </div>
-          <div
-            aria-live="polite"
-            className={`w-fit rounded-full px-3 py-1 text-sm font-medium ${
-              isMyTurn
-                ? 'bg-accent-subtle text-accent'
+          <div className="flex items-center gap-3">
+            {isActive && (
+              <button
+                type="button"
+                onClick={promptCloseGame}
+                className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-2 text-sm font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
+              >
+                Close game
+              </button>
+            )}
+            <div
+              aria-live="polite"
+              className={`w-fit rounded-full px-3 py-1 text-sm font-medium ${
+                isMyTurn
+                  ? 'bg-accent-subtle text-accent'
+                  : isCompleted
+                    ? 'bg-success-subtle text-success-text'
+                    : game.status === 'abandoned'
+                      ? 'bg-warning-subtle text-warning-text'
+                    : isWaitingForPlayer
+                      ? 'bg-warning-subtle text-warning-text'
+                      : 'bg-overlay text-text-secondary'
+              }`}
+            >
+              {game.gameType === 'wisecracker'
+                ? game.status
                 : isCompleted
-                  ? 'bg-success-subtle text-success-text'
+                  ? resultText
+                  : game.status === 'abandoned'
+                    ? 'Game closed'
                   : isWaitingForPlayer
-                    ? 'bg-warning-subtle text-warning-text'
-                    : 'bg-overlay text-text-secondary'
-            }`}
-          >
-            {game.gameType === 'wisecracker'
-              ? game.status
-              : isCompleted
-                ? resultText
-                : isWaitingForPlayer
-                  ? 'Waiting for player'
-                  : isMyTurn
-                    ? 'Your turn'
-                    : `${currentPlayer?.username}'s turn`}
+                    ? 'Waiting for player'
+                    : isMyTurn
+                      ? 'Your turn'
+                      : `${currentPlayer?.username}'s turn`}
+            </div>
           </div>
         </div>
 
@@ -209,6 +292,8 @@ export default function GameBoard() {
         isOpen={Boolean(modal)}
         title={modal?.title || ''}
         variant={modal?.variant}
+        primaryAction={modal?.primaryAction}
+        secondaryAction={modal?.secondaryAction}
         onClose={closeModal}
       >
         {modal?.message}

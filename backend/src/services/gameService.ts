@@ -2,7 +2,7 @@ import { Game, IGameDocument } from '../models/Game'
 import { GameSnapshot } from '../models/GameSnapshot'
 import mongoose from 'mongoose'
 import { redisGet, redisSet, redisDel } from '../utils/redis'
-import { BadRequestError, NotFoundError } from '../utils/errors'
+import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
 import { GameType } from '../types/game'
 import { TicTacToe } from '../games/TicTacToe'
 import { Chess } from '../games/Chess'
@@ -304,9 +304,32 @@ class GameService {
     return { winner: opponent.username, reason: 'resignation' }
   }
 
+  async closeGame(gameId: string, userId: string): Promise<IGameDocument> {
+    const game = await Game.findById(gameId)
+    if (!game) throw new NotFoundError('Game')
+
+    const isParticipant = game.players.some((player) => player.userId.toString() === userId)
+    if (!isParticipant) throw new ForbiddenError('Only players in this game can close it')
+    if (game.status !== 'active') throw new BadRequestError('Only active games can be closed')
+
+    game.status = 'abandoned'
+    game.completedAt = new Date()
+    game.lastMoveAt = new Date()
+    game.result = undefined
+
+    await game.save()
+    await redisDel(`game:${game.gameType}:${gameId}`)
+
+    emitGameUpdated(game)
+    emitGamesChanged(game)
+
+    return game
+  }
+
   async resumeGame(gameId: string): Promise<IGameDocument | null> {
     const game = await Game.findById(gameId)
     if (!game) return null
+    if (game.status === 'abandoned') return game
 
     const cached = await redisGet(`game:${game.gameType}:${gameId}`)
     if (cached) return game

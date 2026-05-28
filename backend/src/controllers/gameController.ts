@@ -52,6 +52,15 @@ export async function resignGame(req: AuthRequest, res: Response, next: NextFunc
   }
 }
 
+export async function closeGame(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const game = await gameService.closeGame(req.params.gameId, req.user!.userId)
+    res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
+  } catch (err) {
+    next(err)
+  }
+}
+
 export async function resumeGame(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const game = await gameService.resumeGame(req.params.gameId)

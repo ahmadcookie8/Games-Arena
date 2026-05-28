@@ -34,6 +34,22 @@ interface ModalState {
   }
 }
 
+function getCloseGameModal(game: Game, onConfirm: () => void, onCancel: () => void): ModalState {
+  return {
+    title: 'Close this game?',
+    message: `This will close the ${getGameLabel(game.gameType)} room and remove it from your active games list. Other players will no longer be able to join or continue it.`,
+    variant: 'warning',
+    primaryAction: {
+      label: 'Close game',
+      onClick: onConfirm,
+    },
+    secondaryAction: {
+      label: 'Cancel',
+      onClick: onCancel,
+    },
+  }
+}
+
 export default function Dashboard() {
   useReveal()
   const { user } = useAuth()
@@ -56,7 +72,7 @@ export default function Dashboard() {
     return on('gamesChanged', () => {
       fetchGames()
     })
-  }, [])
+  }, [on])
 
   async function handleCreate(gameType: GameType) {
     try {
@@ -76,6 +92,22 @@ export default function Dashboard() {
     } catch (err: unknown) {
       showJoinErrorModal(err, normalizedCode)
     }
+  }
+
+  async function confirmCloseGame(game: Game) {
+    try {
+      await api.post(`/api/games/${game._id}/close`)
+      closeModal()
+      await fetchGames()
+    } catch (err: unknown) {
+      showGenericErrorModal(err, 'Could not close game')
+    }
+  }
+
+  function promptCloseGame(game: Game) {
+    setModal(getCloseGameModal(game, () => {
+      void confirmCloseGame(game)
+    }, closeModal))
   }
 
   function closeModal() {
@@ -210,17 +242,28 @@ export default function Dashboard() {
             ) : (
               <div className="space-y-2">
                 {games.active.map((game) => (
-                  <button
+                  <div
                     key={game._id}
-                    onClick={() => navigate(`/game/${game._id}`)}
-                    className="card-glow flex w-full cursor-pointer items-center justify-between gap-4 rounded-xl border border-border bg-elevated px-4 py-3 text-left"
+                    className="card-glow flex items-center justify-between gap-4 rounded-xl border border-border bg-elevated px-4 py-3"
                   >
-                    <span className="min-w-0">
+                    <button
+                      onClick={() => navigate(`/game/${game._id}`)}
+                      className="min-w-0 flex-1 cursor-pointer text-left"
+                    >
                       <span className="block truncate font-medium text-text-primary">{getGameLabel(game.gameType)}</span>
                       <span className="block text-xs text-text-muted">{game.players.length} player{game.players.length === 1 ? '' : 's'}</span>
-                    </span>
-                    <span className="rounded-full bg-accent-subtle px-2.5 py-0.5 font-mono text-xs font-medium text-accent">{game.gameCode}</span>
-                  </button>
+                    </button>
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-full bg-accent-subtle px-2.5 py-0.5 font-mono text-xs font-medium text-accent">{game.gameCode}</span>
+                      <button
+                        type="button"
+                        onClick={() => promptCloseGame(game)}
+                        className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-1.5 text-xs font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
                 ))}
               </div>
             )}
