@@ -26,7 +26,7 @@ export async function getLeaderboard(req: Request, res: Response, next: NextFunc
     const limit = parseInt(String(req.query.limit || '10'), 10)
     const page = parseInt(String(req.query.page || '1'), 10)
     const leaderboard = await userService.getGlobalLeaderboard(limit, page)
-    res.json({ leaderboard })
+    res.json({ leaderboard, global: leaderboard })
   } catch (err) {
     next(err)
   }
@@ -37,7 +37,7 @@ export async function getLeaderboardByType(req: Request, res: Response, next: Ne
     const limit = parseInt(String(req.query.limit || '10'), 10)
     const page = parseInt(String(req.query.page || '1'), 10)
     const leaderboard = await userService.getLeaderboardByGameType(req.params.gameType, limit, page)
-    res.json({ leaderboard })
+    res.json({ leaderboard, global: leaderboard })
   } catch (err) {
     next(err)
   }

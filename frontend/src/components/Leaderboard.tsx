@@ -17,7 +17,9 @@ export default function Leaderboard() {
   const [entries, setEntries] = useState<LeaderboardEntry[]>([])
 
   const fetchLeaderboard = useCallback(() => {
-    void api.get('/api/leaderboards').then((res) => setEntries(res.data.leaderboard || []))
+    void api.get('/api/leaderboards').then((res) => {
+      setEntries(res.data.leaderboard || res.data.global || [])
+    })
   }, [])
 
   useEffect(() => {
