@@ -6,6 +6,8 @@ import {
   listGames,
   joinGame,
   makeSinglePlayerMove,
+  saveSinglePlayerSnakeState,
+  updateSinglePlayerSettings,
   resignGame,
   closeGame,
   resumeGame,
@@ -22,6 +24,8 @@ router.post('/single-player/create', createSinglePlayerGame)
 router.post('/join', joinGame)
 router.get('/', listGames)
 router.post('/:gameId/single-player/move', makeSinglePlayerMove)
+router.post('/:gameId/single-player/snake/state', saveSinglePlayerSnakeState)
+router.patch('/:gameId/single-player/settings', updateSinglePlayerSettings)
 router.get('/:gameId', getGame)
 router.post('/:gameId/join', joinGame)
 router.post('/:gameId/resign', resignGame)

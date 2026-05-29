@@ -1,7 +1,7 @@
 import mongoose, { Schema, Document } from 'mongoose'
 
 export interface IGameDocument extends Document {
-  gameType: 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker'
+  gameType: 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'snake'
   status: 'active' | 'paused' | 'completed' | 'abandoned'
   gameCode: string
   players: Array<{
@@ -40,13 +40,15 @@ export interface IGameDocument extends Document {
     ratedGame: boolean
     mode?: 'multiplayer' | 'singlePlayer'
     difficulty?: 'easy' | 'medium' | 'hard'
+    boardSize?: 'small' | 'medium' | 'large'
+    wallLooping?: boolean
     tournament?: string
   }
 }
 
 const GameSchema = new Schema<IGameDocument>(
   {
-    gameType: { type: String, enum: ['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker'], required: true },
+    gameType: { type: String, enum: ['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker', 'snake'], required: true },
     status: { type: String, enum: ['active', 'paused', 'completed', 'abandoned'], default: 'active' },
     gameCode: { type: String, required: true, unique: true },
     players: [
@@ -88,6 +90,8 @@ const GameSchema = new Schema<IGameDocument>(
       ratedGame: { type: Boolean, default: false },
       mode: { type: String, enum: ['multiplayer', 'singlePlayer'], default: 'multiplayer' },
       difficulty: { type: String, enum: ['easy', 'medium', 'hard'] },
+      boardSize: { type: String, enum: ['small', 'medium', 'large'] },
+      wallLooping: Boolean,
       tournament: String,
     },
   },

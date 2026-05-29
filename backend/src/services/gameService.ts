@@ -3,7 +3,7 @@ import { GameSnapshot } from '../models/GameSnapshot'
 import mongoose from 'mongoose'
 import { redisGet, redisSet, redisDel } from '../utils/redis'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
-import { GameMode, GameType, TicTacToeDifficulty } from '../types/game'
+import { GameMode, GameType, SnakeBoardSize, TicTacToeDifficulty } from '../types/game'
 import { TicTacToe } from '../games/TicTacToe'
 import { Chess } from '../games/Chess'
 import { Checkers } from '../games/Checkers'
@@ -25,6 +25,7 @@ function getInitialState(gameType: GameType, hostUserId: string): unknown {
     case 'uno': return Uno.createInitialState(2)
     case 'president': return President.createInitialState(5)
     case 'wisecracker': return Wisecracker.createInitialState(hostUserId)
+    case 'snake': return createInitialSnakeState('medium')
   }
 }
 
@@ -34,6 +35,30 @@ const COMPUTER_USER_ID = new mongoose.Types.ObjectId('000000000000000000000000')
 interface TicTacToeState {
   board: (string | null)[]
   currentSymbol: 'X' | 'O'
+}
+
+interface SnakeCell {
+  x: number
+  y: number
+}
+
+interface SnakeState {
+  width: number
+  height: number
+  snake: SnakeCell[]
+  direction: 'up' | 'down' | 'left' | 'right'
+  pendingDirection: 'up' | 'down' | 'left' | 'right'
+  food: SnakeCell
+  score: number
+  isGameOver: boolean
+  hasStarted?: boolean
+  tickMs: number
+}
+
+const SNAKE_BOARD_DIMENSIONS: Record<SnakeBoardSize, number> = {
+  small: 12,
+  medium: 18,
+  large: 24,
 }
 
 function getGameMode(game: IGameDocument): GameMode {
@@ -133,6 +158,47 @@ function chooseComputerTicTacToeMove(state: TicTacToeState, difficulty: TicTacTo
   return chooseHardTicTacToeMove(state)
 }
 
+function createInitialSnakeState(boardSize: SnakeBoardSize): SnakeState {
+  const size = SNAKE_BOARD_DIMENSIONS[boardSize]
+  const center = Math.floor(size / 2)
+  return {
+    width: size,
+    height: size,
+    snake: [
+      { x: center, y: center },
+      { x: center - 1, y: center },
+      { x: center - 2, y: center },
+    ],
+    direction: 'right',
+    pendingDirection: 'right',
+    food: { x: Math.min(center + 3, size - 1), y: center },
+    score: 3,
+    isGameOver: false,
+    hasStarted: false,
+    tickMs: 120,
+  }
+}
+
+function validateSnakeStateForGame(game: IGameDocument, state: SnakeState): void {
+  const boardSize = game.metadata.boardSize
+  if (!boardSize) throw new BadRequestError('Missing Snake board size')
+
+  const expectedSize = SNAKE_BOARD_DIMENSIONS[boardSize]
+  if (state.width !== expectedSize || state.height !== expectedSize) {
+    throw new BadRequestError('Invalid Snake board dimensions')
+  }
+  if (state.score !== state.snake.length) {
+    throw new BadRequestError('Snake score must match snake length')
+  }
+
+  const allCells = [...state.snake, state.food]
+  for (const cell of allCells) {
+    if (cell.x < 0 || cell.x >= state.width || cell.y < 0 || cell.y >= state.height) {
+      throw new BadRequestError('Snake state contains an out-of-bounds cell')
+    }
+  }
+}
+
 class GameService {
   async createGame(userId: string, username: string, gameType: GameType, _opponentUserId?: string): Promise<IGameDocument> {
     const gameCode = generateGameCode()
@@ -165,12 +231,24 @@ class GameService {
     return game
   }
 
-  async createSinglePlayerGame(userId: string, username: string, gameType: 'ticTacToe', difficulty: TicTacToeDifficulty): Promise<IGameDocument> {
+  async createSinglePlayerGame(
+    userId: string,
+    username: string,
+    options: { gameType: 'ticTacToe'; difficulty?: TicTacToeDifficulty } | { gameType: 'snake'; boardSize?: SnakeBoardSize; wallLooping?: boolean }
+  ): Promise<IGameDocument> {
     const gameCode = generateGameCode()
-    const initialState = TicTacToe.createInitialState()
+    const ticTacToeDifficulty = options.gameType === 'ticTacToe' ? options.difficulty || 'easy' : 'easy'
+    const snakeBoardSize = options.gameType === 'snake' ? options.boardSize || 'medium' : 'medium'
+    const snakeWallLooping = options.gameType === 'snake' ? Boolean(options.wallLooping) : false
+    const initialState = options.gameType === 'ticTacToe'
+      ? TicTacToe.createInitialState()
+      : createInitialSnakeState(snakeBoardSize)
+    const metadata = options.gameType === 'ticTacToe'
+      ? { ratedGame: false, mode: 'singlePlayer' as const, difficulty: ticTacToeDifficulty }
+      : { ratedGame: false, mode: 'singlePlayer' as const, boardSize: snakeBoardSize, wallLooping: snakeWallLooping }
 
     const game = await Game.create({
-      gameType,
+      gameType: options.gameType,
       gameCode,
       players: [{ userId, username, index: 0 }],
       currentTurnIndex: 0,
@@ -179,12 +257,12 @@ class GameService {
       moveHistory: [],
       startedAt: new Date(),
       lastMoveAt: new Date(),
-      metadata: { ratedGame: false, mode: 'singlePlayer', difficulty },
+      metadata,
     })
 
-    await redisSet(`game:${gameType}:${game._id}`, {
+    await redisSet(`game:${options.gameType}:${game._id}`, {
       gameId: game._id,
-      gameType,
+      gameType: options.gameType,
       players: game.players,
       currentTurnIndex: 0,
       gameState: initialState,
@@ -194,6 +272,44 @@ class GameService {
 
     emitGamesChanged(game)
 
+    return game
+  }
+
+  async updateSinglePlayerSettings(
+    gameId: string,
+    userId: string,
+    settings: { difficulty: TicTacToeDifficulty } | { boardSize: SnakeBoardSize; wallLooping: boolean }
+  ): Promise<IGameDocument> {
+    const game = await Game.findById(gameId)
+    if (!game) throw new NotFoundError('Game')
+    if (getGameMode(game) !== 'singlePlayer') throw new BadRequestError('This is not a single player game')
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
+
+    const isParticipant = game.players.some((player) => player.userId.toString() === userId)
+    if (!isParticipant) throw new ForbiddenError('Only players in this game can change settings')
+
+    if (game.gameType === 'ticTacToe') {
+      if (!('difficulty' in settings)) throw new BadRequestError('Invalid Tic Tac Toe settings')
+      if (game.moveHistory.length > 0) throw new BadRequestError('Settings are locked after play starts')
+      game.metadata.difficulty = settings.difficulty
+    } else if (game.gameType === 'snake') {
+      if (!('boardSize' in settings)) throw new BadRequestError('Invalid Snake settings')
+      const state = game.gameState as unknown as SnakeState
+      if (state.hasStarted || game.moveHistory.length > 0) {
+        throw new BadRequestError('Settings are locked after play starts')
+      }
+      game.metadata.boardSize = settings.boardSize
+      game.metadata.wallLooping = settings.wallLooping
+      game.gameState = createInitialSnakeState(settings.boardSize) as unknown as Record<string, unknown>
+    } else {
+      throw new BadRequestError('Settings are not available for this game')
+    }
+
+    game.lastMoveAt = new Date()
+    await game.save()
+    await this.cacheGame(game)
+    emitGameUpdated(game)
+    emitGamesChanged(game)
     return game
   }
 
@@ -449,6 +565,53 @@ class GameService {
       isDraw: false,
       winType: 'three_in_a_row',
     }
+  }
+
+  async saveSinglePlayerSnakeState(gameId: string, userId: string, state: SnakeState, completed = false): Promise<IGameDocument> {
+    const game = await Game.findById(gameId)
+    if (!game) throw new NotFoundError('Game')
+    if (game.gameType !== 'snake') throw new BadRequestError('Only Snake state can be saved here')
+    if (getGameMode(game) !== 'singlePlayer') throw new BadRequestError('This is not a single player game')
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
+
+    const player = game.players.find((p) => p.userId.toString() === userId)
+    if (!player) throw new BadRequestError('You are not in this game')
+
+    validateSnakeStateForGame(game, state)
+
+    game.gameState = state as unknown as Record<string, unknown>
+    game.lastMoveAt = new Date()
+
+    if (completed || state.isGameOver) {
+      game.status = 'completed'
+      game.completedAt = new Date()
+      game.result = {
+        winner: player.userId,
+        winnerName: player.username,
+        isDraw: false,
+        winType: `score:${state.snake.length}`,
+      }
+      game.moveHistory.push({
+        moveNumber: game.moveHistory.length + 1,
+        playerId: player.userId,
+        playerName: player.username,
+        move: `Score ${state.snake.length}`,
+        timestamp: new Date(),
+      })
+    }
+
+    await game.save()
+    await this.cacheGame(game)
+
+    if (game.status === 'completed') {
+      await userService.invalidateLeaderboardCache(game.gameType)
+      emitGameOver(game)
+    }
+
+    emitGameUpdated(game)
+    emitGamesChanged(game)
+
+    return game
   }
 
   private async makeWisecrackerMoveOnGame(game: IGameDocument, userId: string, move: unknown): Promise<IGameDocument> {

@@ -57,7 +57,7 @@ app.use('/api/auth', authRoutes)
 app.use('/api/games', gameRoutes)
 app.use('/api/users', userRoutes)
 app.get('/api/leaderboards', getLeaderboard)
-app.get('/api/leaderboards/single-player/ticTacToe', getSinglePlayerLeaderboard)
+app.get('/api/leaderboards/single-player/:gameType', getSinglePlayerLeaderboard)
 app.get('/api/leaderboards/:gameType', getLeaderboardByType)
 
 app.use(errorHandler)

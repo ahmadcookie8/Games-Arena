@@ -24,5 +24,6 @@ export function getGameLabel(gameType: GameType): string {
     case 'checkers': return 'Checkers'
     case 'uno': return 'Uno'
     case 'president': return 'President'
+    case 'snake': return 'Snake'
   }
 }

@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express'
 import { AuthRequest } from '../middleware/auth'
 import { gameService } from '../services/gameService'
-import { createGameSchema, createSinglePlayerGameSchema, joinGameSchema, singlePlayerMoveSchema } from '../utils/validators'
+import { createGameSchema, createSinglePlayerGameSchema, joinGameSchema, singlePlayerMoveSchema, singlePlayerSettingsSchema, snakeStateCheckpointSchema } from '../utils/validators'
 import { NotFoundError } from '../utils/errors'
 
 export async function createGame(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
@@ -16,8 +16,8 @@ export async function createGame(req: AuthRequest, res: Response, next: NextFunc
 
 export async function createSinglePlayerGame(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { gameType, difficulty } = createSinglePlayerGameSchema.parse(req.body)
-    const game = await gameService.createSinglePlayerGame(req.user!.userId, req.user!.username, gameType, difficulty)
+    const payload = createSinglePlayerGameSchema.parse(req.body)
+    const game = await gameService.createSinglePlayerGame(req.user!.userId, req.user!.username, payload)
     res.status(201).json({ gameId: game._id, game, gameState: game.gameState, moveHistory: game.moveHistory })
   } catch (err) {
     next(err)
@@ -58,6 +58,26 @@ export async function makeSinglePlayerMove(req: AuthRequest, res: Response, next
   try {
     const { move } = singlePlayerMoveSchema.parse(req.body)
     const game = await gameService.makeSinglePlayerTicTacToeMove(req.params.gameId, req.user!.userId, move)
+    res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function saveSinglePlayerSnakeState(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { gameState, completed } = snakeStateCheckpointSchema.parse(req.body)
+    const game = await gameService.saveSinglePlayerSnakeState(req.params.gameId, req.user!.userId, gameState, completed)
+    res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function updateSinglePlayerSettings(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const settings = singlePlayerSettingsSchema.parse(req.body)
+    const game = await gameService.updateSinglePlayerSettings(req.params.gameId, req.user!.userId, settings)
     res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
   } catch (err) {
     next(err)

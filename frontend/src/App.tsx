@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard'
 import GameBoard from './pages/GameBoard'
 import GameHistory from './pages/GameHistory'
 import SinglePlayerGame from './pages/SinglePlayerGame'
+import SnakeGame from './pages/SnakeGame'
 import { useAuth } from './hooks/useAuth'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
         <Route path="/game/:gameId" element={<ProtectedRoute><GameBoard /></ProtectedRoute>} />
         <Route path="/single-player/tic-tac-toe/:gameId" element={<ProtectedRoute><SinglePlayerGame /></ProtectedRoute>} />
+        <Route path="/single-player/snake/:gameId" element={<ProtectedRoute><SnakeGame /></ProtectedRoute>} />
         <Route path="/history" element={<ProtectedRoute><GameHistory /></ProtectedRoute>} />
       </Routes>
     </BrowserRouter>

@@ -16,7 +16,6 @@ import ticTacToeThumb from '../assets/game-tic-tac-toe.png'
 import wisecrackerThumb from '../assets/game-wisecracker.png'
 
 const GAME_TYPES: GameType[] = ['ticTacToe', 'wisecracker']
-const DIFFICULTIES: TicTacToeDifficulty[] = ['easy', 'medium', 'hard']
 const THUMBNAILS: Partial<Record<GameType, string>> = {
   ticTacToe: ticTacToeThumb,
   wisecracker: wisecrackerThumb,
@@ -68,6 +67,15 @@ function getDifficultyLabel(difficulty?: TicTacToeDifficulty): string {
   return `${difficulty[0].toUpperCase()}${difficulty.slice(1)}`
 }
 
+function getSnakeSettingsLabel(game: Game): string {
+  const size = game.metadata?.boardSize || 'medium'
+  return `${size[0].toUpperCase()}${size.slice(1)} grid - ${game.metadata?.wallLooping ? 'Looping walls' : 'Solid walls'}`
+}
+
+function getSinglePlayerPath(game: Game): string {
+  return game.gameType === 'snake' ? `/single-player/snake/${game._id}` : `/single-player/tic-tac-toe/${game._id}`
+}
+
 export default function Dashboard() {
   useReveal()
   const { user } = useAuth()
@@ -78,7 +86,6 @@ export default function Dashboard() {
   const [games, setGames] = useState<GameLists>({ active: [], waiting: [], completed: [] })
   const [soloGames, setSoloGames] = useState<GameLists>({ active: [], waiting: [], completed: [] })
   const [joinCode, setJoinCode] = useState('')
-  const [difficulty, setDifficulty] = useState<TicTacToeDifficulty>('easy')
   const [modal, setModal] = useState<ModalState | null>(null)
 
   function setActiveTab(tab: DashboardTab) {
@@ -118,10 +125,19 @@ export default function Dashboard() {
 
   async function handleCreateSolo() {
     try {
-      const res = await api.post('/api/games/single-player/create', { gameType: 'ticTacToe', difficulty })
+      const res = await api.post('/api/games/single-player/create', { gameType: 'ticTacToe' })
       navigate(`/single-player/tic-tac-toe/${res.data.gameId}`)
     } catch (err: unknown) {
       showGenericErrorModal(err, 'Could not create solo Tic Tac Toe')
+    }
+  }
+
+  async function handleCreateSnake() {
+    try {
+      const res = await api.post('/api/games/single-player/create', { gameType: 'snake' })
+      navigate(`/single-player/snake/${res.data.gameId}`)
+    } catch (err: unknown) {
+      showGenericErrorModal(err, 'Could not create Snake')
     }
   }
 
@@ -314,35 +330,49 @@ export default function Dashboard() {
     return (
       <>
         <section className="reveal rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:p-5">
-          <h2 className="mb-3 text-lg font-semibold text-text-primary">Solo Tic Tac Toe</h2>
-          <div className="card-glow overflow-hidden rounded-xl border border-border bg-elevated shadow-sm">
-            <img src={ticTacToeThumb} alt="" className="h-32 w-full object-cover" />
-            <div className="space-y-4 p-4">
-              <div>
-                <span className="block text-base font-semibold text-text-primary">Tic Tac Toe</span>
-                <span className="block text-xs text-text-muted">Play against the computer and save your result</span>
+          <h2 className="mb-3 text-lg font-semibold text-text-primary">Play Now</h2>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="card-glow overflow-hidden rounded-xl border border-border bg-elevated shadow-sm">
+              <img src={ticTacToeThumb} alt="" className="h-32 w-full object-cover" />
+              <div className="space-y-4 p-4">
+                <div>
+                  <span className="block text-base font-semibold text-text-primary">Tic Tac Toe</span>
+                  <span className="block text-xs text-text-muted">Play against the computer and save your result</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCreateSolo}
+                  className="min-h-11 w-full cursor-pointer rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:opacity-90"
+                >
+                  Start Game
+                </button>
               </div>
-              <div className="flex flex-wrap gap-2" aria-label="Difficulty">
-                {DIFFICULTIES.map((level) => (
-                  <button
-                    key={level}
-                    type="button"
-                    onClick={() => setDifficulty(level)}
-                    className={`min-h-10 cursor-pointer rounded-lg px-3 py-2 text-sm font-medium capitalize transition-colors duration-150 ${
-                      difficulty === level ? 'bg-accent text-text-on-accent shadow-accent' : 'bg-page text-text-secondary hover:bg-overlay hover:text-text-primary'
-                    }`}
-                  >
-                    {level}
-                  </button>
-                ))}
+            </div>
+
+            <div className="card-glow overflow-hidden rounded-xl border border-border bg-elevated shadow-sm">
+              <div className="flex h-32 items-center justify-center bg-page p-4">
+                <div className="grid h-24 w-24 grid-cols-6 gap-1 rounded-xl border border-border bg-border p-1">
+                  {Array.from({ length: 36 }).map((_, index) => (
+                    <span
+                      key={index}
+                      className={`rounded-[3px] ${[14, 15, 16, 22].includes(index) ? 'bg-success' : index === 27 ? 'bg-danger' : 'bg-elevated'}`}
+                    />
+                  ))}
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={handleCreateSolo}
-                className="min-h-11 w-full cursor-pointer rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:opacity-90"
-              >
-                Start Solo Game
-              </button>
+              <div className="space-y-4 p-4">
+                <div>
+                  <span className="block text-base font-semibold text-text-primary">Snake</span>
+                  <span className="block text-xs text-text-muted">Grow the snake and save your best length</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCreateSnake}
+                  className="min-h-11 w-full cursor-pointer rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:opacity-90"
+                >
+                  Start Game
+                </button>
+              </div>
             </div>
           </div>
         </section>
@@ -355,14 +385,17 @@ export default function Dashboard() {
             <div className="space-y-2">
               {soloGames.active.map((game) => (
                 <div key={game._id} className="card-glow flex items-center justify-between gap-4 rounded-xl border border-border bg-elevated px-4 py-3">
-                  <button onClick={() => navigate(`/single-player/tic-tac-toe/${game._id}`)} className="min-w-0 flex-1 cursor-pointer text-left">
-                    <span className="block truncate font-medium text-text-primary">Tic Tac Toe</span>
-                    <span className="block text-xs text-text-muted">{getDifficultyLabel(game.metadata?.difficulty)} difficulty</span>
+                  <button
+                    onClick={() => navigate(getSinglePlayerPath(game))}
+                    className="min-w-0 flex-1 cursor-pointer text-left"
+                  >
+                    <span className="block truncate font-medium text-text-primary">{getGameLabel(game.gameType)}</span>
+                    <span className="block text-xs text-text-muted">{game.gameType === 'snake' ? getSnakeSettingsLabel(game) : `${getDifficultyLabel(game.metadata?.difficulty)} difficulty`}</span>
                   </button>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => navigate(`/single-player/tic-tac-toe/${game._id}`)}
+                      onClick={() => navigate(getSinglePlayerPath(game))}
                       className="cursor-pointer rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-text-on-accent transition-colors duration-150 hover:bg-accent-hover"
                     >
                       Resume
@@ -449,13 +482,14 @@ function CompletedGamesList({ games, username, showDifficulty = false }: { games
   return (
     <div className="space-y-2">
       {games.map((game) => {
-        const label = game.result?.isDraw ? 'Draw' : game.result?.winnerName === username ? 'Win' : 'Loss'
-        const labelClass = game.result?.isDraw ? 'bg-warning-subtle text-warning-text' : label === 'Win' ? 'bg-success-subtle text-success-text' : 'bg-danger-subtle text-danger-text'
+        const snakeScore = game.gameType === 'snake' ? String(game.result?.winType || '').replace('score:', '') : null
+        const label = snakeScore ? `Length ${snakeScore}` : game.result?.isDraw ? 'Draw' : game.result?.winnerName === username ? 'Win' : 'Loss'
+        const labelClass = snakeScore ? 'bg-success-subtle text-success-text' : game.result?.isDraw ? 'bg-warning-subtle text-warning-text' : label === 'Win' ? 'bg-success-subtle text-success-text' : 'bg-danger-subtle text-danger-text'
         return (
           <div key={game._id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-page/80 px-3 py-2">
             <span className="min-w-0 truncate text-sm font-medium text-text-primary">
               {getGameLabel(game.gameType)}
-              {showDifficulty && <span className="ml-2 text-xs font-normal text-text-muted">{getDifficultyLabel(game.metadata?.difficulty)}</span>}
+              {showDifficulty && <span className="ml-2 text-xs font-normal text-text-muted">{game.gameType === 'snake' ? getSnakeSettingsLabel(game) : getDifficultyLabel(game.metadata?.difficulty)}</span>}
             </span>
             <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${labelClass}`}>{label}</span>
           </div>

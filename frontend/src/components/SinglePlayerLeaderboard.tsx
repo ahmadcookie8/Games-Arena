@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
 import api from '../lib/api'
-import { TicTacToeDifficulty } from '../types/game'
+import { SnakeBoardSize, TicTacToeDifficulty } from '../types/game'
 
 interface SinglePlayerLeaderboardEntry {
   rank: number
   username: string
-  difficulty: TicTacToeDifficulty
+  gameType?: 'ticTacToe'
+  difficulty?: TicTacToeDifficulty
+  boardSize?: SnakeBoardSize
+  wallLooping?: boolean
+  score?: number
   wins: number
   losses: number
   draws: number
@@ -24,11 +28,16 @@ function getDifficultyClass(difficulty: TicTacToeDifficulty): string {
 
 export default function SinglePlayerLeaderboard() {
   const { user } = useAuth()
-  const [entries, setEntries] = useState<SinglePlayerLeaderboardEntry[]>([])
+  const [ticTacToeEntries, setTicTacToeEntries] = useState<SinglePlayerLeaderboardEntry[]>([])
+  const [snakeEntries, setSnakeEntries] = useState<SinglePlayerLeaderboardEntry[]>([])
 
   const fetchLeaderboard = useCallback(() => {
-    void api.get('/api/leaderboards/single-player/ticTacToe').then((res) => {
-      setEntries(res.data.leaderboard || [])
+    void Promise.all([
+      api.get('/api/leaderboards/single-player/ticTacToe'),
+      api.get('/api/leaderboards/single-player/snake'),
+    ]).then(([ticTacToeRes, snakeRes]) => {
+      setTicTacToeEntries(ticTacToeRes.data.leaderboard || [])
+      setSnakeEntries(snakeRes.data.leaderboard || [])
     })
   }, [])
 
@@ -40,23 +49,45 @@ export default function SinglePlayerLeaderboard() {
     <div className="rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl">
       <div className="mb-4">
         <h3 className="text-base font-semibold text-text-primary">Solo High Scores</h3>
-        <p className="text-xs text-text-muted">Wins by difficulty</p>
+        <p className="text-xs text-text-muted">Tic Tac Toe wins and Snake length</p>
       </div>
 
-      <div className="space-y-1">
-        {entries.map((entry) => (
+      <div className="mb-4">
+        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Tic Tac Toe</h4>
+        <div className="space-y-1">
+        {ticTacToeEntries.map((entry) => (
           <div
-            key={`${entry.rank}-${entry.username}-${entry.difficulty}`}
+            key={`ttt-${entry.rank}-${entry.username}-${entry.difficulty}`}
             className={`flex items-center gap-2 rounded-lg px-2 py-2 transition-colors duration-150 ${entry.username === user?.username ? 'bg-accent-subtle' : 'hover:bg-elevated'}`}
           >
             <span className="w-7 text-center text-sm text-text-muted">#{entry.rank}</span>
             <span className="min-w-0 flex-1 truncate font-medium text-text-primary">{entry.username}</span>
-            <span className={`rounded-full px-2 py-0.5 text-xs font-medium capitalize ${getDifficultyClass(entry.difficulty)}`}>{entry.difficulty}</span>
+            <span className={`rounded-full px-2 py-0.5 text-xs font-medium capitalize ${getDifficultyClass(entry.difficulty || 'easy')}`}>{entry.difficulty || 'easy'}</span>
             <span className="text-sm font-medium text-success">{entry.wins}W</span>
             <span className="font-mono text-xs text-text-muted">{(entry.winRate * 100).toFixed(0)}%</span>
           </div>
         ))}
-        {entries.length === 0 && <p className="rounded-lg bg-page px-3 py-6 text-center text-sm text-text-muted">No solo scores yet</p>}
+        {ticTacToeEntries.length === 0 && <p className="rounded-lg bg-page px-3 py-4 text-center text-sm text-text-muted">No Tic Tac Toe scores yet</p>}
+        </div>
+      </div>
+
+      <div>
+        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Snake</h4>
+        <div className="space-y-1">
+        {snakeEntries.map((entry) => (
+          <div
+            key={`snake-${entry.rank}-${entry.username}-${entry.boardSize}-${entry.wallLooping}`}
+            className={`flex items-center gap-2 rounded-lg px-2 py-2 transition-colors duration-150 ${entry.username === user?.username ? 'bg-accent-subtle' : 'hover:bg-elevated'}`}
+          >
+            <span className="w-7 text-center text-sm text-text-muted">#{entry.rank}</span>
+            <span className="min-w-0 flex-1 truncate font-medium text-text-primary">{entry.username}</span>
+            <span className="rounded-full bg-overlay px-2 py-0.5 text-xs font-medium capitalize text-text-secondary">{entry.boardSize || 'medium'}</span>
+            <span className="rounded-full bg-overlay px-2 py-0.5 text-xs font-medium text-text-secondary">{entry.wallLooping ? 'Loop' : 'Solid'}</span>
+            <span className="font-mono text-sm font-medium text-success">{entry.score || 0}</span>
+          </div>
+        ))}
+        {snakeEntries.length === 0 && <p className="rounded-lg bg-page px-3 py-4 text-center text-sm text-text-muted">No Snake scores yet</p>}
+        </div>
       </div>
     </div>
   )

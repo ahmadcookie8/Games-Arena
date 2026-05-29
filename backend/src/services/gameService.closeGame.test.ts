@@ -89,6 +89,32 @@ function createSoloGame(overrides: Partial<Record<string, unknown>> = {}) {
   })
 }
 
+function createSnakeGame(overrides: Partial<Record<string, unknown>> = {}) {
+  return createGame({
+    gameType: 'snake',
+    players: [
+      { userId: { toString: () => 'user-1' }, username: 'alice', index: 0 },
+    ],
+    currentTurnIndex: 0,
+    currentTurn: { toString: () => 'user-1' },
+    gameState: {
+      width: 12,
+      height: 12,
+      snake: [{ x: 3, y: 3 }, { x: 2, y: 3 }, { x: 1, y: 3 }],
+      direction: 'right',
+      pendingDirection: 'right',
+      food: { x: 6, y: 3 },
+      score: 3,
+      isGameOver: false,
+      hasStarted: false,
+      tickMs: 120,
+    },
+    result: undefined,
+    metadata: { ratedGame: false, mode: 'singlePlayer', boardSize: 'small', wallLooping: false },
+    ...overrides,
+  })
+}
+
 describe('gameService.closeGame', () => {
   beforeEach(() => {
     jest.clearAllMocks()
@@ -150,7 +176,7 @@ describe('gameService single player Tic Tac Toe', () => {
     const game = createSoloGame({ metadata: { ratedGame: false, mode: 'singlePlayer', difficulty: 'medium' } })
     Game.create.mockResolvedValue(game)
 
-    const result = await gameService.createSinglePlayerGame('user-1', 'alice', 'ticTacToe', 'medium')
+    const result = await gameService.createSinglePlayerGame('user-1', 'alice', { gameType: 'ticTacToe', difficulty: 'medium' })
 
     expect(result).toBe(game)
     expect(Game.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -162,6 +188,39 @@ describe('gameService single player Tic Tac Toe', () => {
       status: 'active',
       metadata: game.metadata,
     }))
+  })
+
+  it('defaults Tic Tac Toe difficulty to easy when omitted', async () => {
+    const game = createSoloGame({ metadata: { ratedGame: false, mode: 'singlePlayer', difficulty: 'easy' } })
+    Game.create.mockResolvedValue(game)
+
+    await gameService.createSinglePlayerGame('user-1', 'alice', { gameType: 'ticTacToe' })
+
+    expect(Game.create).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: { ratedGame: false, mode: 'singlePlayer', difficulty: 'easy' },
+    }))
+  })
+
+  it('updates Tic Tac Toe difficulty before the first move', async () => {
+    const game = createSoloGame({ metadata: { ratedGame: false, mode: 'singlePlayer', difficulty: 'easy' } })
+    Game.findById.mockResolvedValue(game)
+
+    await gameService.updateSinglePlayerSettings('game-1', 'user-1', { difficulty: 'hard' })
+
+    expect(game.metadata.difficulty).toBe('hard')
+    expect(game.save).toHaveBeenCalled()
+    expect(redisSet).toHaveBeenCalledWith('game:ticTacToe:game-1', expect.objectContaining({
+      metadata: game.metadata,
+    }))
+  })
+
+  it('rejects Tic Tac Toe difficulty changes after the first move', async () => {
+    const game = createSoloGame({
+      moveHistory: [{ moveNumber: 1, playerId: { toString: () => 'user-1' }, playerName: 'alice', move: '0', timestamp: new Date() }],
+    })
+    Game.findById.mockResolvedValue(game)
+
+    await expect(gameService.updateSinglePlayerSettings('game-1', 'user-1', { difficulty: 'medium' })).rejects.toBeInstanceOf(BadRequestError)
   })
 
   it('records a human move and an AI reply when the game continues', async () => {
@@ -216,6 +275,141 @@ describe('gameService single player Tic Tac Toe', () => {
     expect(game.moveHistory).toHaveLength(1)
     expect(userService.updateStatsAfterGame).not.toHaveBeenCalled()
     expect(userService.invalidateLeaderboardCache).toHaveBeenCalledWith('ticTacToe')
+  })
+})
+
+describe('gameService single player Snake', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('creates an active persisted Snake game with board metadata', async () => {
+    const game = createSnakeGame({ metadata: { ratedGame: false, mode: 'singlePlayer', boardSize: 'large', wallLooping: true } })
+    Game.create.mockResolvedValue(game)
+
+    const result = await gameService.createSinglePlayerGame('user-1', 'alice', { gameType: 'snake', boardSize: 'large', wallLooping: true })
+
+    expect(result).toBe(game)
+    expect(Game.create).toHaveBeenCalledWith(expect.objectContaining({
+      gameType: 'snake',
+      players: [{ userId: 'user-1', username: 'alice', index: 0 }],
+      metadata: { ratedGame: false, mode: 'singlePlayer', boardSize: 'large', wallLooping: true },
+    }))
+    expect(redisSet).toHaveBeenCalledWith('game:snake:game-1', expect.objectContaining({
+      status: 'active',
+      metadata: game.metadata,
+    }))
+  })
+
+  it('defaults Snake to a medium solid-walls board when settings are omitted', async () => {
+    const game = createSnakeGame({ metadata: { ratedGame: false, mode: 'singlePlayer', boardSize: 'medium', wallLooping: false } })
+    Game.create.mockResolvedValue(game)
+
+    await gameService.createSinglePlayerGame('user-1', 'alice', { gameType: 'snake' })
+
+    expect(Game.create).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: { ratedGame: false, mode: 'singlePlayer', boardSize: 'medium', wallLooping: false },
+    }))
+  })
+
+  it('updates Snake settings before the run starts and resets board dimensions', async () => {
+    const game = createSnakeGame()
+    Game.findById.mockResolvedValue(game)
+
+    await gameService.updateSinglePlayerSettings('game-1', 'user-1', { boardSize: 'large', wallLooping: true })
+
+    expect(game.metadata.boardSize).toBe('large')
+    expect(game.metadata.wallLooping).toBe(true)
+    expect(game.gameState.width).toBe(24)
+    expect(game.gameState.height).toBe(24)
+    expect(game.gameState.hasStarted).toBe(false)
+  })
+
+  it('rejects Snake settings changes after the run starts', async () => {
+    const game = createSnakeGame({
+      gameState: {
+        width: 12,
+        height: 12,
+        snake: [{ x: 3, y: 3 }, { x: 2, y: 3 }, { x: 1, y: 3 }],
+        direction: 'right',
+        pendingDirection: 'right',
+        food: { x: 6, y: 3 },
+        score: 3,
+        isGameOver: false,
+        hasStarted: true,
+        tickMs: 120,
+      },
+    })
+    Game.findById.mockResolvedValue(game)
+
+    await expect(gameService.updateSinglePlayerSettings('game-1', 'user-1', { boardSize: 'medium', wallLooping: false })).rejects.toBeInstanceOf(BadRequestError)
+  })
+
+  it('saves an active Snake checkpoint without completing the game', async () => {
+    const game = createSnakeGame()
+    Game.findById.mockResolvedValue(game)
+
+    await gameService.saveSinglePlayerSnakeState('game-1', 'user-1', {
+      width: 12,
+      height: 12,
+      snake: [{ x: 4, y: 3 }, { x: 3, y: 3 }, { x: 2, y: 3 }, { x: 1, y: 3 }],
+      direction: 'right',
+      pendingDirection: 'right',
+      food: { x: 6, y: 3 },
+      score: 4,
+      isGameOver: false,
+      tickMs: 120,
+    })
+
+    expect(game.status).toBe('active')
+    expect(game.gameState.score).toBe(4)
+    expect(game.result).toBeUndefined()
+    expect(game.moveHistory).toHaveLength(0)
+    expect(userService.updateStatsAfterGame).not.toHaveBeenCalled()
+  })
+
+  it('completes Snake with final score equal to snake length', async () => {
+    const game = createSnakeGame()
+    Game.findById.mockResolvedValue(game)
+
+    await gameService.saveSinglePlayerSnakeState('game-1', 'user-1', {
+      width: 12,
+      height: 12,
+      snake: [{ x: 4, y: 3 }, { x: 3, y: 3 }, { x: 2, y: 3 }, { x: 1, y: 3 }],
+      direction: 'right',
+      pendingDirection: 'right',
+      food: { x: 6, y: 3 },
+      score: 4,
+      isGameOver: true,
+      tickMs: 120,
+    }, true)
+
+    expect(game.status).toBe('completed')
+    expect(game.result).toEqual(expect.objectContaining({
+      winnerName: 'alice',
+      isDraw: false,
+      winType: 'score:4',
+    }))
+    expect(game.moveHistory[0].move).toBe('Score 4')
+    expect(userService.updateStatsAfterGame).not.toHaveBeenCalled()
+    expect(userService.invalidateLeaderboardCache).toHaveBeenCalledWith('snake')
+  })
+
+  it('rejects invalid Snake state scores', async () => {
+    const game = createSnakeGame()
+    Game.findById.mockResolvedValue(game)
+
+    await expect(gameService.saveSinglePlayerSnakeState('game-1', 'user-1', {
+      width: 12,
+      height: 12,
+      snake: [{ x: 4, y: 3 }, { x: 3, y: 3 }],
+      direction: 'right',
+      pendingDirection: 'right',
+      food: { x: 6, y: 3 },
+      score: 99,
+      isGameOver: false,
+      tickMs: 120,
+    })).rejects.toBeInstanceOf(BadRequestError)
   })
 })
 

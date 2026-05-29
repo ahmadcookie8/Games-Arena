@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import axios from 'axios'
 import Header from '../components/Header'
@@ -10,6 +10,7 @@ import TicTacToeBoard from '../components/TicTacToeBoard'
 import { useAuth } from '../hooks/useAuth'
 import { useGameState } from '../hooks/useGameState'
 import api from '../lib/api'
+import { TicTacToeDifficulty } from '../types/game'
 
 interface ModalState {
   title: string
@@ -25,6 +26,8 @@ interface ModalState {
   }
 }
 
+const DIFFICULTIES: TicTacToeDifficulty[] = ['easy', 'medium', 'hard']
+
 function getErrorMessage(err: unknown): string {
   if (axios.isAxiosError(err)) {
     return err.response?.data?.error || err.message || 'Something went wrong'
@@ -39,8 +42,30 @@ export default function SinglePlayerGame() {
   const { game, loading, setGame } = useGameState(gameId)
   const [modal, setModal] = useState<ModalState | null>(null)
   const [isMoving, setIsMoving] = useState(false)
+  const [selectedDifficulty, setSelectedDifficulty] = useState<TicTacToeDifficulty>('easy')
 
   const closeModal = useCallback(() => setModal(null), [])
+
+  useEffect(() => {
+    if (!game) return
+    setSelectedDifficulty(game.metadata?.difficulty || 'easy')
+  }, [game])
+
+  async function updateDifficulty(difficulty: TicTacToeDifficulty) {
+    if (!game || game.moveHistory.length > 0 || game.status !== 'active') return
+
+    try {
+      setSelectedDifficulty(difficulty)
+      const res = await api.patch(`/api/games/${game._id}/single-player/settings`, { difficulty })
+      setGame(res.data.game)
+    } catch (err: unknown) {
+      setModal({
+        title: 'Could not update difficulty',
+        message: getErrorMessage(err),
+        variant: 'danger',
+      })
+    }
+  }
 
   async function handleMove(move: string) {
     if (!game) return
@@ -102,6 +127,7 @@ export default function SinglePlayerGame() {
   const isActive = game.status === 'active'
   const isMyTurn = isActive && !isCompleted && !isMoving
   const difficulty = game.metadata?.difficulty || 'easy'
+  const settingsLocked = game.moveHistory.length > 0 || !isActive
   const resultText = game.result?.isDraw
     ? 'Draw'
     : game.result?.winnerName
@@ -155,6 +181,27 @@ export default function SinglePlayerGame() {
               </div>
             )}
             <section className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl sm:p-5">
+              <div className="mb-5 flex flex-col gap-3 rounded-xl border border-border bg-page p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-text-primary">Difficulty</h2>
+                  <p className="text-xs text-text-muted">{settingsLocked ? 'Locked after the first move' : 'Choose before your first move'}</p>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {DIFFICULTIES.map((level) => (
+                    <button
+                      key={level}
+                      type="button"
+                      onClick={() => void updateDifficulty(level)}
+                      disabled={settingsLocked}
+                      className={`min-h-10 cursor-pointer rounded-lg px-3 py-2 text-sm font-medium capitalize transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-70 ${
+                        selectedDifficulty === level ? 'bg-accent text-text-on-accent shadow-accent' : 'bg-elevated text-text-secondary hover:bg-overlay hover:text-text-primary'
+                      }`}
+                    >
+                      {level}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <TicTacToeBoard gameState={game.gameState} isMyTurn={isMyTurn} onMove={(move) => void handleMove(move)} />
             </section>
           </div>

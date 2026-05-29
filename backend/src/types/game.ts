@@ -1,8 +1,9 @@
-export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker'
+export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'snake'
 export type GameStatus = 'active' | 'paused' | 'completed' | 'abandoned'
 export type WinType = 'checkmate' | 'resignation' | 'timeout' | 'draw'
 export type GameMode = 'multiplayer' | 'singlePlayer'
 export type TicTacToeDifficulty = 'easy' | 'medium' | 'hard'
+export type SnakeBoardSize = 'small' | 'medium' | 'large'
 
 export interface Player {
   userId: string
