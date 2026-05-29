@@ -210,6 +210,15 @@ export default function SnakeGame() {
     setIsPlaying(true)
   }, [game?.status])
 
+  const handleDirectionPress = useCallback((event: React.PointerEvent<HTMLButtonElement>, direction: Direction) => {
+    event.preventDefault()
+    setPendingDirection(direction)
+  }, [setPendingDirection])
+
+  const preventTouchContextMenu = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault()
+  }, [])
+
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       const keyToDirection: Partial<Record<string, Direction>> = {
@@ -492,11 +501,25 @@ export default function SnakeGame() {
                 </button>
                 <span className="rounded-lg bg-overlay px-3 py-2 text-sm text-text-secondary">Use WASD or arrow keys</span>
               </div>
-              <div className="mx-auto mt-4 grid w-44 grid-cols-3 gap-2 sm:hidden" aria-label="Touch controls">
+              <div className="mx-auto mt-4 grid w-44 select-none grid-cols-3 gap-2 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent] sm:hidden" aria-label="Touch controls">
                 <span />
-                <button type="button" onClick={() => setPendingDirection('up')} className="min-h-12 rounded-lg bg-elevated text-sm font-bold text-text-primary">Up</button>
+                <button
+                  type="button"
+                  onPointerDown={(event) => handleDirectionPress(event, 'up')}
+                  onContextMenu={preventTouchContextMenu}
+                  className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
+                >
+                  Up
+                </button>
                 <span />
-                <button type="button" onClick={() => setPendingDirection('left')} className="min-h-12 rounded-lg bg-elevated text-sm font-bold text-text-primary">Left</button>
+                <button
+                  type="button"
+                  onPointerDown={(event) => handleDirectionPress(event, 'left')}
+                  onContextMenu={preventTouchContextMenu}
+                  className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
+                >
+                  Left
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -511,9 +534,23 @@ export default function SnakeGame() {
                 >
                   {!snakeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
-                <button type="button" onClick={() => setPendingDirection('right')} className="min-h-12 rounded-lg bg-elevated text-sm font-bold text-text-primary">Right</button>
+                <button
+                  type="button"
+                  onPointerDown={(event) => handleDirectionPress(event, 'right')}
+                  onContextMenu={preventTouchContextMenu}
+                  className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
+                >
+                  Right
+                </button>
                 <span />
-                <button type="button" onClick={() => setPendingDirection('down')} className="min-h-12 rounded-lg bg-elevated text-sm font-bold text-text-primary">Down</button>
+                <button
+                  type="button"
+                  onPointerDown={(event) => handleDirectionPress(event, 'down')}
+                  onContextMenu={preventTouchContextMenu}
+                  className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
+                >
+                  Down
+                </button>
                 <span />
               </div>
             </div>
