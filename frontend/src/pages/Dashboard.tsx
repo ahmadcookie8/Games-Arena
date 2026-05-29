@@ -14,11 +14,14 @@ import { useReveal } from '../hooks/useReveal'
 import { getGameLabel } from '../lib/gameRules'
 import ticTacToeThumb from '../assets/game-tic-tac-toe.png'
 import wisecrackerThumb from '../assets/game-wisecracker.png'
+import scrabbleThumb from '../assets/game-scrabble.png'
+import snakeThumb from '../assets/game-snake.png'
 
 const GAME_TYPES: GameType[] = ['ticTacToe', 'wisecracker', 'scrabble']
 const THUMBNAILS: Partial<Record<GameType, string>> = {
   ticTacToe: ticTacToeThumb,
   wisecracker: wisecrackerThumb,
+  scrabble: scrabbleThumb,
 }
 
 type DashboardTab = 'multiplayer' | 'singlePlayer'
@@ -358,16 +361,7 @@ export default function Dashboard() {
             </div>
 
             <div className="card-glow overflow-hidden rounded-xl border border-border bg-elevated shadow-sm">
-              <div className="flex h-32 items-center justify-center bg-page p-4">
-                <div className="grid h-24 w-24 grid-cols-6 gap-1 rounded-xl border border-border bg-border p-1">
-                  {Array.from({ length: 36 }).map((_, index) => (
-                    <span
-                      key={index}
-                      className={`rounded-[3px] ${[14, 15, 16, 22].includes(index) ? 'bg-success' : index === 27 ? 'bg-danger' : 'bg-elevated'}`}
-                    />
-                  ))}
-                </div>
-              </div>
+              <img src={snakeThumb} alt="" className="h-32 w-full object-cover" />
               <div className="space-y-4 p-4">
                 <div>
                   <span className="block text-base font-semibold text-text-primary">Snake</span>
