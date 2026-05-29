@@ -23,6 +23,7 @@
     "mongoose": "^7.3.1",
     "socket.io": "^4.6.2",
     "winston": "^3.9.0",
+    "word-list": "^4.1.0",
     "zod": "^3.21.4"
   },
   "devDependencies": {

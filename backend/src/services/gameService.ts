@@ -10,7 +10,8 @@ import { Checkers } from '../games/Checkers'
 import { Uno } from '../games/Uno'
 import { President } from '../games/President'
 import { Wisecracker, WisecrackerAction, WisecrackerState } from '../games/Wisecracker'
-import { emitGameOver, emitGameUpdated, emitGamesChanged, emitMoveMade } from './socketNotifier'
+import { Scrabble, ScrabbleAction, ScrabbleState } from '../games/Scrabble'
+import { emitChatMessage, emitGameOver, emitGameReplayCreated, emitGameUpdated, emitGamesChanged, emitMoveMade } from './socketNotifier'
 import { userService } from './userService'
 
 function generateGameCode(): string {
@@ -25,12 +26,15 @@ function getInitialState(gameType: GameType, hostUserId: string): unknown {
     case 'uno': return Uno.createInitialState(2)
     case 'president': return President.createInitialState(5)
     case 'wisecracker': return Wisecracker.createInitialState(hostUserId)
+    case 'scrabble': return Scrabble.createInitialState(hostUserId, false)
     case 'snake': return createInitialSnakeState('medium')
   }
 }
 
 const SNAPSHOT_INTERVAL = 10
 const COMPUTER_USER_ID = new mongoose.Types.ObjectId('000000000000000000000000')
+const MAX_CHAT_MESSAGES = 100
+const MAX_CHAT_TEXT_LENGTH = 500
 
 interface TicTacToeState {
   board: (string | null)[]
@@ -200,7 +204,7 @@ function validateSnakeStateForGame(game: IGameDocument, state: SnakeState): void
 }
 
 class GameService {
-  async createGame(userId: string, username: string, gameType: GameType, _opponentUserId?: string): Promise<IGameDocument> {
+  async createGame(userId: string, username: string, gameType: GameType, _options?: { opponentUserId?: string }): Promise<IGameDocument> {
     const gameCode = generateGameCode()
     const initialState = getInitialState(gameType, userId)
 
@@ -212,8 +216,9 @@ class GameService {
       currentTurn: userId,
       gameState: initialState,
       moveHistory: [],
+      chatMessages: [],
       lastMoveAt: new Date(),
-      metadata: { ratedGame: false, mode: 'multiplayer' },
+      metadata: { ratedGame: false, mode: 'multiplayer', infiniteLetters: gameType === 'scrabble' ? false : undefined },
     })
 
     await redisSet(`game:${gameType}:${game._id}`, {
@@ -255,6 +260,7 @@ class GameService {
       currentTurn: userId,
       gameState: initialState,
       moveHistory: [],
+      chatMessages: [],
       startedAt: new Date(),
       lastMoveAt: new Date(),
       metadata,
@@ -313,8 +319,63 @@ class GameService {
     return game
   }
 
+  async updateGameSettings(gameId: string, userId: string, settings: { infiniteLetters?: boolean }): Promise<IGameDocument> {
+    const game = await Game.findById(gameId)
+    if (!game) throw new NotFoundError('Game')
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
+    if (getGameMode(game) !== 'multiplayer') throw new BadRequestError('This is not a multiplayer game')
+
+    const host = game.players[0]
+    if (!host || host.userId.toString() !== userId) throw new ForbiddenError('Only the room host can change settings')
+    if (game.gameType !== 'scrabble') throw new BadRequestError('Settings are not available for this game')
+    if (game.moveHistory.length > 0) throw new BadRequestError('Settings are locked after play starts')
+    if (typeof settings.infiniteLetters !== 'boolean') throw new BadRequestError('No settings were provided')
+
+    game.metadata.infiniteLetters = settings.infiniteLetters
+    game.gameState = Scrabble.setInfiniteLetters(game.gameState as unknown as ScrabbleState, settings.infiniteLetters) as unknown as Record<string, unknown>
+    game.lastMoveAt = new Date()
+
+    await game.save()
+    await this.cacheGame(game)
+    emitGameUpdated(game)
+    emitGamesChanged(game)
+    return game
+  }
+
   async getGame(gameId: string): Promise<IGameDocument | null> {
     return Game.findById(gameId)
+  }
+
+  async sendChatMessage(gameId: string, userId: string, username: string, text: string): Promise<unknown> {
+    const game = await Game.findById(gameId)
+    if (!game) throw new NotFoundError('Game')
+    if (getGameMode(game) !== 'multiplayer') throw new BadRequestError('Chat is only available in multiplayer games')
+
+    const player = game.players.find((p) => p.userId.toString() === userId)
+    if (!player) throw new ForbiddenError('Only players in this game can chat')
+
+    const cleaned = text.trim()
+    if (!cleaned) throw new BadRequestError('Message cannot be blank')
+    if (cleaned.length > MAX_CHAT_TEXT_LENGTH) throw new BadRequestError(`Message must be ${MAX_CHAT_TEXT_LENGTH} characters or fewer`)
+
+    const message = {
+      messageId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      userId: new mongoose.Types.ObjectId(userId),
+      username,
+      text: cleaned,
+      timestamp: new Date(),
+    }
+    const publicMessage = {
+      ...message,
+      userId,
+    }
+    game.chatMessages.push(message)
+    if (game.chatMessages.length > MAX_CHAT_MESSAGES) {
+      game.chatMessages = game.chatMessages.slice(-MAX_CHAT_MESSAGES) as typeof game.chatMessages
+    }
+    await game.save()
+    emitChatMessage(game, publicMessage)
+    return publicMessage
   }
 
   async listGamesForUser(userId: string, mode: GameMode = 'multiplayer'): Promise<{ active: IGameDocument[]; waiting: IGameDocument[]; completed: IGameDocument[] }> {
@@ -333,7 +394,8 @@ class GameService {
     const game = await Game.findOne({ gameCode })
     if (!game) throw new NotFoundError('Game')
     if (game.players.some((p) => p.userId.toString() === userId)) throw new BadRequestError('Already in this game')
-    if (game.gameType !== 'wisecracker' && game.players.length >= 2) throw new BadRequestError('Game is full')
+    const maxPlayers = game.gameType === 'wisecracker' || game.gameType === 'scrabble' ? 4 : 2
+    if (game.players.length >= maxPlayers) throw new BadRequestError('Game is full')
     if (game.status !== 'active') throw new BadRequestError('Game is not active')
 
     game.players.push({
@@ -347,6 +409,9 @@ class GameService {
     })
     if (game.gameType === 'wisecracker') {
       game.gameState = Wisecracker.addPlayer(game.gameState as unknown as WisecrackerState, userId) as unknown as Record<string, unknown>
+    }
+    if (game.gameType === 'scrabble') {
+      game.gameState = Scrabble.addPlayer(game.gameState as unknown as ScrabbleState, userId) as unknown as Record<string, unknown>
     }
     await game.save()
 
@@ -370,7 +435,11 @@ class GameService {
       return this.makeWisecrackerMoveOnGame(game, userId, move)
     }
 
-    throw new BadRequestError('Only Tic Tac Toe and Wisecracker are available right now')
+    if (game.gameType === 'scrabble') {
+      return this.makeScrabbleMoveOnGame(game, userId, move)
+    }
+
+    throw new BadRequestError('Only Tic Tac Toe, Wisecracker, and Scrabble are available right now')
   }
 
   async setPlayerConnection(gameId: string, userId: string, isConnected: boolean): Promise<IGameDocument | null> {
@@ -677,6 +746,91 @@ class GameService {
     return game
   }
 
+  private async makeScrabbleMoveOnGame(game: IGameDocument, userId: string, move: unknown): Promise<IGameDocument> {
+    const action = parseScrabbleAction(move)
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
+    if (game.players.length < 2) throw new BadRequestError('Waiting for another player')
+    const playerIndex = game.players.findIndex((p) => p.userId.toString() === userId)
+    if (playerIndex === -1) throw new BadRequestError('You are not in this game')
+
+    const players = game.players.map((player) => ({
+      userId: player.userId.toString(),
+      username: player.username,
+    }))
+    const result = Scrabble.applyAction(
+      game.gameState as unknown as ScrabbleState,
+      action,
+      userId,
+      players,
+      game.currentTurnIndex,
+      game.moveHistory.length + 1
+    )
+    const player = game.players[playerIndex]
+
+    game.gameState = result.state as unknown as Record<string, unknown>
+    game.moveHistory.push({
+      moveNumber: game.moveHistory.length + 1,
+      playerId: player.userId,
+      playerName: player.username,
+      move: result.description || Scrabble.getMoveDescription(action),
+      timestamp: new Date(),
+    })
+    game.lastMoveAt = new Date()
+
+    const shouldAdvanceTurn = !result.completed
+      && action.type !== 'offerTrade'
+      && !(action.type === 'respondTrade' && !action.accept)
+
+    if (result.completed) {
+      game.status = 'completed'
+      game.completedAt = new Date()
+      if (result.isDraw) {
+        game.result = { isDraw: true, winType: 'draw' }
+      } else {
+        const winner = game.players.find((p) => p.userId.toString() === result.winnerUserId)
+        game.result = {
+          winner: winner?.userId,
+          winnerName: winner?.username,
+          isDraw: false,
+          winType: 'score',
+        }
+      }
+    } else if (shouldAdvanceTurn) {
+      this.advanceTurnSkippingGivenUp(game)
+    }
+
+    await game.save()
+    await this.cacheGame(game)
+
+    if (game.status === 'completed') {
+      await this.updateStatsForCompletedGame(game)
+    }
+
+    emitMoveMade(game, Scrabble.getMoveDescription(action))
+    emitGameUpdated(game)
+    emitGamesChanged(game)
+
+    if (game.status === 'completed') {
+      emitGameOver(game)
+    }
+
+    return game
+  }
+
+  private advanceTurnSkippingGivenUp(game: IGameDocument): void {
+    const state = game.gameState as unknown as { givenUpUserIds?: string[] }
+    const givenUp = new Set(state.givenUpUserIds || [])
+    for (let offset = 1; offset <= game.players.length; offset += 1) {
+      const nextIndex = (game.currentTurnIndex + offset) % game.players.length
+      const nextPlayer = game.players[nextIndex]
+      if (!givenUp.has(nextPlayer.userId.toString())) {
+        game.currentTurnIndex = nextIndex
+        game.currentTurn = nextPlayer.userId
+        return
+      }
+    }
+  }
+
   async resignGame(gameId: string, userId: string): Promise<{ winner: string; reason: string }> {
     const game = await Game.findById(gameId)
     if (!game) throw new NotFoundError('Game')
@@ -725,6 +879,66 @@ class GameService {
     emitGamesChanged(game)
 
     return game
+  }
+
+  async replayGame(gameId: string, userId: string): Promise<IGameDocument> {
+    const sourceGame = await Game.findById(gameId)
+    if (!sourceGame) throw new NotFoundError('Game')
+
+    const isParticipant = sourceGame.players.some((player) => player.userId.toString() === userId)
+    if (!isParticipant) throw new ForbiddenError('Only players in this game can start a replay')
+    if (getGameMode(sourceGame) !== 'multiplayer') throw new BadRequestError('Replay is only available for multiplayer games')
+    if (sourceGame.status !== 'completed') throw new BadRequestError('Only completed games can be replayed')
+    if (sourceGame.gameType !== 'ticTacToe' && sourceGame.gameType !== 'scrabble') {
+      throw new BadRequestError('Replay is not available for this game')
+    }
+    if (sourceGame.players.length < 2) throw new BadRequestError('Replay needs at least two players')
+
+    const gameCode = generateGameCode()
+    const players = sourceGame.players.map((player, index) => ({
+      userId: player.userId,
+      username: player.username,
+      index,
+      color: player.color,
+      rank: player.rank,
+      isConnected: false,
+      disconnectCount: 0,
+    }))
+
+    let initialState: unknown = sourceGame.gameType === 'ticTacToe'
+      ? TicTacToe.createInitialState()
+      : Scrabble.createInitialState(sourceGame.players[0].userId.toString(), Boolean(sourceGame.metadata?.infiniteLetters))
+
+    if (sourceGame.gameType === 'scrabble') {
+      for (const player of sourceGame.players.slice(1)) {
+        initialState = Scrabble.addPlayer(initialState as ScrabbleState, player.userId.toString())
+      }
+    }
+
+    const replayGame = await Game.create({
+      gameType: sourceGame.gameType,
+      gameCode,
+      players,
+      currentTurnIndex: 0,
+      currentTurn: sourceGame.players[0].userId,
+      gameState: initialState,
+      moveHistory: [],
+      chatMessages: [],
+      startedAt: new Date(),
+      lastMoveAt: new Date(),
+      metadata: {
+        ratedGame: sourceGame.metadata?.ratedGame ?? false,
+        mode: 'multiplayer',
+        infiniteLetters: sourceGame.gameType === 'scrabble' ? Boolean(sourceGame.metadata?.infiniteLetters) : undefined,
+      },
+    })
+
+    await this.cacheGame(replayGame)
+    emitGameReplayCreated(sourceGame, replayGame)
+    emitGamesChanged(sourceGame)
+    emitGamesChanged(replayGame)
+
+    return replayGame
   }
 
   async resumeGame(gameId: string): Promise<IGameDocument | null> {
@@ -841,5 +1055,51 @@ function parseWisecrackerAction(move: unknown): WisecrackerAction {
       return { type: 'returnToLobby' }
     default:
       throw new BadRequestError('Unknown Wisecracker action')
+  }
+}
+
+function parseScrabbleAction(move: unknown): ScrabbleAction {
+  if (!move || typeof move !== 'object') throw new BadRequestError('Invalid Scrabble action')
+  const action = move as Record<string, unknown>
+
+  switch (action.type) {
+    case 'placeTiles':
+      return {
+        type: 'placeTiles',
+        placements: Array.isArray(action.placements)
+          ? action.placements.map((placement) => {
+              const item = placement as Record<string, unknown>
+              return {
+                rackTileId: String(item.rackTileId || ''),
+                row: Number(item.row),
+                col: Number(item.col),
+                blankLetter: item.blankLetter === undefined ? undefined : String(item.blankLetter),
+              }
+            })
+          : [],
+      }
+    case 'exchangeWithBag':
+      return {
+        type: 'exchangeWithBag',
+        rackTileIds: Array.isArray(action.rackTileIds) ? action.rackTileIds.map(String) : [],
+      }
+    case 'offerTrade':
+      return {
+        type: 'offerTrade',
+        targetUserId: String(action.targetUserId || ''),
+        rackTileIds: Array.isArray(action.rackTileIds) ? action.rackTileIds.map(String) : [],
+      }
+    case 'respondTrade':
+      return {
+        type: 'respondTrade',
+        accept: Boolean(action.accept),
+        rackTileIds: Array.isArray(action.rackTileIds) ? action.rackTileIds.map(String) : undefined,
+      }
+    case 'pass':
+      return { type: 'pass' }
+    case 'giveUp':
+      return { type: 'giveUp' }
+    default:
+      throw new BadRequestError('Unknown Scrabble action')
   }
 }

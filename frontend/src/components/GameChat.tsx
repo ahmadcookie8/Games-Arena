@@ -1,0 +1,74 @@
+import { useEffect, useRef, useState } from 'react'
+import { ChatMessage } from '../types/game'
+
+interface Props {
+  messages: ChatMessage[]
+  currentUserId?: string
+  onSend: (text: string) => Promise<{ success: boolean; error?: string }>
+}
+
+export default function GameChat({ messages, currentUserId, onSend }: Props) {
+  const [text, setText] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [isSending, setIsSending] = useState(false)
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+  }, [messages.length])
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault()
+    const trimmed = text.trim()
+    if (!trimmed) return
+    setIsSending(true)
+    setError(null)
+    const result = await onSend(trimmed)
+    if (result.success) {
+      setText('')
+    } else {
+      setError(result.error || 'Message failed')
+    }
+    setIsSending(false)
+  }
+
+  return (
+    <div className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl">
+      <h3 className="mb-3 text-base font-semibold text-text-primary">Chat</h3>
+      <div ref={scrollRef} className="max-h-64 space-y-2 overflow-y-auto rounded-lg bg-page p-2">
+        {messages.length === 0 && <p className="px-3 py-6 text-center text-sm text-text-muted">No messages yet</p>}
+        {messages.map((message) => {
+          const isMine = message.userId === currentUserId
+          return (
+            <div key={message.messageId} className={`rounded-lg border px-3 py-2 text-sm ${isMine ? 'border-accent/30 bg-accent-subtle text-accent' : 'border-border bg-elevated text-text-primary'}`}>
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="truncate text-xs font-semibold">{message.username}</span>
+                <time className="shrink-0 text-[0.65rem] text-text-muted">{formatTime(message.timestamp)}</time>
+              </div>
+              <p className="whitespace-pre-wrap break-words">{message.text}</p>
+            </div>
+          )
+        })}
+      </div>
+      <form onSubmit={submit} className="mt-3 flex gap-2">
+        <input
+          value={text}
+          maxLength={500}
+          onChange={(event) => setText(event.target.value)}
+          placeholder="Message this lobby"
+          className="min-h-10 min-w-0 flex-1 rounded-lg border border-border bg-overlay px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-[var(--border-focus)]/20"
+        />
+        <button disabled={isSending || !text.trim()} className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-text-on-accent disabled:cursor-not-allowed disabled:opacity-50">
+          Send
+        </button>
+      </form>
+      {error && <p className="mt-2 text-xs text-danger-text">{error}</p>}
+    </div>
+  )
+}
+
+function formatTime(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}

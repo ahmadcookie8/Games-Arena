@@ -150,6 +150,14 @@ Important backend game files:
 
 ## Frontend Behavior
 
+### Game Options
+
+All game-specific options, toggles, customization, and rule settings belong inside the game's own screen or lobby state, not on the dashboard game-selection cards. The dashboard should create or join rooms; per-game setup belongs in the room so players can see and agree on the rules before play starts.
+
+### Modals And Prompts
+
+Never use browser-native `alert`, `confirm`, or `prompt` in the frontend. Use the app's modal UI for all confirmations, errors, text prompts, and user decisions so the experience stays consistent across desktop and mobile.
+
 ### Auth State
 
 `frontend/src/hooks/useAuth.ts` is the auth source of truth on the client.

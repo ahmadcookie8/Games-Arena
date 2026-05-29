@@ -8,8 +8,10 @@ import {
   makeSinglePlayerMove,
   saveSinglePlayerSnakeState,
   updateSinglePlayerSettings,
+  updateGameSettings,
   resignGame,
   closeGame,
+  replayGame,
   resumeGame,
   getMoveHistory,
 } from '../controllers/gameController'
@@ -26,10 +28,12 @@ router.get('/', listGames)
 router.post('/:gameId/single-player/move', makeSinglePlayerMove)
 router.post('/:gameId/single-player/snake/state', saveSinglePlayerSnakeState)
 router.patch('/:gameId/single-player/settings', updateSinglePlayerSettings)
+router.patch('/:gameId/settings', updateGameSettings)
 router.get('/:gameId', getGame)
 router.post('/:gameId/join', joinGame)
 router.post('/:gameId/resign', resignGame)
 router.post('/:gameId/close', closeGame)
+router.post('/:gameId/replay', replayGame)
 router.get('/:gameId/resume', resumeGame)
 router.get('/:gameId/history', getMoveHistory)
 

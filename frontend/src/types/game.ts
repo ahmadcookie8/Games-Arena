@@ -1,4 +1,4 @@
-export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'snake'
+export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'scrabble' | 'snake'
 export type GameStatus = 'active' | 'paused' | 'completed' | 'abandoned'
 export type GameMode = 'multiplayer' | 'singlePlayer'
 export type TicTacToeDifficulty = 'easy' | 'medium' | 'hard'
@@ -20,6 +20,14 @@ export interface MoveRecord {
   timestamp: string
 }
 
+export interface ChatMessage {
+  messageId: string
+  userId: string
+  username: string
+  text: string
+  timestamp: string
+}
+
 export interface Game {
   _id: string
   gameType: GameType
@@ -29,6 +37,7 @@ export interface Game {
   currentTurnIndex: number
   gameState: Record<string, unknown>
   moveHistory: MoveRecord[]
+  chatMessages?: ChatMessage[]
   createdAt: string
   lastMoveAt: string
   result?: {
@@ -43,7 +52,66 @@ export interface Game {
     difficulty?: TicTacToeDifficulty
     boardSize?: SnakeBoardSize
     wallLooping?: boolean
+    infiniteLetters?: boolean
   }
+}
+
+export type ScrabblePremium = 'DL' | 'TL' | 'DW' | 'TW'
+
+export interface ScrabbleTile {
+  id: string
+  letter: string
+  value: number
+  isBlank: boolean
+}
+
+export interface ScrabbleCell {
+  tile: ScrabbleTile
+  placedBy: string
+}
+
+export interface ScrabbleWordScore {
+  word: string
+  cells: Array<{
+    row: number
+    col: number
+    letter: string
+    baseValue: number
+    letterMultiplier: number
+    afterLetterMultiplier: number
+    isNewTile: boolean
+  }>
+  wordMultiplier: number
+  subtotal: number
+  total: number
+}
+
+export interface ScrabbleScoreEvent {
+  moveNumber: number
+  playerId: string
+  playerName: string
+  words: ScrabbleWordScore[]
+  total: number
+}
+
+export interface ScrabblePendingTrade {
+  offerId: string
+  fromUserId: string
+  targetUserId: string
+  offeredTiles: ScrabbleTile[]
+}
+
+export interface ScrabbleState {
+  board: (ScrabbleCell | null)[][]
+  racks: Record<string, ScrabbleTile[]>
+  scores: Record<string, number>
+  bag: ScrabbleTile[]
+  infiniteLetters: boolean
+  usedPremiumSquares: string[]
+  pendingTrade: ScrabblePendingTrade | null
+  consecutivePasses: number
+  givenUpUserIds: string[]
+  lastScoreEvent: ScrabbleScoreEvent | null
 }
 
 export type WisecrackerPhase = 'lobby' | 'prompt' | 'answering' | 'revealing' | 'roundResult' | 'completed'

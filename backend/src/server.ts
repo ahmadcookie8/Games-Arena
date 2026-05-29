@@ -12,6 +12,7 @@ import { getLeaderboard, getLeaderboardByType, getSinglePlayerLeaderboard } from
 import { getTokenFromHeaders, verifyAuthToken } from './utils/authToken'
 import { setSocketServer } from './services/socketNotifier'
 import { AuthPayload } from './types/api'
+import { presentGameForUser } from './utils/gamePresenter'
 
 import authRoutes from './routes/auth'
 import gameRoutes from './routes/games'
@@ -82,7 +83,7 @@ io.on('connection', (socket) => {
     joinedGameIds.add(gameId)
     const game = await gameService.setPlayerConnection(gameId, user.userId, true)
     console.log(`Socket ${socket.id} joined room ${gameId}`)
-    callback?.(game ? { game } : { error: 'Game not found' })
+    callback?.(game ? { game: presentGameForUser(game, user.userId) } : { error: 'Game not found' })
   })
 
   socket.on('joinGame', async ({ gameCode }: { gameCode: string }, callback?: (response: { game?: unknown; gameState?: unknown; error?: string }) => void) => {
@@ -92,7 +93,8 @@ io.on('connection', (socket) => {
       socket.join(String(game._id))
       joinedGameIds.add(String(game._id))
       const updated = await gameService.setPlayerConnection(String(game._id), user.userId, true)
-      callback?.({ game: updated || game, gameState: (updated || game).gameState })
+      const presented = presentGameForUser(updated || game, user.userId)
+      callback?.({ game: presented, gameState: presented.gameState })
     } catch (err) {
       callback?.({ error: 'Failed to join game' })
     }
@@ -101,9 +103,18 @@ io.on('connection', (socket) => {
   socket.on('makeMove', async ({ gameId, move }: { gameId: string; move: unknown }, callback?: (response: { success: boolean; game?: unknown; error?: string }) => void) => {
     try {
       const game = await gameService.makeMove(gameId, user.userId, move)
-      callback?.({ success: true, game })
+      callback?.({ success: true, game: presentGameForUser(game, user.userId) })
     } catch (err) {
       callback?.({ success: false, error: err instanceof Error ? err.message : 'Move failed' })
+    }
+  })
+
+  socket.on('sendChatMessage', async ({ gameId, text }: { gameId: string; text: string }, callback?: (response: { success: boolean; message?: unknown; error?: string }) => void) => {
+    try {
+      const message = await gameService.sendChatMessage(gameId, user.userId, user.username, String(text || ''))
+      callback?.({ success: true, message })
+    } catch (err) {
+      callback?.({ success: false, error: err instanceof Error ? err.message : 'Message failed' })
     }
   })
 
@@ -111,7 +122,8 @@ io.on('connection', (socket) => {
     try {
       const game = await Game.findById(gameId)
       if (!game) return callback?.({ error: 'Game not found' })
-      callback?.({ game, gameState: game.gameState, moveHistory: game.moveHistory })
+      const presented = presentGameForUser(game, user.userId)
+      callback?.({ game: presented, gameState: presented.gameState, moveHistory: presented.moveHistory })
     } catch (err) {
       callback?.({ error: 'Failed to get game state' })
     }
@@ -134,7 +146,8 @@ io.on('connection', (socket) => {
       socket.join(gameId)
       joinedGameIds.add(gameId)
       await gameService.setPlayerConnection(gameId, user.userId, true)
-      callback?.({ game, gameState: game.gameState })
+      const presented = presentGameForUser(game, user.userId)
+      callback?.({ game: presented, gameState: presented.gameState })
     } catch (err) {
       callback?.({ error: 'Failed to resume game' })
     }

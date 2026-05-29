@@ -42,6 +42,7 @@ export default function SinglePlayerGame() {
   const { game, loading, setGame } = useGameState(gameId)
   const [modal, setModal] = useState<ModalState | null>(null)
   const [isMoving, setIsMoving] = useState(false)
+  const [isReplaying, setIsReplaying] = useState(false)
   const [selectedDifficulty, setSelectedDifficulty] = useState<TicTacToeDifficulty>('easy')
 
   const closeModal = useCallback(() => setModal(null), [])
@@ -101,6 +102,27 @@ export default function SinglePlayerGame() {
     }
   }
 
+  async function playAgain() {
+    if (!game || isReplaying) return
+
+    try {
+      setIsReplaying(true)
+      const res = await api.post('/api/games/single-player/create', {
+        gameType: 'ticTacToe',
+        difficulty,
+      })
+      navigate(`/single-player/tic-tac-toe/${res.data.gameId || res.data.game?._id}`, { replace: true })
+    } catch (err: unknown) {
+      setModal({
+        title: 'Could not start replay',
+        message: getErrorMessage(err),
+        variant: 'danger',
+      })
+    } finally {
+      setIsReplaying(false)
+    }
+  }
+
   function promptCloseGame() {
     if (!game || game.status !== 'active') return
     setModal({
@@ -135,6 +157,7 @@ export default function SinglePlayerGame() {
         ? 'You won'
         : `${game.result.winnerName} won`
       : null
+  const canPlayAgain = isCompleted || !isActive
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
@@ -153,6 +176,16 @@ export default function SinglePlayerGame() {
             <p className="text-sm capitalize text-text-muted">{difficulty} difficulty</p>
           </div>
           <div className="flex items-center gap-3">
+            {canPlayAgain && (
+              <button
+                type="button"
+                onClick={() => void playAgain()}
+                disabled={isReplaying}
+                className="cursor-pointer rounded-lg bg-accent px-3 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isReplaying ? 'Starting...' : 'Play Again'}
+              </button>
+            )}
             {isActive && (
               <button
                 type="button"
@@ -176,8 +209,16 @@ export default function SinglePlayerGame() {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
           <div className="min-w-0">
             {isCompleted && resultText && (
-              <div className="mb-4 rounded-xl border border-success/30 bg-success-subtle px-4 py-3 text-center text-sm font-medium text-success-text">
+              <div className="mb-4 flex flex-col items-center justify-center gap-3 rounded-xl border border-success/30 bg-success-subtle px-4 py-3 text-center text-sm font-medium text-success-text sm:flex-row">
                 Game over: {resultText}
+                <button
+                  type="button"
+                  onClick={() => void playAgain()}
+                  disabled={isReplaying}
+                  className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isReplaying ? 'Starting...' : 'Play Again'}
+                </button>
               </div>
             )}
             <section className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl sm:p-5">

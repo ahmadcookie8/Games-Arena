@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import axios from 'axios'
+import GameChat from '../components/GameChat'
 import GameInvite from '../components/GameInvite'
 import Header from '../components/Header'
 import Modal, { ModalVariant } from '../components/Modal'
 import MoveHistory from '../components/MoveHistory'
 import PageBackdrop from '../components/PageBackdrop'
 import PlayerCard from '../components/PlayerCard'
+import ScrabbleBoard from '../components/ScrabbleBoard'
 import TicTacToeBoard from '../components/TicTacToeBoard'
 import WisecrackerBoard from '../components/WisecrackerBoard'
 import { useAuth } from '../hooks/useAuth'
@@ -14,11 +16,17 @@ import { useGameState } from '../hooks/useGameState'
 import { useSocket } from '../hooks/useSocket'
 import api from '../lib/api'
 import { getGameLabel } from '../lib/gameRules'
-import { Game } from '../types/game'
+import { ChatMessage, Game } from '../types/game'
 
 interface MoveResponse {
   success: boolean
   game?: Game
+  error?: string
+}
+
+interface ChatResponse {
+  success: boolean
+  message?: ChatMessage
   error?: string
 }
 
@@ -59,6 +67,12 @@ export default function GameBoard() {
   const { game, loading, setGame } = useGameState(gameId)
   const { emit, on, connected } = useSocket()
   const [modal, setModal] = useState<ModalState | null>(null)
+  const [isReplaying, setIsReplaying] = useState(false)
+  const latestGameRef = useRef<Game | null>(null)
+
+  useEffect(() => {
+    latestGameRef.current = game
+  }, [game])
 
   const showGameErrorModal = useCallback((error: string) => {
     const modalByError: Record<string, ModalState> = {
@@ -118,12 +132,29 @@ export default function GameBoard() {
       setGame(updatedGame)
     })
 
+    const offChatMessage = on('chatMessage', (data: unknown) => {
+      const { gameId: messageGameId, message } = data as { gameId: string; message: ChatMessage }
+      const currentGame = latestGameRef.current
+      if (messageGameId !== gameId || !message || !currentGame) return
+      const existing = currentGame.chatMessages || []
+      if (existing.some((item) => item.messageId === message.messageId)) return
+      setGame({ ...currentGame, chatMessages: [...existing, message].slice(-100) })
+    })
+
+    const offReplayCreated = on('gameReplayCreated', (data: unknown) => {
+      const { oldGameId, gameId: replayGameId } = data as { oldGameId?: string; gameId?: string }
+      if (oldGameId !== gameId || !replayGameId) return
+      navigate(`/game/${replayGameId}`, { replace: true })
+    })
+
     return () => {
       offGameUpdated()
       offMoveMade()
       offGameOver()
+      offChatMessage()
+      offReplayCreated()
     }
-  }, [gameId, connected, emit, on, setGame, showGameErrorModal])
+  }, [gameId, connected, emit, on, navigate, setGame, showGameErrorModal])
 
   function handleMove(move: unknown): Promise<MoveResponse> {
     return new Promise((resolve) => {
@@ -137,6 +168,14 @@ export default function GameBoard() {
 
   function handleTicTacToeMove(move: string) {
     void handleMove(move)
+  }
+
+  function handleSendChat(text: string): Promise<ChatResponse> {
+    return new Promise((resolve) => {
+      emit('sendChatMessage', { gameId, text }, (res: ChatResponse) => {
+        resolve(res)
+      })
+    })
   }
 
   function closeModal() {
@@ -161,6 +200,29 @@ export default function GameBoard() {
         message,
         variant: 'danger',
       })
+    }
+  }
+
+  async function playAgain() {
+    if (!game || isReplaying) return
+
+    try {
+      setIsReplaying(true)
+      const res = await api.post(`/api/games/${game._id}/replay`)
+      navigate(`/game/${res.data.game._id}`, { replace: true })
+    } catch (err: unknown) {
+      const message = axios.isAxiosError(err)
+        ? err.response?.data?.error || err.message || 'Could not start replay'
+        : err instanceof Error
+          ? err.message
+          : 'Could not start replay'
+      setModal({
+        title: 'Could not start replay',
+        message,
+        variant: 'danger',
+      })
+    } finally {
+      setIsReplaying(false)
     }
   }
 
@@ -199,6 +261,7 @@ export default function GameBoard() {
     : game.result?.winnerName
       ? `${game.result.winnerName} won`
       : null
+  const canPlayAgain = isCompleted && (game.gameType === 'ticTacToe' || game.gameType === 'scrabble')
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
@@ -219,6 +282,16 @@ export default function GameBoard() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {canPlayAgain && (
+              <button
+                type="button"
+                onClick={() => void playAgain()}
+                disabled={isReplaying}
+                className="cursor-pointer rounded-lg bg-accent px-3 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isReplaying ? 'Starting...' : 'Play Again'}
+              </button>
+            )}
             {isActive && (
               <button
                 type="button"
@@ -265,13 +338,24 @@ export default function GameBoard() {
               </div>
             )}
             {isCompleted && resultText && (
-              <div className="mb-4 rounded-xl border border-success/30 bg-success-subtle px-4 py-3 text-center text-sm font-medium text-success-text">
+              <div className="mb-4 flex flex-col items-center justify-center gap-3 rounded-xl border border-success/30 bg-success-subtle px-4 py-3 text-center text-sm font-medium text-success-text sm:flex-row">
                 Game over: {resultText}
+                {canPlayAgain && (
+                  <button
+                    type="button"
+                    onClick={() => void playAgain()}
+                    disabled={isReplaying}
+                    className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isReplaying ? 'Starting...' : 'Play Again'}
+                  </button>
+                )}
               </div>
             )}
             <section className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl sm:p-5">
               {game.gameType === 'ticTacToe' && <TicTacToeBoard gameState={game.gameState} isMyTurn={isMyTurn} onMove={handleTicTacToeMove} />}
               {game.gameType === 'wisecracker' && <WisecrackerBoard game={game} user={user} onMove={handleMove} />}
+              {game.gameType === 'scrabble' && <ScrabbleBoard game={game} user={user} isMyTurn={isMyTurn} onMove={handleMove} />}
             </section>
           </div>
           <aside className="min-w-0 space-y-4">
@@ -284,6 +368,7 @@ export default function GameBoard() {
               </div>
             </div>
             <MoveHistory moves={game.moveHistory} />
+            {game.metadata?.mode !== 'singlePlayer' && <GameChat messages={game.chatMessages || []} currentUserId={user?._id} onSend={handleSendChat} />}
           </aside>
         </div>
       </main>

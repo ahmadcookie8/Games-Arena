@@ -1,7 +1,7 @@
 import mongoose, { Schema, Document } from 'mongoose'
 
 export interface IGameDocument extends Document {
-  gameType: 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'snake'
+  gameType: 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'scrabble' | 'snake'
   status: 'active' | 'paused' | 'completed' | 'abandoned'
   gameCode: string
   players: Array<{
@@ -24,6 +24,13 @@ export interface IGameDocument extends Document {
     move: string
     timestamp: Date
   }>
+  chatMessages: Array<{
+    messageId: string
+    userId: mongoose.Types.ObjectId
+    username: string
+    text: string
+    timestamp: Date
+  }>
   createdAt: Date
   startedAt?: Date
   lastMoveAt: Date
@@ -42,13 +49,14 @@ export interface IGameDocument extends Document {
     difficulty?: 'easy' | 'medium' | 'hard'
     boardSize?: 'small' | 'medium' | 'large'
     wallLooping?: boolean
+    infiniteLetters?: boolean
     tournament?: string
   }
 }
 
 const GameSchema = new Schema<IGameDocument>(
   {
-    gameType: { type: String, enum: ['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker', 'snake'], required: true },
+    gameType: { type: String, enum: ['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker', 'scrabble', 'snake'], required: true },
     status: { type: String, enum: ['active', 'paused', 'completed', 'abandoned'], default: 'active' },
     gameCode: { type: String, required: true, unique: true },
     players: [
@@ -75,6 +83,15 @@ const GameSchema = new Schema<IGameDocument>(
         timestamp: { type: Date, default: Date.now },
       },
     ],
+    chatMessages: [
+      {
+        messageId: String,
+        userId: { type: Schema.Types.ObjectId, ref: 'User' },
+        username: String,
+        text: String,
+        timestamp: { type: Date, default: Date.now },
+      },
+    ],
     startedAt: Date,
     lastMoveAt: { type: Date, default: Date.now },
     completedAt: Date,
@@ -92,6 +109,7 @@ const GameSchema = new Schema<IGameDocument>(
       difficulty: { type: String, enum: ['easy', 'medium', 'hard'] },
       boardSize: { type: String, enum: ['small', 'medium', 'large'] },
       wallLooping: Boolean,
+      infiniteLetters: Boolean,
       tournament: String,
     },
   },

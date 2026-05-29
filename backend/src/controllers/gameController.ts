@@ -1,13 +1,14 @@
 import { Response, NextFunction } from 'express'
 import { AuthRequest } from '../middleware/auth'
 import { gameService } from '../services/gameService'
-import { createGameSchema, createSinglePlayerGameSchema, joinGameSchema, singlePlayerMoveSchema, singlePlayerSettingsSchema, snakeStateCheckpointSchema } from '../utils/validators'
+import { createGameSchema, createSinglePlayerGameSchema, gameSettingsSchema, joinGameSchema, singlePlayerMoveSchema, singlePlayerSettingsSchema, snakeStateCheckpointSchema } from '../utils/validators'
 import { NotFoundError } from '../utils/errors'
+import { presentGameForUser } from '../utils/gamePresenter'
 
 export async function createGame(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { gameType, opponentUserId } = createGameSchema.parse(req.body)
-    const game = await gameService.createGame(req.user!.userId, req.user!.username, gameType, opponentUserId)
+    const game = await gameService.createGame(req.user!.userId, req.user!.username, gameType, { opponentUserId })
     res.status(201).json({ gameId: game._id, gameCode: game.gameCode, players: game.players })
   } catch (err) {
     next(err)
@@ -28,7 +29,8 @@ export async function getGame(req: AuthRequest, res: Response, next: NextFunctio
   try {
     const game = await gameService.getGame(req.params.gameId)
     if (!game) throw new NotFoundError('Game')
-    res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
+    const presented = presentGameForUser(game, req.user!.userId)
+    res.json({ game: presented, gameState: presented.gameState, moveHistory: presented.moveHistory })
   } catch (err) {
     next(err)
   }
@@ -38,7 +40,11 @@ export async function listGames(req: AuthRequest, res: Response, next: NextFunct
   try {
     const mode = req.query.mode === 'singlePlayer' ? 'singlePlayer' : 'multiplayer'
     const games = await gameService.listGamesForUser(req.user!.userId, mode)
-    res.json(games)
+    res.json({
+      active: games.active.map((game) => presentGameForUser(game, req.user!.userId)),
+      waiting: games.waiting.map((game) => presentGameForUser(game, req.user!.userId)),
+      completed: games.completed.map((game) => presentGameForUser(game, req.user!.userId)),
+    })
   } catch (err) {
     next(err)
   }
@@ -48,7 +54,8 @@ export async function joinGame(req: AuthRequest, res: Response, next: NextFuncti
   try {
     const { gameCode } = joinGameSchema.parse(req.body)
     const game = await gameService.joinGame(gameCode, req.user!.userId, req.user!.username)
-    res.json({ game, gameState: game.gameState })
+    const presented = presentGameForUser(game, req.user!.userId)
+    res.json({ game: presented, gameState: presented.gameState })
   } catch (err) {
     next(err)
   }
@@ -58,7 +65,8 @@ export async function makeSinglePlayerMove(req: AuthRequest, res: Response, next
   try {
     const { move } = singlePlayerMoveSchema.parse(req.body)
     const game = await gameService.makeSinglePlayerTicTacToeMove(req.params.gameId, req.user!.userId, move)
-    res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
+    const presented = presentGameForUser(game, req.user!.userId)
+    res.json({ game: presented, gameState: presented.gameState, moveHistory: presented.moveHistory })
   } catch (err) {
     next(err)
   }
@@ -84,6 +92,17 @@ export async function updateSinglePlayerSettings(req: AuthRequest, res: Response
   }
 }
 
+export async function updateGameSettings(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const settings = gameSettingsSchema.parse(req.body)
+    const game = await gameService.updateGameSettings(req.params.gameId, req.user!.userId, settings)
+    const presented = presentGameForUser(game, req.user!.userId)
+    res.json({ game: presented, gameState: presented.gameState, moveHistory: presented.moveHistory })
+  } catch (err) {
+    next(err)
+  }
+}
+
 export async function resignGame(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const result = await gameService.resignGame(req.params.gameId, req.user!.userId)
@@ -96,7 +115,18 @@ export async function resignGame(req: AuthRequest, res: Response, next: NextFunc
 export async function closeGame(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const game = await gameService.closeGame(req.params.gameId, req.user!.userId)
-    res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
+    const presented = presentGameForUser(game, req.user!.userId)
+    res.json({ game: presented, gameState: presented.gameState, moveHistory: presented.moveHistory })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function replayGame(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const game = await gameService.replayGame(req.params.gameId, req.user!.userId)
+    const presented = presentGameForUser(game, req.user!.userId)
+    res.status(201).json({ gameId: game._id, game: presented, gameState: presented.gameState, moveHistory: presented.moveHistory })
   } catch (err) {
     next(err)
   }
@@ -106,7 +136,8 @@ export async function resumeGame(req: AuthRequest, res: Response, next: NextFunc
   try {
     const game = await gameService.resumeGame(req.params.gameId)
     if (!game) throw new NotFoundError('Game')
-    res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
+    const presented = presentGameForUser(game, req.user!.userId)
+    res.json({ game: presented, gameState: presented.gameState, moveHistory: presented.moveHistory })
   } catch (err) {
     next(err)
   }

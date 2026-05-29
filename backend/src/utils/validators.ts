@@ -12,7 +12,7 @@ export const loginSchema = z.object({
 })
 
 export const createGameSchema = z.object({
-  gameType: z.enum(['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker']),
+  gameType: z.enum(['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker', 'scrabble']),
   opponentUserId: z.string().optional(),
 })
 
@@ -73,3 +73,7 @@ export const singlePlayerSettingsSchema = z.union([
     wallLooping: z.boolean(),
   }),
 ])
+
+export const gameSettingsSchema = z.object({
+  infiniteLetters: z.boolean().optional(),
+})

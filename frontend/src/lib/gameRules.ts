@@ -20,6 +20,7 @@ export function getGameLabel(gameType: GameType): string {
   switch (gameType) {
     case 'ticTacToe': return 'Tic Tac Toe'
     case 'wisecracker': return 'Wisecracker'
+    case 'scrabble': return 'Scrabble'
     case 'chess': return 'Chess'
     case 'checkers': return 'Checkers'
     case 'uno': return 'Uno'

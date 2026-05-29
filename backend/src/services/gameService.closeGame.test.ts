@@ -24,6 +24,8 @@ jest.mock('../utils/redis', () => ({
 
 jest.mock('./socketNotifier', () => ({
   emitGameOver: jest.fn(),
+  emitChatMessage: jest.fn(),
+  emitGameReplayCreated: jest.fn(),
   emitGameUpdated: jest.fn(),
   emitGamesChanged: jest.fn(),
   emitMoveMade: jest.fn(),
@@ -44,7 +46,9 @@ const { redisDel, redisGet, redisSet } = jest.requireMock('../utils/redis') as {
   redisGet: jest.Mock
   redisSet: jest.Mock
 }
-const { emitGameUpdated, emitGamesChanged } = jest.requireMock('./socketNotifier') as {
+const { emitChatMessage, emitGameReplayCreated, emitGameUpdated, emitGamesChanged } = jest.requireMock('./socketNotifier') as {
+  emitChatMessage: jest.Mock
+  emitGameReplayCreated: jest.Mock
   emitGameUpdated: jest.Mock
   emitGamesChanged: jest.Mock
 }
@@ -164,6 +168,141 @@ describe('gameService.closeGame', () => {
 
     await expect(gameService.closeGame('game-1', 'user-1')).rejects.toBeInstanceOf(BadRequestError)
     expect(redisDel).not.toHaveBeenCalled()
+  })
+})
+
+describe('gameService.sendChatMessage', () => {
+  const chatUserId = '507f1f77bcf86cd799439011'
+  const otherChatUserId = '507f1f77bcf86cd799439012'
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('persists a trimmed player chat message and emits it to the room', async () => {
+    const game = createGame({
+      chatMessages: [],
+      players: [
+        { userId: { toString: () => chatUserId }, username: 'alice' },
+        { userId: { toString: () => otherChatUserId }, username: 'bob' },
+      ],
+    })
+    Game.findById.mockResolvedValue(game)
+
+    const message = await gameService.sendChatMessage('game-1', chatUserId, 'alice', '  hello table  ')
+
+    expect(message).toEqual(expect.objectContaining({
+      username: 'alice',
+      text: 'hello table',
+    }))
+    expect(game.chatMessages).toHaveLength(1)
+    expect(game.save).toHaveBeenCalled()
+    expect(emitChatMessage).toHaveBeenCalledWith(game, message)
+  })
+
+  it('rejects chat from non-players and blank messages', async () => {
+    Game.findById.mockResolvedValue(createGame({
+      chatMessages: [],
+      players: [
+        { userId: { toString: () => chatUserId }, username: 'alice' },
+        { userId: { toString: () => otherChatUserId }, username: 'bob' },
+      ],
+    }))
+
+    await expect(gameService.sendChatMessage('game-1', 'user-3', 'mallory', 'hi')).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(gameService.sendChatMessage('game-1', chatUserId, 'alice', '   ')).rejects.toBeInstanceOf(BadRequestError)
+  })
+
+  it('caps messages at 500 characters and keeps the most recent 100 messages', async () => {
+    const game = createGame({
+      players: [
+        { userId: { toString: () => chatUserId }, username: 'alice' },
+        { userId: { toString: () => otherChatUserId }, username: 'bob' },
+      ],
+      chatMessages: Array.from({ length: 100 }, (_, index) => ({
+        messageId: `old-${index}`,
+        userId: { toString: () => chatUserId },
+        username: 'alice',
+        text: `old ${index}`,
+        timestamp: new Date(),
+      })),
+    })
+    Game.findById.mockResolvedValue(game)
+
+    await expect(gameService.sendChatMessage('game-1', chatUserId, 'alice', 'x'.repeat(501))).rejects.toBeInstanceOf(BadRequestError)
+    await gameService.sendChatMessage('game-1', chatUserId, 'alice', 'new')
+
+    expect(game.chatMessages).toHaveLength(100)
+    expect(game.chatMessages[0].messageId).toBe('old-1')
+    expect(game.chatMessages[99].text).toBe('new')
+  })
+})
+
+describe('gameService.replayGame', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('creates a fresh multiplayer Tic Tac Toe room with copied players', async () => {
+    const sourceGame = createGame({ status: 'completed', chatMessages: [{ messageId: 'old' }], moveHistory: [{ moveNumber: 1 }] })
+    const replayGame = createGame({ _id: 'game-2', status: 'active', gameCode: 'REPLAY', moveHistory: [], chatMessages: [] })
+    Game.findById.mockResolvedValue(sourceGame)
+    Game.create.mockResolvedValue(replayGame)
+
+    const result = await gameService.replayGame('game-1', 'user-2')
+
+    expect(result).toBe(replayGame)
+    expect(Game.create).toHaveBeenCalledWith(expect.objectContaining({
+      gameType: 'ticTacToe',
+      moveHistory: [],
+      chatMessages: [],
+      currentTurnIndex: 0,
+      currentTurn: sourceGame.players[0].userId,
+      gameState: { board: Array(9).fill(null), currentSymbol: 'X' },
+      metadata: { ratedGame: false, mode: 'multiplayer', infiniteLetters: undefined },
+    }))
+    expect(Game.create.mock.calls[0][0].players).toEqual([
+      expect.objectContaining({ userId: sourceGame.players[0].userId, username: 'alice', index: 0, isConnected: false }),
+      expect.objectContaining({ userId: sourceGame.players[1].userId, username: 'bob', index: 1, isConnected: false }),
+    ])
+    expect(redisSet).toHaveBeenCalledWith('game:ticTacToe:game-2', expect.objectContaining({ status: 'active' }))
+    expect(emitGameReplayCreated).toHaveBeenCalledWith(sourceGame, replayGame)
+    expect(emitGamesChanged).toHaveBeenCalledWith(sourceGame)
+    expect(emitGamesChanged).toHaveBeenCalledWith(replayGame)
+  })
+
+  it('preserves Scrabble infinite letters and creates fresh racks for all players', async () => {
+    const sourceGame = createGame({
+      gameType: 'scrabble',
+      status: 'completed',
+      metadata: { ratedGame: false, mode: 'multiplayer', infiniteLetters: true },
+    })
+    const replayGame = createGame({ _id: 'game-2', gameType: 'scrabble', status: 'active', gameCode: 'REPLAY' })
+    Game.findById.mockResolvedValue(sourceGame)
+    Game.create.mockResolvedValue(replayGame)
+
+    await gameService.replayGame('game-1', 'user-1')
+
+    const created = Game.create.mock.calls[0][0]
+    expect(created.metadata).toEqual({ ratedGame: false, mode: 'multiplayer', infiniteLetters: true })
+    expect(created.gameState.infiniteLetters).toBe(true)
+    expect(Object.keys(created.gameState.racks).sort()).toEqual(['user-1', 'user-2'])
+    expect(created.gameState.scores).toEqual({ 'user-1': 0, 'user-2': 0 })
+    expect(created.gameState.board.flat().every((cell: unknown) => cell === null)).toBe(true)
+  })
+
+  it('rejects non-players, non-completed games, single-player games, and unsupported games', async () => {
+    Game.findById.mockResolvedValue(createGame({ status: 'completed' }))
+    await expect(gameService.replayGame('game-1', 'user-3')).rejects.toBeInstanceOf(ForbiddenError)
+
+    Game.findById.mockResolvedValue(createGame({ status: 'active' }))
+    await expect(gameService.replayGame('game-1', 'user-1')).rejects.toBeInstanceOf(BadRequestError)
+
+    Game.findById.mockResolvedValue(createSoloGame({ status: 'completed' }))
+    await expect(gameService.replayGame('game-1', 'user-1')).rejects.toBeInstanceOf(BadRequestError)
+
+    Game.findById.mockResolvedValue(createGame({ gameType: 'wisecracker', status: 'completed' }))
+    await expect(gameService.replayGame('game-1', 'user-1')).rejects.toBeInstanceOf(BadRequestError)
   })
 })
 

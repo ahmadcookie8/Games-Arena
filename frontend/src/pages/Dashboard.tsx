@@ -15,7 +15,7 @@ import { getGameLabel } from '../lib/gameRules'
 import ticTacToeThumb from '../assets/game-tic-tac-toe.png'
 import wisecrackerThumb from '../assets/game-wisecracker.png'
 
-const GAME_TYPES: GameType[] = ['ticTacToe', 'wisecracker']
+const GAME_TYPES: GameType[] = ['ticTacToe', 'wisecracker', 'scrabble']
 const THUMBNAILS: Partial<Record<GameType, string>> = {
   ticTacToe: ticTacToeThumb,
   wisecracker: wisecrackerThumb,
@@ -260,7 +260,15 @@ export default function Dashboard() {
                 onClick={() => handleCreate(type)}
                 className="card-glow group cursor-pointer overflow-hidden rounded-xl border border-border bg-elevated text-left shadow-sm"
               >
-                <img src={THUMBNAILS[type]} alt="" className="h-28 w-full object-cover transition-transform duration-100 group-hover:scale-[1.02]" />
+                {THUMBNAILS[type] ? (
+                  <img src={THUMBNAILS[type]} alt="" className="h-28 w-full object-cover transition-transform duration-100 group-hover:scale-[1.02]" />
+                ) : (
+                  <div className="grid h-28 grid-cols-7 gap-1 bg-page p-4">
+                    {Array.from({ length: 21 }).map((_, index) => (
+                      <span key={index} className={`rounded-md border border-border ${index % 8 === 0 ? 'bg-danger-subtle' : index % 5 === 0 ? 'bg-info-subtle' : index % 3 === 0 ? 'bg-warning-subtle' : 'bg-elevated'}`} />
+                    ))}
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-3 p-3">
                   <span>
                     <span className="block text-base font-semibold text-text-primary">{getGameLabel(type)}</span>
