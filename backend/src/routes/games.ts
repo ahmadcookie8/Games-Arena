@@ -6,6 +6,7 @@ import {
   listGames,
   joinGame,
   makeSinglePlayerMove,
+  saveSinglePlayerMazeChaseState,
   saveSinglePlayerSnakeState,
   updateSinglePlayerSettings,
   updateGameSettings,
@@ -27,6 +28,7 @@ router.post('/join', joinGame)
 router.get('/', listGames)
 router.post('/:gameId/single-player/move', makeSinglePlayerMove)
 router.post('/:gameId/single-player/snake/state', saveSinglePlayerSnakeState)
+router.post('/:gameId/single-player/maze-chase/state', saveSinglePlayerMazeChaseState)
 router.patch('/:gameId/single-player/settings', updateSinglePlayerSettings)
 router.patch('/:gameId/settings', updateGameSettings)
 router.get('/:gameId', getGame)

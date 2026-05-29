@@ -16,8 +16,16 @@ export default function GameHistory() {
   const [filter, setFilter] = useState<GameType | 'all'>('all')
 
   useEffect(() => {
-    api.get('/api/games').then((res) => {
-      setGames([...res.data.completed, ...res.data.active])
+    Promise.all([
+      api.get('/api/games'),
+      api.get('/api/games?mode=singlePlayer'),
+    ]).then(([multiplayerRes, singlePlayerRes]) => {
+      setGames([
+        ...multiplayerRes.data.completed,
+        ...multiplayerRes.data.active,
+        ...singlePlayerRes.data.completed,
+        ...singlePlayerRes.data.active,
+      ])
     })
   }, [])
 
@@ -39,7 +47,7 @@ export default function GameHistory() {
         </div>
 
         <div className="reveal mb-6 flex flex-wrap gap-2">
-          {(['all', 'chess', 'ticTacToe', 'wisecracker', 'checkers', 'uno', 'president'] as const).map((type) => (
+          {(['all', 'chess', 'ticTacToe', 'wisecracker', 'checkers', 'uno', 'president', 'snake', 'mazeChase'] as const).map((type) => (
             <button
               key={type}
               onClick={() => setFilter(type)}
@@ -65,19 +73,39 @@ export default function GameHistory() {
               <div className="flex flex-wrap items-center gap-3">
                 {game.status === 'completed' && (
                   <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                    game.result?.winnerName === user?.username
+                    game.gameType === 'snake' || game.gameType === 'mazeChase'
+                      ? 'bg-success-subtle text-success-text'
+                      : game.result?.winnerName === user?.username
                       ? 'bg-success-subtle text-success-text'
                       : game.result?.isDraw
                         ? 'bg-warning-subtle text-warning-text'
                         : 'bg-danger-subtle text-danger-text'
                   }`}
                   >
-                    {game.result?.isDraw ? 'Draw' : game.result?.winnerName === user?.username ? 'Win' : 'Loss'}
+                    {game.gameType === 'snake'
+                      ? `Length ${String(game.result?.winType || '').replace('score:', '')}`
+                      : game.gameType === 'mazeChase'
+                        ? `Score ${String(game.result?.winType || '').replace('score:', '')}`
+                        : game.result?.isDraw ? 'Draw' : game.result?.winnerName === user?.username ? 'Win' : 'Loss'}
                   </span>
                 )}
                 {game.status === 'active' && (
                   <button
-                    onClick={() => navigate(`/game/${game._id}`)}
+                    onClick={() => {
+                      if (game.metadata?.mode === 'singlePlayer' && game.gameType === 'snake') {
+                        navigate(`/single-player/snake/${game._id}`)
+                        return
+                      }
+                      if (game.metadata?.mode === 'singlePlayer' && game.gameType === 'mazeChase') {
+                        navigate(`/single-player/maze-chase/${game._id}`)
+                        return
+                      }
+                      if (game.metadata?.mode === 'singlePlayer') {
+                        navigate(`/single-player/tic-tac-toe/${game._id}`)
+                        return
+                      }
+                      navigate(`/game/${game._id}`)
+                    }}
                     className="cursor-pointer rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover"
                   >
                     Resume

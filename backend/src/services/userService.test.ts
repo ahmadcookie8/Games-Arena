@@ -1,4 +1,4 @@
-import { buildGlobalLeaderboard } from './userService'
+import { buildGlobalLeaderboard, buildSinglePlayerScoreLeaderboard } from './userService'
 
 describe('buildGlobalLeaderboard', () => {
   it('counts wins across all completed games and ranks users by wins', () => {
@@ -90,6 +90,30 @@ describe('buildGlobalLeaderboard', () => {
       { rank: 1, username: 'carol', wins: 1, losses: 0, winRate: 1 },
       { rank: 2, username: 'alice', wins: 0, losses: 1, winRate: 0 },
       { rank: 3, username: 'bob', wins: 0, losses: 1, winRate: 0 },
+    ])
+  })
+})
+
+describe('buildSinglePlayerScoreLeaderboard', () => {
+  it('ranks Maze Chase by each player best score', () => {
+    const leaderboard = buildSinglePlayerScoreLeaderboard('mazeChase', [
+      {
+        players: [{ userId: 'u1', username: 'alice' }],
+        result: { winner: 'u1', winnerName: 'alice', isDraw: false, winType: 'score:120' },
+      },
+      {
+        players: [{ userId: 'u1', username: 'alice' }],
+        result: { winner: 'u1', winnerName: 'alice', isDraw: false, winType: 'score:300' },
+      },
+      {
+        players: [{ userId: 'u2', username: 'bob' }],
+        result: { winner: 'u2', winnerName: 'bob', isDraw: false, winType: 'score:220' },
+      },
+    ])
+
+    expect(leaderboard).toEqual([
+      expect.objectContaining({ rank: 1, username: 'alice', score: 300 }),
+      expect.objectContaining({ rank: 2, username: 'bob', score: 220 }),
     ])
   })
 })

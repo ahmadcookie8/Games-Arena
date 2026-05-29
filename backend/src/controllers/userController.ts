@@ -47,7 +47,11 @@ export async function getSinglePlayerLeaderboard(req: Request, res: Response, ne
   try {
     const limit = parseInt(String(req.query.limit || '10'), 10)
     const page = parseInt(String(req.query.page || '1'), 10)
-    const gameType = req.params.gameType === 'snake' ? 'snake' : 'ticTacToe'
+    const gameType = req.params.gameType === 'snake'
+      ? 'snake'
+      : req.params.gameType === 'mazeChase'
+        ? 'mazeChase'
+        : 'ticTacToe'
     const leaderboard = await userService.getSinglePlayerLeaderboard(gameType, limit, page)
     res.json({ leaderboard })
   } catch (err) {

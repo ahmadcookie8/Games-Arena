@@ -34,6 +34,49 @@ export const snakeStateSchema = z.object({
   tickMs: z.number().int().positive(),
 })
 
+export const mazeChasePointSchema = z.object({
+  x: z.number().int().nonnegative(),
+  y: z.number().int().nonnegative(),
+})
+
+export const mazeChaseDirectionSchema = z.enum(['up', 'down', 'left', 'right', 'none'])
+
+export const mazeChaseStateSchema = z.object({
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  maze: z.array(z.string()).min(1),
+  player: z.object({
+    position: mazeChasePointSchema,
+    start: mazeChasePointSchema,
+    direction: mazeChaseDirectionSchema,
+    pendingDirection: mazeChaseDirectionSchema,
+  }),
+  ghosts: z.array(z.object({
+    id: z.string().min(1),
+    color: z.string().min(1),
+    position: mazeChasePointSchema,
+    start: mazeChasePointSchema,
+    direction: mazeChaseDirectionSchema,
+    mode: z.enum(['chase', 'frightened', 'returning', 'hidden']),
+    respawnAt: z.number().int().nonnegative().optional(),
+  })).length(4),
+  pellets: z.array(mazeChasePointSchema),
+  powerPellets: z.array(mazeChasePointSchema),
+  fruit: z.object({
+    position: mazeChasePointSchema,
+    active: z.boolean(),
+    collected: z.boolean(),
+  }).nullable(),
+  score: z.number().int().nonnegative(),
+  lives: z.number().int().nonnegative(),
+  level: z.number().int().positive(),
+  frightenedUntil: z.number().int().nonnegative(),
+  isGameOver: z.boolean(),
+  hasStarted: z.boolean().optional(),
+  tickMs: z.number().int().positive(),
+  ghostStepCounter: z.number().int().nonnegative().optional(),
+})
+
 export const createSinglePlayerGameSchema = z.discriminatedUnion('gameType', [
   z.object({
     gameType: z.literal('ticTacToe'),
@@ -43,6 +86,9 @@ export const createSinglePlayerGameSchema = z.discriminatedUnion('gameType', [
     gameType: z.literal('snake'),
     boardSize: z.enum(['small', 'medium', 'large']).optional(),
     wallLooping: z.boolean().optional(),
+  }),
+  z.object({
+    gameType: z.literal('mazeChase'),
   }),
 ])
 
@@ -61,6 +107,11 @@ export const singlePlayerMoveSchema = z.object({
 
 export const snakeStateCheckpointSchema = z.object({
   gameState: snakeStateSchema,
+  completed: z.boolean().optional(),
+})
+
+export const mazeChaseStateCheckpointSchema = z.object({
+  gameState: mazeChaseStateSchema,
   completed: z.boolean().optional(),
 })
 

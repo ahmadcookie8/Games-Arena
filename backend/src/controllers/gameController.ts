@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express'
 import { AuthRequest } from '../middleware/auth'
 import { gameService } from '../services/gameService'
-import { createGameSchema, createSinglePlayerGameSchema, gameSettingsSchema, joinGameSchema, singlePlayerMoveSchema, singlePlayerSettingsSchema, snakeStateCheckpointSchema } from '../utils/validators'
+import { createGameSchema, createSinglePlayerGameSchema, gameSettingsSchema, joinGameSchema, mazeChaseStateCheckpointSchema, singlePlayerMoveSchema, singlePlayerSettingsSchema, snakeStateCheckpointSchema } from '../utils/validators'
 import { NotFoundError } from '../utils/errors'
 import { presentGameForUser } from '../utils/gamePresenter'
 
@@ -76,6 +76,16 @@ export async function saveSinglePlayerSnakeState(req: AuthRequest, res: Response
   try {
     const { gameState, completed } = snakeStateCheckpointSchema.parse(req.body)
     const game = await gameService.saveSinglePlayerSnakeState(req.params.gameId, req.user!.userId, gameState, completed)
+    res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function saveSinglePlayerMazeChaseState(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { gameState, completed } = mazeChaseStateCheckpointSchema.parse(req.body)
+    const game = await gameService.saveSinglePlayerMazeChaseState(req.params.gameId, req.user!.userId, gameState, completed)
     res.json({ game, gameState: game.gameState, moveHistory: game.moveHistory })
   } catch (err) {
     next(err)

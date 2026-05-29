@@ -15,6 +15,7 @@ import { getGameLabel } from '../lib/gameRules'
 import ticTacToeThumb from '../assets/game-tic-tac-toe.png'
 import wisecrackerThumb from '../assets/game-wisecracker.png'
 import scrabbleThumb from '../assets/game-scrabble.png'
+import mazeChaseThumb from '../assets/game-maze-chase.png'
 import snakeThumb from '../assets/game-snake.png'
 
 const GAME_TYPES: GameType[] = ['ticTacToe', 'wisecracker', 'scrabble']
@@ -75,8 +76,14 @@ function getSnakeSettingsLabel(game: Game): string {
   return `${size[0].toUpperCase()}${size.slice(1)} grid - ${game.metadata?.wallLooping ? 'Looping walls' : 'Solid walls'}`
 }
 
+function getScoreLabel(game: Game): string {
+  return `Score ${String(game.result?.winType || '').replace('score:', '') || '0'}`
+}
+
 function getSinglePlayerPath(game: Game): string {
-  return game.gameType === 'snake' ? `/single-player/snake/${game._id}` : `/single-player/tic-tac-toe/${game._id}`
+  if (game.gameType === 'snake') return `/single-player/snake/${game._id}`
+  if (game.gameType === 'mazeChase') return `/single-player/maze-chase/${game._id}`
+  return `/single-player/tic-tac-toe/${game._id}`
 }
 
 export default function Dashboard() {
@@ -141,6 +148,15 @@ export default function Dashboard() {
       navigate(`/single-player/snake/${res.data.gameId}`)
     } catch (err: unknown) {
       showGenericErrorModal(err, 'Could not create Snake')
+    }
+  }
+
+  async function handleCreateMazeChase() {
+    try {
+      const res = await api.post('/api/games/single-player/create', { gameType: 'mazeChase' })
+      navigate(`/single-player/maze-chase/${res.data.gameId}`)
+    } catch (err: unknown) {
+      showGenericErrorModal(err, 'Could not create Maze Chase')
     }
   }
 
@@ -376,6 +392,23 @@ export default function Dashboard() {
                 </button>
               </div>
             </div>
+
+            <div className="card-glow overflow-hidden rounded-xl border border-border bg-elevated shadow-sm">
+              <img src={mazeChaseThumb} alt="" className="h-32 w-full object-cover" />
+              <div className="space-y-4 p-4">
+                <div>
+                  <span className="block text-base font-semibold text-text-primary">Maze Chase</span>
+                  <span className="block text-xs text-text-muted">Clear the maze and save your best score</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCreateMazeChase}
+                  className="min-h-11 w-full cursor-pointer rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:opacity-90"
+                >
+                  Start Game
+                </button>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -392,7 +425,13 @@ export default function Dashboard() {
                     className="min-w-0 flex-1 cursor-pointer text-left"
                   >
                     <span className="block truncate font-medium text-text-primary">{getGameLabel(game.gameType)}</span>
-                    <span className="block text-xs text-text-muted">{game.gameType === 'snake' ? getSnakeSettingsLabel(game) : `${getDifficultyLabel(game.metadata?.difficulty)} difficulty`}</span>
+                    <span className="block text-xs text-text-muted">
+                      {game.gameType === 'snake'
+                        ? getSnakeSettingsLabel(game)
+                        : game.gameType === 'mazeChase'
+                          ? `Score ${String(game.result?.winType || '').replace('score:', '') || '0'}`
+                          : `${getDifficultyLabel(game.metadata?.difficulty)} difficulty`}
+                    </span>
                   </button>
                   <div className="flex items-center gap-2">
                     <button
@@ -484,14 +523,15 @@ function CompletedGamesList({ games, username, showDifficulty = false }: { games
   return (
     <div className="space-y-2">
       {games.map((game) => {
-        const snakeScore = game.gameType === 'snake' ? String(game.result?.winType || '').replace('score:', '') : null
-        const label = snakeScore ? `Length ${snakeScore}` : game.result?.isDraw ? 'Draw' : game.result?.winnerName === username ? 'Win' : 'Loss'
-        const labelClass = snakeScore ? 'bg-success-subtle text-success-text' : game.result?.isDraw ? 'bg-warning-subtle text-warning-text' : label === 'Win' ? 'bg-success-subtle text-success-text' : 'bg-danger-subtle text-danger-text'
+        const scoreGame = game.gameType === 'snake' || game.gameType === 'mazeChase'
+        const score = scoreGame ? String(game.result?.winType || '').replace('score:', '') : null
+        const label = score ? (game.gameType === 'snake' ? `Length ${score}` : `Score ${score}`) : game.result?.isDraw ? 'Draw' : game.result?.winnerName === username ? 'Win' : 'Loss'
+        const labelClass = score ? 'bg-success-subtle text-success-text' : game.result?.isDraw ? 'bg-warning-subtle text-warning-text' : label === 'Win' ? 'bg-success-subtle text-success-text' : 'bg-danger-subtle text-danger-text'
         return (
           <div key={game._id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-page/80 px-3 py-2">
             <span className="min-w-0 truncate text-sm font-medium text-text-primary">
               {getGameLabel(game.gameType)}
-              {showDifficulty && <span className="ml-2 text-xs font-normal text-text-muted">{game.gameType === 'snake' ? getSnakeSettingsLabel(game) : getDifficultyLabel(game.metadata?.difficulty)}</span>}
+              {showDifficulty && <span className="ml-2 text-xs font-normal text-text-muted">{game.gameType === 'snake' ? getSnakeSettingsLabel(game) : game.gameType === 'mazeChase' ? getScoreLabel(game) : getDifficultyLabel(game.metadata?.difficulty)}</span>}
             </span>
             <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${labelClass}`}>{label}</span>
           </div>

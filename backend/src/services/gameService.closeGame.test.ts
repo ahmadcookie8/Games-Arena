@@ -119,6 +119,75 @@ function createSnakeGame(overrides: Partial<Record<string, unknown>> = {}) {
   })
 }
 
+function createMazeChaseState(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    width: 21,
+    height: 21,
+    maze: [
+      '#####################',
+      '#.........#.........#',
+      '#.###.###.#.###.###.#',
+      '#o#.....#...#.....#o#',
+      '#.###.#.#####.#.###.#',
+      '#.....#...#...#.....#',
+      '#####.###.#.###.#####',
+      '    #.#.......#.#    ',
+      '#####.#.## ##.#.#####',
+      '     ...#   #...     ',
+      '#####.#.#####.#.#####',
+      '    #.#.......#.#    ',
+      '#####.#.#####.#.#####',
+      '#.........#.........#',
+      '#.###.###.#.###.###.#',
+      '#o..#.....P.....#..o#',
+      '###.#.#.#####.#.#.###',
+      '#.....#...#...#.....#',
+      '#.#######.#.#######.#',
+      '#...................#',
+      '#####################',
+    ],
+    player: {
+      position: { x: 10, y: 15 },
+      start: { x: 10, y: 15 },
+      direction: 'none',
+      pendingDirection: 'none',
+    },
+    ghosts: [
+      { id: 'spark', color: '#22d3ee', position: { x: 9, y: 9 }, start: { x: 9, y: 9 }, direction: 'left', mode: 'chase' },
+      { id: 'rose', color: '#fb7185', position: { x: 10, y: 9 }, start: { x: 10, y: 9 }, direction: 'up', mode: 'chase' },
+      { id: 'lime', color: '#4ade80', position: { x: 11, y: 9 }, start: { x: 11, y: 9 }, direction: 'right', mode: 'chase' },
+      { id: 'ember', color: '#f97316', position: { x: 10, y: 8 }, start: { x: 10, y: 8 }, direction: 'down', mode: 'chase' },
+    ],
+    pellets: [{ x: 1, y: 1 }, { x: 2, y: 1 }],
+    powerPellets: [{ x: 1, y: 3 }],
+    fruit: { position: { x: 9, y: 13 }, active: true, collected: false },
+    score: 0,
+    lives: 3,
+    level: 1,
+    frightenedUntil: 0,
+    isGameOver: false,
+    hasStarted: false,
+    tickMs: 150,
+    ghostStepCounter: 0,
+    ...overrides,
+  }
+}
+
+function createMazeChaseGame(overrides: Partial<Record<string, unknown>> = {}) {
+  return createGame({
+    gameType: 'mazeChase',
+    players: [
+      { userId: { toString: () => 'user-1' }, username: 'alice', index: 0 },
+    ],
+    currentTurnIndex: 0,
+    currentTurn: { toString: () => 'user-1' },
+    gameState: createMazeChaseState(),
+    result: undefined,
+    metadata: { ratedGame: false, mode: 'singlePlayer' },
+    ...overrides,
+  })
+}
+
 describe('gameService.closeGame', () => {
   beforeEach(() => {
     jest.clearAllMocks()
@@ -549,6 +618,107 @@ describe('gameService single player Snake', () => {
       isGameOver: false,
       tickMs: 120,
     })).rejects.toBeInstanceOf(BadRequestError)
+  })
+})
+
+describe('gameService single player Maze Chase', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('creates an active persisted Maze Chase game with initial maze state', async () => {
+    const game = createMazeChaseGame()
+    Game.create.mockResolvedValue(game)
+
+    const result = await gameService.createSinglePlayerGame('user-1', 'alice', { gameType: 'mazeChase' })
+
+    expect(result).toBe(game)
+    expect(Game.create).toHaveBeenCalledWith(expect.objectContaining({
+      gameType: 'mazeChase',
+      players: [{ userId: 'user-1', username: 'alice', index: 0 }],
+      metadata: { ratedGame: false, mode: 'singlePlayer' },
+    }))
+    const created = Game.create.mock.calls[0][0]
+    expect(created.gameState).toEqual(expect.objectContaining({
+      width: 21,
+      height: 21,
+      lives: 3,
+      level: 1,
+      score: 0,
+      isGameOver: false,
+    }))
+    expect(created.gameState.ghosts).toHaveLength(4)
+    expect(redisSet).toHaveBeenCalledWith('game:mazeChase:game-1', expect.objectContaining({
+      status: 'active',
+      metadata: game.metadata,
+    }))
+  })
+
+  it('saves an active Maze Chase checkpoint without completing the game', async () => {
+    const game = createMazeChaseGame()
+    Game.findById.mockResolvedValue(game)
+    const state = createMazeChaseState({ score: 120, hasStarted: true })
+
+    await gameService.saveSinglePlayerMazeChaseState('game-1', 'user-1', state)
+
+    expect(game.status).toBe('active')
+    expect(game.gameState.score).toBe(120)
+    expect(game.result).toBeUndefined()
+    expect(game.moveHistory).toHaveLength(0)
+    expect(userService.updateStatsAfterGame).not.toHaveBeenCalled()
+  })
+
+  it('accepts hidden Maze Chase ghosts in checkpoints', async () => {
+    const game = createMazeChaseGame()
+    Game.findById.mockResolvedValue(game)
+    const state = createMazeChaseState({
+      ghosts: [
+        { id: 'spark', color: '#22d3ee', position: { x: 9, y: 9 }, start: { x: 9, y: 9 }, direction: 'none', mode: 'hidden', respawnAt: 12345 },
+        { id: 'rose', color: '#fb7185', position: { x: 10, y: 9 }, start: { x: 10, y: 9 }, direction: 'up', mode: 'chase' },
+        { id: 'lime', color: '#4ade80', position: { x: 11, y: 9 }, start: { x: 11, y: 9 }, direction: 'right', mode: 'chase' },
+        { id: 'ember', color: '#f97316', position: { x: 10, y: 8 }, start: { x: 10, y: 8 }, direction: 'down', mode: 'chase' },
+      ],
+    })
+
+    await gameService.saveSinglePlayerMazeChaseState('game-1', 'user-1', state)
+
+    expect(game.status).toBe('active')
+    expect(game.gameState.ghosts[0].mode).toBe('hidden')
+    expect(game.gameState.ghosts[0].respawnAt).toBe(12345)
+  })
+
+
+  it('completes Maze Chase with final score', async () => {
+    const game = createMazeChaseGame()
+    Game.findById.mockResolvedValue(game)
+    const state = createMazeChaseState({ score: 420, lives: 0, isGameOver: true })
+
+    await gameService.saveSinglePlayerMazeChaseState('game-1', 'user-1', state, true)
+
+    expect(game.status).toBe('completed')
+    expect(game.result).toEqual(expect.objectContaining({
+      winnerName: 'alice',
+      isDraw: false,
+      winType: 'score:420',
+    }))
+    expect(game.moveHistory[0].move).toBe('Score 420')
+    expect(userService.invalidateLeaderboardCache).toHaveBeenCalledWith('mazeChase')
+  })
+
+  it('rejects invalid Maze Chase state and non-player saves', async () => {
+    const game = createMazeChaseGame()
+    Game.findById.mockResolvedValue(game)
+
+    await expect(gameService.saveSinglePlayerMazeChaseState('game-1', 'user-2', createMazeChaseState())).rejects.toBeInstanceOf(BadRequestError)
+    await expect(gameService.saveSinglePlayerMazeChaseState('game-1', 'user-1', createMazeChaseState({
+      player: {
+        position: { x: 0, y: 0 },
+        start: { x: 10, y: 15 },
+        direction: 'none',
+        pendingDirection: 'none',
+      },
+    }))).rejects.toBeInstanceOf(BadRequestError)
+    await expect(gameService.saveSinglePlayerMazeChaseState('game-1', 'user-1', createMazeChaseState({ width: 20 }))).rejects.toBeInstanceOf(BadRequestError)
   })
 })
 

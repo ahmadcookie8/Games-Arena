@@ -28,6 +28,7 @@ function getInitialState(gameType: GameType, hostUserId: string): unknown {
     case 'wisecracker': return Wisecracker.createInitialState(hostUserId)
     case 'scrabble': return Scrabble.createInitialState(hostUserId, false)
     case 'snake': return createInitialSnakeState('medium')
+    case 'mazeChase': return createInitialMazeChaseState()
   }
 }
 
@@ -59,11 +60,88 @@ interface SnakeState {
   tickMs: number
 }
 
+type MazeChaseDirection = 'up' | 'down' | 'left' | 'right' | 'none'
+
+interface MazeChasePoint {
+  x: number
+  y: number
+}
+
+interface MazeChaseGhost {
+  id: string
+  color: string
+  position: MazeChasePoint
+  start: MazeChasePoint
+  direction: MazeChaseDirection
+  mode: 'chase' | 'frightened' | 'returning' | 'hidden'
+  respawnAt?: number
+}
+
+interface MazeChaseState {
+  width: number
+  height: number
+  maze: string[]
+  player: {
+    position: MazeChasePoint
+    start: MazeChasePoint
+    direction: MazeChaseDirection
+    pendingDirection: MazeChaseDirection
+  }
+  ghosts: MazeChaseGhost[]
+  pellets: MazeChasePoint[]
+  powerPellets: MazeChasePoint[]
+  fruit: {
+    position: MazeChasePoint
+    active: boolean
+    collected: boolean
+  } | null
+  score: number
+  lives: number
+  level: number
+  frightenedUntil: number
+  isGameOver: boolean
+  hasStarted?: boolean
+  tickMs: number
+  ghostStepCounter?: number
+}
+
 const SNAKE_BOARD_DIMENSIONS: Record<SnakeBoardSize, number> = {
   small: 12,
   medium: 18,
   large: 24,
 }
+
+const MAZE_CHASE_LAYOUT = [
+  '#####################',
+  '#.........#.........#',
+  '#.###.###.#.###.###.#',
+  '#o#.....#...#.....#o#',
+  '#.###.#.#####.#.###.#',
+  '#.....#...#...#.....#',
+  '#####.###.#.###.#####',
+  '    #.#.......#.#    ',
+  '#####.#.## ##.#.#####',
+  '     ...#   #...     ',
+  '#####.#.#####.#.#####',
+  '    #.#.......#.#    ',
+  '#####.#.#####.#.#####',
+  '#.........#.........#',
+  '#.###.###.#.###.###.#',
+  '#o..#.....P.....#..o#',
+  '###.#.#.#####.#.#.###',
+  '#.....#...#...#.....#',
+  '#.#######.#.#######.#',
+  '#...................#',
+  '#####################',
+]
+
+const MAZE_CHASE_PLAYER_START = { x: 10, y: 15 }
+const MAZE_CHASE_GHOST_STARTS = [
+  { id: 'spark', color: '#22d3ee', position: { x: 9, y: 9 }, direction: 'left' as MazeChaseDirection },
+  { id: 'rose', color: '#fb7185', position: { x: 10, y: 9 }, direction: 'up' as MazeChaseDirection },
+  { id: 'lime', color: '#4ade80', position: { x: 11, y: 9 }, direction: 'right' as MazeChaseDirection },
+  { id: 'ember', color: '#f97316', position: { x: 10, y: 8 }, direction: 'down' as MazeChaseDirection },
+]
 
 function getGameMode(game: IGameDocument): GameMode {
   return game.metadata?.mode || 'multiplayer'
@@ -183,6 +261,53 @@ function createInitialSnakeState(boardSize: SnakeBoardSize): SnakeState {
   }
 }
 
+function createInitialMazeChaseState(level = 1, score = 0, lives = 3): MazeChaseState {
+  const pellets: MazeChasePoint[] = []
+  const powerPellets: MazeChasePoint[] = []
+
+  MAZE_CHASE_LAYOUT.forEach((row, y) => {
+    row.split('').forEach((cell, x) => {
+      if (cell === '.') pellets.push({ x, y })
+      if (cell === 'o') powerPellets.push({ x, y })
+    })
+  })
+
+  return {
+    width: MAZE_CHASE_LAYOUT[0].length,
+    height: MAZE_CHASE_LAYOUT.length,
+    maze: MAZE_CHASE_LAYOUT,
+    player: {
+      position: { ...MAZE_CHASE_PLAYER_START },
+      start: { ...MAZE_CHASE_PLAYER_START },
+      direction: 'none',
+      pendingDirection: 'none',
+    },
+    ghosts: MAZE_CHASE_GHOST_STARTS.map((ghost) => ({
+      id: ghost.id,
+      color: ghost.color,
+      position: { ...ghost.position },
+      start: { ...ghost.position },
+      direction: ghost.direction,
+      mode: 'chase',
+    })),
+    pellets,
+    powerPellets,
+    fruit: { position: { x: 9, y: 13 }, active: true, collected: false },
+    score,
+    lives,
+    level,
+    frightenedUntil: 0,
+    isGameOver: false,
+    hasStarted: false,
+    tickMs: Math.max(90, 150 - (level - 1) * 8),
+    ghostStepCounter: 0,
+  }
+}
+
+function isMazeChaseWall(state: MazeChaseState, cell: MazeChasePoint): boolean {
+  return state.maze[cell.y]?.[cell.x] === '#'
+}
+
 function validateSnakeStateForGame(game: IGameDocument, state: SnakeState): void {
   const boardSize = game.metadata.boardSize
   if (!boardSize) throw new BadRequestError('Missing Snake board size')
@@ -200,6 +325,40 @@ function validateSnakeStateForGame(game: IGameDocument, state: SnakeState): void
     if (cell.x < 0 || cell.x >= state.width || cell.y < 0 || cell.y >= state.height) {
       throw new BadRequestError('Snake state contains an out-of-bounds cell')
     }
+  }
+}
+
+function validateMazeChasePointForGame(state: MazeChaseState, point: MazeChasePoint, label: string): void {
+  if (point.x < 0 || point.x >= state.width || point.y < 0 || point.y >= state.height) {
+    throw new BadRequestError(`${label} is out of bounds`)
+  }
+  if (isMazeChaseWall(state, point)) {
+    throw new BadRequestError(`${label} cannot be inside a wall`)
+  }
+}
+
+function validateMazeChaseStateForGame(state: MazeChaseState): void {
+  if (state.width !== MAZE_CHASE_LAYOUT[0].length || state.height !== MAZE_CHASE_LAYOUT.length) {
+    throw new BadRequestError('Invalid Maze Chase board dimensions')
+  }
+  if (state.maze.length !== MAZE_CHASE_LAYOUT.length || state.maze.some((row, index) => row !== MAZE_CHASE_LAYOUT[index])) {
+    throw new BadRequestError('Invalid Maze Chase maze layout')
+  }
+  if (state.ghosts.length !== 4) {
+    throw new BadRequestError('Maze Chase requires four ghosts')
+  }
+
+  validateMazeChasePointForGame(state, state.player.position, 'Player position')
+  validateMazeChasePointForGame(state, state.player.start, 'Player start')
+  for (const ghost of state.ghosts) {
+    validateMazeChasePointForGame(state, ghost.position, 'Ghost position')
+    validateMazeChasePointForGame(state, ghost.start, 'Ghost start')
+  }
+  for (const pellet of [...state.pellets, ...state.powerPellets]) {
+    validateMazeChasePointForGame(state, pellet, 'Pellet')
+  }
+  if (state.fruit) {
+    validateMazeChasePointForGame(state, state.fruit.position, 'Fruit')
   }
 }
 
@@ -239,7 +398,7 @@ class GameService {
   async createSinglePlayerGame(
     userId: string,
     username: string,
-    options: { gameType: 'ticTacToe'; difficulty?: TicTacToeDifficulty } | { gameType: 'snake'; boardSize?: SnakeBoardSize; wallLooping?: boolean }
+    options: { gameType: 'ticTacToe'; difficulty?: TicTacToeDifficulty } | { gameType: 'snake'; boardSize?: SnakeBoardSize; wallLooping?: boolean } | { gameType: 'mazeChase' }
   ): Promise<IGameDocument> {
     const gameCode = generateGameCode()
     const ticTacToeDifficulty = options.gameType === 'ticTacToe' ? options.difficulty || 'easy' : 'easy'
@@ -247,10 +406,14 @@ class GameService {
     const snakeWallLooping = options.gameType === 'snake' ? Boolean(options.wallLooping) : false
     const initialState = options.gameType === 'ticTacToe'
       ? TicTacToe.createInitialState()
-      : createInitialSnakeState(snakeBoardSize)
+      : options.gameType === 'snake'
+        ? createInitialSnakeState(snakeBoardSize)
+        : createInitialMazeChaseState()
     const metadata = options.gameType === 'ticTacToe'
       ? { ratedGame: false, mode: 'singlePlayer' as const, difficulty: ticTacToeDifficulty }
-      : { ratedGame: false, mode: 'singlePlayer' as const, boardSize: snakeBoardSize, wallLooping: snakeWallLooping }
+      : options.gameType === 'snake'
+        ? { ratedGame: false, mode: 'singlePlayer' as const, boardSize: snakeBoardSize, wallLooping: snakeWallLooping }
+        : { ratedGame: false, mode: 'singlePlayer' as const }
 
     const game = await Game.create({
       gameType: options.gameType,
@@ -665,6 +828,53 @@ class GameService {
         playerId: player.userId,
         playerName: player.username,
         move: `Score ${state.snake.length}`,
+        timestamp: new Date(),
+      })
+    }
+
+    await game.save()
+    await this.cacheGame(game)
+
+    if (game.status === 'completed') {
+      await userService.invalidateLeaderboardCache(game.gameType)
+      emitGameOver(game)
+    }
+
+    emitGameUpdated(game)
+    emitGamesChanged(game)
+
+    return game
+  }
+
+  async saveSinglePlayerMazeChaseState(gameId: string, userId: string, state: MazeChaseState, completed = false): Promise<IGameDocument> {
+    const game = await Game.findById(gameId)
+    if (!game) throw new NotFoundError('Game')
+    if (game.gameType !== 'mazeChase') throw new BadRequestError('Only Maze Chase state can be saved here')
+    if (getGameMode(game) !== 'singlePlayer') throw new BadRequestError('This is not a single player game')
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
+
+    const player = game.players.find((p) => p.userId.toString() === userId)
+    if (!player) throw new BadRequestError('You are not in this game')
+
+    validateMazeChaseStateForGame(state)
+
+    game.gameState = state as unknown as Record<string, unknown>
+    game.lastMoveAt = new Date()
+
+    if (completed || state.isGameOver || state.lives === 0) {
+      game.status = 'completed'
+      game.completedAt = new Date()
+      game.result = {
+        winner: player.userId,
+        winnerName: player.username,
+        isDraw: false,
+        winType: `score:${state.score}`,
+      }
+      game.moveHistory.push({
+        moveNumber: game.moveHistory.length + 1,
+        playerId: player.userId,
+        playerName: player.username,
+        move: `Score ${state.score}`,
         timestamp: new Date(),
       })
     }

@@ -30,14 +30,17 @@ export default function SinglePlayerLeaderboard() {
   const { user } = useAuth()
   const [ticTacToeEntries, setTicTacToeEntries] = useState<SinglePlayerLeaderboardEntry[]>([])
   const [snakeEntries, setSnakeEntries] = useState<SinglePlayerLeaderboardEntry[]>([])
+  const [mazeChaseEntries, setMazeChaseEntries] = useState<SinglePlayerLeaderboardEntry[]>([])
 
   const fetchLeaderboard = useCallback(() => {
     void Promise.all([
       api.get('/api/leaderboards/single-player/ticTacToe'),
       api.get('/api/leaderboards/single-player/snake'),
-    ]).then(([ticTacToeRes, snakeRes]) => {
+      api.get('/api/leaderboards/single-player/mazeChase'),
+    ]).then(([ticTacToeRes, snakeRes, mazeChaseRes]) => {
       setTicTacToeEntries(ticTacToeRes.data.leaderboard || [])
       setSnakeEntries(snakeRes.data.leaderboard || [])
+      setMazeChaseEntries(mazeChaseRes.data.leaderboard || [])
     })
   }, [])
 
@@ -71,7 +74,7 @@ export default function SinglePlayerLeaderboard() {
         </div>
       </div>
 
-      <div>
+      <div className="mb-4">
         <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Snake</h4>
         <div className="space-y-1">
         {snakeEntries.map((entry) => (
@@ -87,6 +90,23 @@ export default function SinglePlayerLeaderboard() {
           </div>
         ))}
         {snakeEntries.length === 0 && <p className="rounded-lg bg-page px-3 py-4 text-center text-sm text-text-muted">No Snake scores yet</p>}
+        </div>
+      </div>
+
+      <div>
+        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Maze Chase</h4>
+        <div className="space-y-1">
+        {mazeChaseEntries.map((entry) => (
+          <div
+            key={`maze-${entry.rank}-${entry.username}`}
+            className={`flex items-center gap-2 rounded-lg px-2 py-2 transition-colors duration-150 ${entry.username === user?.username ? 'bg-accent-subtle' : 'hover:bg-elevated'}`}
+          >
+            <span className="w-7 text-center text-sm text-text-muted">#{entry.rank}</span>
+            <span className="min-w-0 flex-1 truncate font-medium text-text-primary">{entry.username}</span>
+            <span className="font-mono text-sm font-medium text-success">{entry.score || 0}</span>
+          </div>
+        ))}
+        {mazeChaseEntries.length === 0 && <p className="rounded-lg bg-page px-3 py-4 text-center text-sm text-text-muted">No Maze Chase scores yet</p>}
         </div>
       </div>
     </div>

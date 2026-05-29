@@ -36,7 +36,7 @@ interface CompletedGameForLeaderboard {
   }
 }
 
-interface CompletedSinglePlayerGame {
+export interface CompletedSinglePlayerGame {
   players: Array<{
     userId: { toString(): string } | string
     username: string
@@ -105,6 +105,53 @@ export function buildGlobalLeaderboard(games: CompletedGameForLeaderboard[]): Le
       losses: entry.losses,
       winRate: entry.gamesPlayed > 0 ? entry.wins / entry.gamesPlayed : 0,
     }))
+}
+
+export function buildSinglePlayerScoreLeaderboard(gameType: 'snake' | 'mazeChase', games: CompletedSinglePlayerGame[]): SinglePlayerLeaderboardEntry[] {
+  const bestScores = new Map<string, Omit<SinglePlayerLeaderboardEntry, 'rank' | 'winRate' | 'wins' | 'losses' | 'draws' | 'gamesPlayed'> & { wins: number; losses: number; draws: number; gamesPlayed: number; score: number }>()
+
+  for (const game of games) {
+    const player = game.players[0]
+    if (!player || !game.result) continue
+
+    const boardSize = game.metadata?.boardSize || 'medium'
+    const wallLooping = Boolean(game.metadata?.wallLooping)
+    const score = Number(String(game.result.winType || '').replace('score:', '')) || 0
+    const key = gameType === 'snake' ? `${String(player.userId)}:${boardSize}:${wallLooping}` : String(player.userId)
+    const entry = bestScores.get(key)
+
+    if (!entry || score > entry.score) {
+      bestScores.set(key, {
+        username: player.username,
+        boardSize: gameType === 'snake' ? boardSize : undefined,
+        wallLooping: gameType === 'snake' ? wallLooping : undefined,
+        score,
+        wins: 0,
+        losses: 0,
+        draws: 0,
+        gamesPlayed: 1,
+      })
+    } else {
+      entry.gamesPlayed += 1
+    }
+  }
+
+  const sizeRank = { large: 3, medium: 2, small: 1 }
+  return Array.from(bestScores.values())
+    .map((entry) => ({ ...entry, rank: 0, winRate: 0 }))
+    .sort((left, right) => {
+      if (gameType === 'mazeChase') {
+        if ((right.score || 0) !== (left.score || 0)) return (right.score || 0) - (left.score || 0)
+        return left.username.localeCompare(right.username)
+      }
+      if (sizeRank[right.boardSize || 'medium'] !== sizeRank[left.boardSize || 'medium']) {
+        return sizeRank[right.boardSize || 'medium'] - sizeRank[left.boardSize || 'medium']
+      }
+      if (Number(right.wallLooping) !== Number(left.wallLooping)) return Number(left.wallLooping) - Number(right.wallLooping)
+      if ((right.score || 0) !== (left.score || 0)) return (right.score || 0) - (left.score || 0)
+      return left.username.localeCompare(right.username)
+    })
+    .map((entry, index) => ({ ...entry, rank: index + 1 }))
 }
 
 class UserService {
@@ -185,7 +232,7 @@ class UserService {
     return leaderboard.slice(start, start + limit)
   }
 
-  async getSinglePlayerLeaderboard(gameType: 'ticTacToe' | 'snake', limit: number, page: number): Promise<SinglePlayerLeaderboardEntry[]> {
+  async getSinglePlayerLeaderboard(gameType: 'ticTacToe' | 'snake' | 'mazeChase', limit: number, page: number): Promise<SinglePlayerLeaderboardEntry[]> {
     const cacheKey = `leaderboard:singlePlayer:${gameType}`
     const cached = await redisGet<SinglePlayerLeaderboardEntry[]>(cacheKey)
     if (cached) {
@@ -201,47 +248,8 @@ class UserService {
       .select('players metadata result')
       .lean<CompletedSinglePlayerGame[]>()
 
-    if (gameType === 'snake') {
-      const bestScores = new Map<string, Omit<SinglePlayerLeaderboardEntry, 'rank' | 'winRate' | 'wins' | 'losses' | 'draws' | 'gamesPlayed'> & { wins: number; losses: number; draws: number; gamesPlayed: number; score: number }>()
-
-      for (const game of games) {
-        const player = game.players[0]
-        if (!player || !game.result) continue
-
-        const boardSize = game.metadata?.boardSize || 'medium'
-        const wallLooping = Boolean(game.metadata?.wallLooping)
-        const score = Number(String(game.result.winType || '').replace('score:', '')) || 0
-        const key = `${String(player.userId)}:${boardSize}:${wallLooping}`
-        const entry = bestScores.get(key)
-
-        if (!entry || score > entry.score) {
-          bestScores.set(key, {
-            username: player.username,
-            boardSize,
-            wallLooping,
-            score,
-            wins: 0,
-            losses: 0,
-            draws: 0,
-            gamesPlayed: 1,
-          })
-        } else {
-          entry.gamesPlayed += 1
-        }
-      }
-
-      const sizeRank = { large: 3, medium: 2, small: 1 }
-      const leaderboard = Array.from(bestScores.values())
-        .map((entry) => ({ ...entry, rank: 0, winRate: 0 }))
-        .sort((left, right) => {
-          if (sizeRank[right.boardSize || 'medium'] !== sizeRank[left.boardSize || 'medium']) {
-            return sizeRank[right.boardSize || 'medium'] - sizeRank[left.boardSize || 'medium']
-          }
-          if (Number(right.wallLooping) !== Number(left.wallLooping)) return Number(left.wallLooping) - Number(right.wallLooping)
-          if ((right.score || 0) !== (left.score || 0)) return (right.score || 0) - (left.score || 0)
-          return left.username.localeCompare(right.username)
-        })
-        .map((entry, index) => ({ ...entry, rank: index + 1 }))
+    if (gameType === 'snake' || gameType === 'mazeChase') {
+      const leaderboard = buildSinglePlayerScoreLeaderboard(gameType, games)
 
       await redisSet(cacheKey, leaderboard, LEADERBOARD_TTL)
 
