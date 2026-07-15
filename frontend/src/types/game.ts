@@ -1,4 +1,4 @@
-export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'scrabble' | 'snake' | 'mazeChase'
+export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'scrabble' | 'snake' | 'mazeChase' | 'propertyManagement'
 export type GameStatus = 'active' | 'paused' | 'completed' | 'abandoned'
 export type GameMode = 'multiplayer' | 'singlePlayer'
 export type TicTacToeDifficulty = 'easy' | 'medium' | 'hard'
@@ -112,6 +112,64 @@ export interface ScrabbleState {
   consecutivePasses: number
   givenUpUserIds: string[]
   lastScoreEvent: ScrabbleScoreEvent | null
+}
+
+// Property Management (Monopoly) types
+export type PMPhase = 'lobby' | 'playing' | 'completed'
+export type PMTurnPhase = 'preRoll' | 'postRoll' | 'buyOrAuction' | 'auction' | 'card'
+export type PMColorGroup = 'brown' | 'lightBlue' | 'pink' | 'orange' | 'red' | 'yellow' | 'green' | 'darkBlue' | 'railroad' | 'utility' | null
+
+export interface PMPlayerState {
+  userId: string
+  username: string
+  position: number
+  money: number
+  inJail: boolean
+  jailRollCount: number
+  getOutOfJailFreeCards: number
+  isBankrupt: boolean
+}
+
+export interface PMPropertyOwnership {
+  ownerId: string | null
+  mortgaged: boolean
+  houses: number
+}
+
+export interface PMAuctionState {
+  squareIndex: number
+  currentBid: number
+  highBidderUserId: string | null
+  passedUserIds: string[]
+  activeUserIds: string[]
+  currentBidderIndex: number
+}
+
+export type PMPendingAction =
+  | { type: 'buyOrAuction'; squareIndex: number }
+  | { type: 'auction'; auction: PMAuctionState }
+  | { type: 'card'; cardText: string; cardEffect: { type: string; [key: string]: unknown } }
+
+export interface PropertyManagementState {
+  phase: PMPhase
+  hostUserId: string
+  currentPlayerUserId: string
+  turnPhase: PMTurnPhase
+  dice: [number, number] | null
+  doublesCount: number
+  playerOrder: string[]
+  playerStates: Record<string, PMPlayerState>
+  properties: Record<string, PMPropertyOwnership>
+  chanceCardIndex: number
+  communityChestCardIndex: number
+  chanceCardOrder: number[]
+  communityChestCardOrder: number[]
+  chanceFreeCardReturned: boolean
+  communityChestFreeCardReturned: boolean
+  pendingAction: PMPendingAction | null
+  lastEventMessage: string | null
+  bankruptPlayerIds: string[]
+  winnerId: string | null
 }
 
 export type WisecrackerPhase = 'lobby' | 'prompt' | 'answering' | 'revealing' | 'roundResult' | 'completed'

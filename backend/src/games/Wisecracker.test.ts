@@ -68,4 +68,26 @@ describe('Wisecracker', () => {
     expect(state.activePlayerIds).not.toContain('user4')
     expect(state.waitingPlayerIds).toContain('user4')
   })
+
+  it('recovers persisted states whose empty collections were omitted', () => {
+    let state = Wisecracker.applyAction(stateWithPlayers(), { type: 'startMatch', maxScore: 1 }, 'user1', players)
+    state = Wisecracker.applyAction(state, { type: 'setPrompt', prompt: 'A _.' }, state.chooserUserId!, players)
+    delete (state as Partial<WisecrackerState>).submittedAnswers
+    delete (state as Partial<WisecrackerState>).answerOrder
+    delete (state as Partial<WisecrackerState>).waitingPlayerIds
+
+    const typers = state.activePlayerIds.filter((id) => id !== state.chooserUserId)
+    state = Wisecracker.applyAction(state, { type: 'submitAnswers', answers: ['first'] }, typers[0], players)
+    state = Wisecracker.applyAction(state, { type: 'submitAnswers', answers: ['second'] }, typers[1], players)
+    state = Wisecracker.applyAction(state, { type: 'revealNextAnswer' }, state.chooserUserId!, players)
+    state = Wisecracker.applyAction(state, { type: 'revealNextAnswer' }, state.chooserUserId!, players)
+    state = Wisecracker.applyAction(state, { type: 'selectRoundWinner', userId: typers[0] }, state.chooserUserId!, players)
+
+    expect(state.phase).toBe('completed')
+    state = Wisecracker.applyAction(state, { type: 'returnToLobby' }, 'user1', players)
+    expect(state.phase).toBe('lobby')
+    expect(state.submittedAnswers).toEqual({})
+    expect(state.answerOrder).toEqual([])
+    expect(state.waitingPlayerIds).toEqual([])
+  })
 })

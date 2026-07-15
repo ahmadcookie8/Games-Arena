@@ -12,7 +12,7 @@ export const loginSchema = z.object({
 })
 
 export const createGameSchema = z.object({
-  gameType: z.enum(['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker', 'scrabble']),
+  gameType: z.enum(['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker', 'scrabble', 'propertyManagement']),
   opponentUserId: z.string().optional(),
 })
 

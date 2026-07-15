@@ -5,9 +5,10 @@ interface Props {
   messages: ChatMessage[]
   currentUserId?: string
   onSend: (text: string) => Promise<{ success: boolean; error?: string }>
+  variant?: 'card' | 'embedded'
 }
 
-export default function GameChat({ messages, currentUserId, onSend }: Props) {
+export default function GameChat({ messages, currentUserId, onSend, variant = 'card' }: Props) {
   const [text, setText] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [isSending, setIsSending] = useState(false)
@@ -33,9 +34,9 @@ export default function GameChat({ messages, currentUserId, onSend }: Props) {
   }
 
   return (
-    <div className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl">
-      <h3 className="mb-3 text-base font-semibold text-text-primary">Chat</h3>
-      <div ref={scrollRef} className="max-h-64 space-y-2 overflow-y-auto rounded-lg bg-page p-2">
+    <div className={variant === 'card' ? 'rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl' : 'min-w-0'}>
+      {variant === 'card' && <h3 className="mb-3 text-base font-semibold text-text-primary">Chat</h3>}
+      <div ref={scrollRef} className={`${variant === 'embedded' ? 'max-h-[min(23rem,48svh)]' : 'max-h-64'} space-y-2 overflow-y-auto rounded-xl bg-page/70 p-2`}>
         {messages.length === 0 && <p className="px-3 py-6 text-center text-sm text-text-muted">No messages yet</p>}
         {messages.map((message) => {
           const isMine = message.userId === currentUserId

@@ -27,5 +27,6 @@ export function getGameLabel(gameType: GameType): string {
     case 'president': return 'President'
     case 'snake': return 'Snake'
     case 'mazeChase': return 'Maze Chase'
+    case 'propertyManagement': return 'Property Management'
   }
 }

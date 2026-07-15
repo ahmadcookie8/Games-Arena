@@ -143,6 +143,7 @@ export class Wisecracker {
 
   static addPlayer(state: WisecrackerState, userId: string): WisecrackerState {
     const next = clone(state)
+    normalizeCollections(next)
     next.scores[userId] = next.scores[userId] ?? 0
     if (next.activePlayerIds.includes(userId) || next.waitingPlayerIds.includes(userId)) return next
     if (next.phase === 'lobby' || next.phase === 'completed') {
@@ -288,11 +289,23 @@ function getTypers(state: WisecrackerState): string[] {
 }
 
 function normalize(state: WisecrackerState, players: WisecrackerPlayerView[]): void {
+  normalizeCollections(state)
   const playerIds = players.map((player) => player.userId)
   state.activePlayerIds = state.activePlayerIds.filter((id) => playerIds.includes(id))
   state.waitingPlayerIds = state.waitingPlayerIds.filter((id) => playerIds.includes(id) && !state.activePlayerIds.includes(id))
   for (const id of playerIds) state.scores[id] = state.scores[id] ?? 0
   if (!state.hostUserId || !playerIds.includes(state.hostUserId)) state.hostUserId = playerIds[0]
+}
+
+function normalizeCollections(state: WisecrackerState): void {
+  if (!Array.isArray(state.activePlayerIds)) state.activePlayerIds = state.hostUserId ? [state.hostUserId] : []
+  if (!Array.isArray(state.waitingPlayerIds)) state.waitingPlayerIds = []
+  if (!Array.isArray(state.answerOrder)) state.answerOrder = []
+  if (!state.submittedAnswers || typeof state.submittedAnswers !== 'object' || Array.isArray(state.submittedAnswers)) state.submittedAnswers = {}
+  if (!state.scores || typeof state.scores !== 'object' || Array.isArray(state.scores)) state.scores = {}
+  if (!Number.isFinite(state.revealedCount)) state.revealedCount = 0
+  if (!Number.isFinite(state.answerSlots)) state.answerSlots = 0
+  if (!Number.isFinite(state.chooserIndex)) state.chooserIndex = 0
 }
 
 function ensureHost(state: WisecrackerState, userId: string): void {
