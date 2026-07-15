@@ -1,4 +1,4 @@
-export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'scrabble' | 'snake' | 'mazeChase'
+export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'scrabble' | 'snake' | 'mazeChase' | 'propertyManagement'
 export type GameStatus = 'active' | 'paused' | 'completed' | 'abandoned'
 export type WinType = 'checkmate' | 'resignation' | 'timeout' | 'draw'
 export type GameMode = 'multiplayer' | 'singlePlayer'

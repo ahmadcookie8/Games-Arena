@@ -8,8 +8,10 @@ import Modal, { ModalVariant } from '../components/Modal'
 import MoveHistory from '../components/MoveHistory'
 import PageBackdrop from '../components/PageBackdrop'
 import PlayerCard from '../components/PlayerCard'
+import PropertyManagementBoard from '../components/PropertyManagementBoard'
 import ScrabbleBoard from '../components/ScrabbleBoard'
-import TicTacToeBoard from '../components/TicTacToeBoard'
+import { TabletopRouteMasthead } from '../components/TabletopShell'
+import TicTacToeExperience from '../components/TicTacToeExperience'
 import WisecrackerBoard from '../components/WisecrackerBoard'
 import { useAuth } from '../hooks/useAuth'
 import { useGameState } from '../hooks/useGameState'
@@ -166,10 +168,6 @@ export default function GameBoard() {
     })
   }
 
-  function handleTicTacToeMove(move: string) {
-    void handleMove(move)
-  }
-
   function handleSendChat(text: string): Promise<ChatResponse> {
     return new Promise((resolve) => {
       emit('sendChatMessage', { gameId, text }, (res: ChatResponse) => {
@@ -252,7 +250,7 @@ export default function GameBoard() {
   const myIndex = game.players.findIndex((p) => p.userId === user?._id)
   const minPlayers = game.gameType === 'wisecracker' ? 3 : 2
   const isActive = game.status === 'active'
-  const isWaitingForPlayer = isActive && game.players.length < minPlayers && game.gameType !== 'wisecracker'
+  const isWaitingForPlayer = isActive && game.players.length < minPlayers && game.gameType !== 'wisecracker' && game.gameType !== 'propertyManagement'
   const isCompleted = game.status === 'completed'
   const isMyTurn = isActive && !isWaitingForPlayer && !isCompleted && game.currentTurnIndex === myIndex
   const currentPlayer = game.players[game.currentTurnIndex]
@@ -262,12 +260,50 @@ export default function GameBoard() {
       ? `${game.result.winnerName} won`
       : null
   const canPlayAgain = isCompleted && (game.gameType === 'ticTacToe' || game.gameType === 'scrabble')
+  const isTabletopGame = ['propertyManagement', 'scrabble', 'ticTacToe', 'wisecracker'].includes(game.gameType)
+  const gamePhase = (game.gameState as { phase?: string }).phase
+  const tabletopEyebrow = game.gameType === 'wisecracker'
+    ? 'Comedy table'
+    : game.gameType === 'scrabble'
+      ? 'Word table'
+      : game.gameType === 'ticTacToe'
+        ? 'Classic table'
+        : 'Private table'
+  const tabletopStatus = game.gameType === 'wisecracker' && gamePhase
+    ? gamePhase.replace(/([A-Z])/g, ' $1').replace(/^./, (letter) => letter.toUpperCase())
+    : isCompleted
+      ? resultText ?? 'Complete'
+      : game.status === 'abandoned'
+        ? 'Game closed'
+        : isWaitingForPlayer
+          ? 'Waiting for player'
+          : isMyTurn
+            ? 'Your turn'
+            : currentPlayer
+              ? `${currentPlayer.username}'s turn`
+              : game.status
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
       <PageBackdrop intensity="quiet" />
       <Header />
-      <main className="relative z-10 mx-auto max-w-7xl px-4 py-6 sm:px-6">
+      <main className={`relative z-10 mx-auto px-4 sm:px-6 ${isTabletopGame ? 'max-w-[92rem] py-4' : 'max-w-7xl py-6'}`}>
+        {isTabletopGame ? (
+          <TabletopRouteMasthead
+            eyebrow={`${tabletopEyebrow} · ${game.status}`}
+            title={getGameLabel(game.gameType)}
+            gameCode={game.gameCode}
+            statusLabel={tabletopStatus}
+            statusTone={isCompleted ? 'success' : isWaitingForPlayer ? 'warning' : 'default'}
+            onBack={() => navigate('/?tab=multiplayer')}
+            onClose={isActive ? promptCloseGame : undefined}
+            primaryAction={game.gameType === 'scrabble' && canPlayAgain ? {
+              label: isReplaying ? 'Starting…' : 'Play Again',
+              onClick: () => void playAgain(),
+              disabled: isReplaying,
+            } : undefined}
+          />
+        ) : (
         <div className="mb-6 flex flex-col gap-4 rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-5">
           <button
             onClick={() => navigate('/?tab=multiplayer')}
@@ -329,7 +365,36 @@ export default function GameBoard() {
             </div>
           </div>
         </div>
+        )}
 
+        {game.gameType === 'propertyManagement' ? (
+          <PropertyManagementBoard game={game} user={user} onMove={handleMove} onSendChat={handleSendChat} />
+        ) : game.gameType === 'scrabble' ? (
+          <ScrabbleBoard
+            game={game}
+            user={user}
+            isMyTurn={isMyTurn}
+            onMove={handleMove}
+            onSendChat={handleSendChat}
+          />
+        ) : game.gameType === 'ticTacToe' ? (
+          <TicTacToeExperience
+            game={game}
+            currentUserId={user?._id}
+            connected={connected}
+            isReplaying={isReplaying}
+            onMove={handleMove}
+            onPlayAgain={playAgain}
+            onSendChat={handleSendChat}
+          />
+        ) : game.gameType === 'wisecracker' ? (
+          <WisecrackerBoard
+            game={game}
+            user={user}
+            onMove={handleMove}
+            onSendChat={handleSendChat}
+          />
+        ) : (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
           <div className="min-w-0">
             {isWaitingForPlayer && (
@@ -353,9 +418,7 @@ export default function GameBoard() {
               </div>
             )}
             <section className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl sm:p-5">
-              {game.gameType === 'ticTacToe' && <TicTacToeBoard gameState={game.gameState} isMyTurn={isMyTurn} onMove={handleTicTacToeMove} />}
-              {game.gameType === 'wisecracker' && <WisecrackerBoard game={game} user={user} onMove={handleMove} />}
-              {game.gameType === 'scrabble' && <ScrabbleBoard game={game} user={user} isMyTurn={isMyTurn} onMove={handleMove} />}
+              <p className="text-sm text-text-secondary">This game does not have a tabletop presentation yet.</p>
             </section>
           </div>
           <aside className="min-w-0 space-y-4">
@@ -371,6 +434,7 @@ export default function GameBoard() {
             {game.metadata?.mode !== 'singlePlayer' && <GameChat messages={game.chatMessages || []} currentUserId={user?._id} onSend={handleSendChat} />}
           </aside>
         </div>
+        )}
       </main>
 
       <Modal

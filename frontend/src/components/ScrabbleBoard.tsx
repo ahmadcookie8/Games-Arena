@@ -1,9 +1,29 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Star } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeftRight, Crosshair, History, Maximize2, MessageSquare, Minus, Plus, Star, Users } from 'lucide-react'
 import { Game, Player, ScrabblePremium, ScrabbleScoreEvent, ScrabbleState, ScrabbleTile } from '../types/game'
 import { User } from '../types/user'
 import api from '../lib/api'
+import {
+  SCRABBLE_BOARD_BASE_SIZE,
+  SCRABBLE_BOARD_DIMENSION,
+  SCRABBLE_BOARD_MAX_ZOOM,
+  SCRABBLE_BOARD_MIN_ZOOM,
+  captureScrabbleCameraCenter,
+  clampScrabbleZoom,
+  fitScrabbleBoardZoom,
+  getScrabbleCoordinate,
+  getScrabbleLastPlayCenter,
+  resolveScrabbleActionMode,
+  restoreScrabbleCameraCenter,
+  stepScrabbleZoom,
+  type ScrabblePendingTradeRole,
+} from '../lib/scrabbleBoardUi'
+import GameChat from './GameChat'
+import GameInvite from './GameInvite'
 import Modal from './Modal'
+import MoveHistory from './MoveHistory'
+import { TabletopBottomSheet, TabletopTabs, type TabletopTab } from './TabletopShell'
+import './scrabble-tabletop.css'
 
 type ScrabbleMove =
   | { type: 'placeTiles'; placements: Array<{ rackTileId: string; row: number; col: number; blankLetter?: string }> }
@@ -18,6 +38,7 @@ interface Props {
   user: User | null
   isMyTurn: boolean
   onMove: (move: ScrabbleMove) => Promise<{ success: boolean; game?: Game; error?: string }>
+  onSendChat: (text: string) => Promise<{ success: boolean; error?: string }>
 }
 
 interface PendingPlacement {
@@ -36,12 +57,13 @@ interface ScoreStep {
   label: string
   detail: string
   total: number
-  kind: string
   wordSquares: string[]
   letterSquare?: string
 }
 
-const BOARD_SIZE = 15
+type InspectorTab = 'players' | 'trade' | 'history' | 'chat'
+
+const EMPTY_RACK: ScrabbleTile[] = []
 
 const PREMIUMS: Record<string, ScrabblePremium> = {
   '0,0': 'TW', '0,7': 'TW', '0,14': 'TW', '7,0': 'TW', '7,14': 'TW', '14,0': 'TW', '14,7': 'TW', '14,14': 'TW',
@@ -52,25 +74,42 @@ const PREMIUMS: Record<string, ScrabblePremium> = {
   '7,3': 'DL', '7,11': 'DL', '8,2': 'DL', '8,6': 'DL', '8,8': 'DL', '8,12': 'DL', '11,0': 'DL', '11,7': 'DL', '11,14': 'DL', '12,6': 'DL', '12,8': 'DL', '14,3': 'DL', '14,11': 'DL',
 }
 
-export default function ScrabbleBoard({ game, user, isMyTurn, onMove }: Props) {
+const PREMIUM_NAMES: Record<ScrabblePremium, string> = {
+  DL: 'double letter score',
+  TL: 'triple letter score',
+  DW: 'double word score',
+  TW: 'triple word score',
+}
+
+export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat }: Props) {
   const state = game.gameState as unknown as ScrabbleState
-  const myId = user?._id || ''
-  const myRack = state.racks[myId] || []
+  const myId = user?._id ?? ''
+  const myRack = useMemo(() => state.racks[myId] ?? EMPTY_RACK, [myId, state.racks])
   const [selectedTileId, setSelectedTileId] = useState<string | null>(null)
   const [placements, setPlacements] = useState<PendingPlacement[]>([])
   const [selectedRackIds, setSelectedRackIds] = useState<string[]>([])
   const [tradeTargetId, setTradeTargetId] = useState('')
   const [isSavingSettings, setIsSavingSettings] = useState(false)
+  const [settingsError, setSettingsError] = useState<string | null>(null)
   const [swapMode, setSwapMode] = useState(false)
   const [scoreHighlight, setScoreHighlight] = useState<ScoreHighlight | null>(null)
   const [blankPlacement, setBlankPlacement] = useState<PendingPlacement | null>(null)
   const [blankLetterInput, setBlankLetterInput] = useState('')
   const [blankLetterError, setBlankLetterError] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<InspectorTab>('players')
+  const [sheetOpen, setSheetOpen] = useState(false)
+  const [busyAction, setBusyAction] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [showGiveUpModal, setShowGiveUpModal] = useState(false)
 
   const closeBlankLetterModal = useCallback(() => {
     setBlankPlacement(null)
     setBlankLetterInput('')
     setBlankLetterError(null)
+  }, [])
+
+  const handleScoreHighlight = useCallback((highlight: ScoreHighlight | null) => {
+    setScoreHighlight(highlight)
   }, [])
 
   const pendingTilesBySquare = useMemo(() => {
@@ -82,13 +121,99 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove }: Props) {
     }))
   }, [myRack, placements])
 
+  const pendingTradeForMe = useMemo(
+    () => state.pendingTrade?.targetUserId === myId ? state.pendingTrade : null,
+    [myId, state.pendingTrade],
+  )
+  const incomingTradeId = pendingTradeForMe?.offerId ?? null
+  const offeredByMe = state.pendingTrade?.fromUserId === myId
+  const activePlayers = useMemo(
+    () => game.players.filter((player) => !state.givenUpUserIds.includes(player.userId)),
+    [game.players, state.givenUpUserIds],
+  )
+  const currentPlayer = game.players[game.currentTurnIndex]
+  const currentActiveIndex = activePlayers.findIndex((player) => player.userId === currentPlayer?.userId)
+  const nextPlayer = activePlayers.length > 1
+    ? activePlayers[(Math.max(0, currentActiveIndex) + 1) % activePlayers.length]
+    : null
+  const isHost = game.players[0]?.userId === myId
+  const settingsLocked = game.moveHistory.length > 0
+  const isWaitingForPlayer = game.status === 'active' && game.players.length < 2
+  const hasGivenUp = state.givenUpUserIds.includes(myId)
+  const pendingTradeRole: ScrabblePendingTradeRole = pendingTradeForMe
+    ? 'incoming'
+    : offeredByMe
+      ? 'outgoing'
+      : state.pendingTrade
+        ? 'other'
+        : 'none'
+  const actionMode = resolveScrabbleActionMode({
+    status: game.status,
+    waitingForPlayer: isWaitingForPlayer,
+    hasGivenUp,
+    pendingTradeRole,
+    isMyTurn,
+    swapMode,
+  })
+
+  const inspectorTabs = useMemo<TabletopTab<InspectorTab>[]>(() => {
+    const tabs: TabletopTab<InspectorTab>[] = [
+      { id: 'players', label: 'Players', icon: Users },
+      { id: 'trade', label: 'Trade', icon: ArrowLeftRight, badge: state.pendingTrade ? '!' : undefined },
+      { id: 'history', label: 'History', icon: History },
+    ]
+    if (game.metadata?.mode !== 'singlePlayer') tabs.push({ id: 'chat', label: 'Chat', icon: MessageSquare })
+    return tabs
+  }, [game.metadata?.mode, state.pendingTrade])
+
   useEffect(() => {
     setPlacements([])
     setSelectedTileId(null)
     setSelectedRackIds([])
     setSwapMode(false)
+    setActionError(null)
     closeBlankLetterModal()
   }, [state.lastScoreEvent?.moveNumber, game.currentTurnIndex, closeBlankLetterModal])
+
+  useEffect(() => {
+    if (incomingTradeId) {
+      setSwapMode(true)
+      setSelectedTileId(null)
+      setSelectedRackIds([])
+      setActiveTab('trade')
+      return
+    }
+    setSelectedRackIds([])
+    setSwapMode(false)
+  }, [incomingTradeId])
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null
+      const tagName = target?.tagName.toLowerCase()
+      if (!isMyTurn || swapMode || state.pendingTrade || tagName === 'input' || tagName === 'textarea' || tagName === 'select' || event.ctrlKey || event.metaKey || event.altKey) return
+      const key = event.key === '?' ? '?' : event.key.toUpperCase()
+      if (!/^[A-Z?]$/.test(key)) return
+      const availableTiles = myRack.filter((tile) => !placements.some((placement) => placement.rackTileId === tile.id))
+      const matches = availableTiles.filter((tile) => key === '?' ? tile.isBlank : tile.letter.toUpperCase() === key)
+      if (matches.length === 0) return
+      event.preventDefault()
+      const currentIndex = selectedTileId ? matches.findIndex((tile) => tile.id === selectedTileId) : -1
+      setSelectedTileId(matches[(currentIndex + 1) % matches.length].id)
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isMyTurn, myRack, placements, selectedTileId, state.pendingTrade, swapMode])
+
+  function openInspector(tab: InspectorTab) {
+    setActiveTab(tab)
+    if (window.matchMedia('(max-width: 1119px)').matches) setSheetOpen(true)
+  }
+
+  function selectInspector(tabId: InspectorTab) {
+    setActiveTab(tabId)
+  }
 
   function toggleRackSelection(tileId: string) {
     setSelectedRackIds((current) => current.includes(tileId) ? current.filter((id) => id !== tileId) : [...current, tileId])
@@ -104,25 +229,19 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove }: Props) {
   function toggleSwapMode() {
     setSwapMode((current) => {
       const next = !current
-      if (next) {
-        setSelectedTileId(null)
-      } else {
-        setSelectedRackIds([])
-      }
+      if (next) setSelectedTileId(null)
+      else setSelectedRackIds([])
       return next
     })
   }
 
   function handleRackTileClick(tile: ScrabbleTile) {
-    if (swapMode) {
-      toggleRackSelection(tile.id)
-      return
-    }
-    chooseTile(tile)
+    if (swapMode) toggleRackSelection(tile.id)
+    else chooseTile(tile)
   }
 
   function placeSelected(row: number, col: number) {
-    if (!isMyTurn || !selectedTileId || state.board[row][col] || pendingTilesBySquare[`${row},${col}`]) return
+    if (!isMyTurn || !selectedTileId || state.pendingTrade || state.board[row][col] || pendingTilesBySquare[`${row},${col}`]) return
     const tile = myRack.find((rackTile) => rackTile.id === selectedTileId)
     if (!tile) return
     if (tile.isBlank) {
@@ -151,261 +270,306 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove }: Props) {
     setPlacements((current) => current.filter((placement) => placement.row !== row || placement.col !== col))
   }
 
-  async function submitPlacements() {
-    if (placements.length === 0) return
-    await onMove({ type: 'placeTiles', placements })
-  }
-
-  async function exchangeSelected() {
-    if (selectedRackIds.length === 0) return
-    await onMove({ type: 'exchangeWithBag', rackTileIds: selectedRackIds })
-  }
-
-  async function offerTrade() {
-    if (!tradeTargetId || selectedRackIds.length === 0) return
-    await onMove({ type: 'offerTrade', targetUserId: tradeTargetId, rackTileIds: selectedRackIds })
-  }
-
-  async function acceptTrade() {
-    if (!state.pendingTrade || selectedRackIds.length !== state.pendingTrade.offeredTiles.length) return
-    await onMove({ type: 'respondTrade', accept: true, rackTileIds: selectedRackIds })
-  }
-
-  const pendingTradeForMe = state.pendingTrade?.targetUserId === myId ? state.pendingTrade : null
-  const offeredByMe = state.pendingTrade?.fromUserId === myId
-  const activePlayers = game.players.filter((player) => !state.givenUpUserIds.includes(player.userId))
-  const currentPlayer = game.players[game.currentTurnIndex]
-  const nextPlayer = activePlayers.length > 1
-    ? activePlayers[(activePlayers.findIndex((player) => player.userId === currentPlayer?.userId) + 1) % activePlayers.length]
-    : null
-  const isHost = game.players[0]?.userId === myId
-  const settingsLocked = game.moveHistory.length > 0
-
-  useEffect(() => {
-    if (pendingTradeForMe) {
-      setSwapMode(true)
-      setSelectedTileId(null)
-      return
+  async function act(move: ScrabbleMove, actionName: string) {
+    if (busyAction) return
+    setBusyAction(actionName)
+    setActionError(null)
+    try {
+      const result = await onMove(move)
+      if (!result.success) setActionError(result.error ?? 'Action failed')
+    } catch {
+      setActionError('Network error. Try again.')
+    } finally {
+      setBusyAction(null)
     }
-    setSelectedRackIds([])
-  }, [pendingTradeForMe?.offerId])
+  }
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      const target = event.target as HTMLElement | null
-      const tagName = target?.tagName.toLowerCase()
-      if (!isMyTurn || swapMode || tagName === 'input' || tagName === 'textarea' || tagName === 'select' || event.ctrlKey || event.metaKey || event.altKey) return
-      const key = event.key === '?' ? '?' : event.key.toUpperCase()
-      if (!/^[A-Z?]$/.test(key)) return
-      const availableTiles = myRack.filter((tile) => !placements.some((placement) => placement.rackTileId === tile.id))
-      const matches = availableTiles.filter((tile) => key === '?' ? tile.isBlank : tile.letter.toUpperCase() === key)
-      if (matches.length === 0) return
-      event.preventDefault()
-      const currentIndex = selectedTileId ? matches.findIndex((tile) => tile.id === selectedTileId) : -1
-      setSelectedTileId(matches[(currentIndex + 1) % matches.length].id)
+  function submitPlacements() {
+    if (placements.length > 0) void act({ type: 'placeTiles', placements }, 'play')
+  }
+
+  function exchangeSelected() {
+    if (selectedRackIds.length > 0) void act({ type: 'exchangeWithBag', rackTileIds: selectedRackIds }, 'exchange')
+  }
+
+  function offerTrade() {
+    if (tradeTargetId && selectedRackIds.length > 0) void act({ type: 'offerTrade', targetUserId: tradeTargetId, rackTileIds: selectedRackIds }, 'offer')
+  }
+
+  function acceptTrade() {
+    if (pendingTradeForMe && selectedRackIds.length === pendingTradeForMe.offeredTiles.length) {
+      void act({ type: 'respondTrade', accept: true, rackTileIds: selectedRackIds }, 'accept')
     }
-
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isMyTurn, myRack, placements, selectedTileId, swapMode])
+  }
 
   async function updateInfiniteLetters(infiniteLetters: boolean) {
     setIsSavingSettings(true)
+    setSettingsError(null)
     try {
       await api.patch(`/api/games/${game._id}/settings`, { infiniteLetters })
+    } catch {
+      setSettingsError('Could not update the room setting. Try again.')
     } finally {
       setIsSavingSettings(false)
     }
   }
 
-  return (
-    <div className="space-y-5">
-      <div className="grid gap-3 sm:grid-cols-3">
-        <StatusPanel label="Supply" value={state.infiniteLetters ? 'Infinite' : `${state.bag.length} in bag`} />
-        <StatusPanel label="Active" value={`${activePlayers.length} player${activePlayers.length === 1 ? '' : 's'}`} />
-        <StatusPanel label="Turn" value={currentPlayer ? `${currentPlayer.username}${currentPlayer.isConnected ? '' : ' (offline)'}` : 'Unknown'} />
-      </div>
-
-      <section className="rounded-xl border border-accent/30 bg-accent-subtle p-4 text-accent">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-xs font-medium uppercase tracking-wider">Current Turn</p>
-            <p className="text-lg font-bold">{currentPlayer ? `${currentPlayer.username}${currentPlayer.isConnected ? '' : ' (offline)'}` : 'Unknown'}</p>
-          </div>
-          {nextPlayer && <p className="rounded-lg bg-surface px-3 py-2 text-sm font-semibold shadow-sm">Up next: {nextPlayer.username}</p>}
-        </div>
-      </section>
-
-      <section className="rounded-xl border border-border bg-surface p-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h3 className="text-base font-semibold text-text-primary">Game Options</h3>
-            <p className="text-sm text-text-muted">{settingsLocked ? 'Options are locked after the first move.' : 'Room options are set here before play starts.'}</p>
-          </div>
-          <label className={`flex w-fit items-center gap-2 rounded-lg border border-border bg-page px-3 py-2 text-sm font-medium ${isHost && !settingsLocked ? 'cursor-pointer text-text-secondary' : 'cursor-not-allowed text-text-muted'}`}>
-            <input
-              type="checkbox"
-              checked={state.infiniteLetters}
-              disabled={!isHost || settingsLocked || isSavingSettings}
-              onChange={(event) => void updateInfiniteLetters(event.target.checked)}
-              className="h-4 w-4 accent-[var(--accent)] disabled:cursor-not-allowed"
-            />
-            Infinite letters
-          </label>
-        </div>
-      </section>
-
-      <ScoreAnimation event={state.lastScoreEvent} onHighlight={setScoreHighlight} />
-
-      {state.pendingTrade && (
-        <section className="rounded-xl border border-warning/30 bg-warning-subtle p-4 text-sm text-warning-text">
-          {pendingTradeForMe ? (
-            <div className="space-y-3">
-              <p className="font-medium">{playerName(game.players, state.pendingTrade.fromUserId)} offered {state.pendingTrade.offeredTiles.length} tile{state.pendingTrade.offeredTiles.length === 1 ? '' : 's'}.</p>
-              <div className="flex flex-wrap gap-2">{state.pendingTrade.offeredTiles.map((tile) => <TileFace key={tile.id} tile={tile} variant="rack" />)}</div>
-              <p>Select {state.pendingTrade.offeredTiles.length} tile{state.pendingTrade.offeredTiles.length === 1 ? '' : 's'} from your rack to accept.</p>
-              <div className="flex flex-wrap gap-2">
-                <button onClick={acceptTrade} disabled={selectedRackIds.length !== state.pendingTrade.offeredTiles.length} className="rounded-lg bg-success px-3 py-2 text-sm font-medium text-text-on-accent disabled:cursor-not-allowed disabled:opacity-50">Accept</button>
-                <button onClick={() => onMove({ type: 'respondTrade', accept: false })} className="rounded-lg border border-border bg-elevated px-3 py-2 text-sm font-medium text-text-primary">Decline</button>
-              </div>
-            </div>
-          ) : (
-            <p>{offeredByMe ? 'Waiting for trade response.' : `${playerName(game.players, state.pendingTrade.targetUserId)} is considering a trade.`}</p>
-          )}
-        </section>
-      )}
-
-      <div className="flex justify-center rounded-xl border border-border bg-page p-1.5 sm:p-2">
-        <div className="grid aspect-square w-full max-w-[42rem] gap-0.5 sm:gap-1" style={{ gridTemplateColumns: 'repeat(15, minmax(0, 1fr))' }}>
-          {Array.from({ length: BOARD_SIZE * BOARD_SIZE }).map((_, index) => {
-            const row = Math.floor(index / BOARD_SIZE)
-            const col = index % BOARD_SIZE
-            const square = `${row},${col}`
-            const cell = state.board[row][col]
-            const pending = pendingTilesBySquare[square]
-            const premium = PREMIUMS[square]
-            const usedPremium = state.usedPremiumSquares.includes(square)
-            const isWordHighlighted = Boolean(scoreHighlight?.wordSquares.includes(square))
-            const isLetterHighlighted = scoreHighlight?.letterSquare === square
-            return (
-              <button
-                key={square}
-                type="button"
-                onClick={() => pending ? removePending(row, col) : placeSelected(row, col)}
-                disabled={!isMyTurn && !pending}
-                className={`relative aspect-square overflow-hidden rounded-[3px] border text-[0.5rem] font-bold transition-all duration-150 sm:rounded-md sm:text-[0.65rem] ${
-                  cell || pending
-                    ? pending ? 'border-accent bg-accent-subtle text-accent' : 'border-border-strong bg-warning-subtle text-warning-text'
-                    : row === 7 && col === 7
-                      ? 'border-accent/40 bg-accent-subtle text-lg text-accent'
-                    : premium && !usedPremium
-                      ? premiumClass(premium)
-                      : 'border-border bg-elevated text-text-muted'
-                } ${isWordHighlighted ? 'ring-2 ring-warning ring-offset-1 ring-offset-page' : ''} ${isLetterHighlighted ? 'z-10 scale-105 ring-4 ring-accent ring-offset-1 ring-offset-page' : ''}`}
-              >
-                {cell ? (
-                  <TileFace tile={cell.tile} variant="board" />
-                ) : pending?.tile ? (
-                  <TileFace tile={{ ...pending.tile, letter: pending.letter }} variant="board" />
-                ) : row === 7 && col === 7 ? (
-                  <Star className="mx-auto h-4 w-4 fill-current sm:h-5 sm:w-5" aria-hidden="true" />
-                ) : premium || ''}
-              </button>
-            )
-          })}
-        </div>
-      </div>
-
-      <section className="rounded-xl border border-border bg-surface p-4">
-        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <h3 className="text-base font-semibold text-text-primary">Your Rack</h3>
-          <p className="text-sm text-text-muted">
-            {pendingTradeForMe
-              ? `Choose ${pendingTradeForMe.offeredTiles.length} tile${pendingTradeForMe.offeredTiles.length === 1 ? '' : 's'} to send back.`
-              : isMyTurn
-                ? (swapMode ? 'Swap mode: tap tiles to mark them green.' : 'Tap a tile to place it on the board.')
-                : 'Waiting for your turn.'}
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
+  function RackTiles({ mirrored = false }: { mirrored?: boolean }) {
+    const canChooseMultiple = Boolean(pendingTradeForMe) || (isMyTurn && !state.pendingTrade && (swapMode || mirrored))
+    const canChoosePlacement = isMyTurn && !state.pendingTrade && !swapMode && !mirrored
+    return (
+      <div className="scr-rack-scroll" aria-label={mirrored ? 'Selectable trade rack' : 'Your tile rack'}>
+        <div className="scr-rack">
+          {myRack.length === 0 && <p className="scr-empty-rack">Your rack is empty.</p>}
           {myRack.map((tile) => {
             const placed = placements.some((placement) => placement.rackTileId === tile.id)
             const selectedForAction = selectedRackIds.includes(tile.id)
+            const selectedForBoard = selectedTileId === tile.id
+            const selectable = !placed && (canChooseMultiple || canChoosePlacement)
             return (
               <button
                 key={tile.id}
                 type="button"
-                disabled={placed}
-                aria-pressed={selectedTileId === tile.id || selectedForAction}
-                title={selectedForAction ? 'Selected for exchange or trade' : selectedTileId === tile.id ? 'Selected to place on the board' : swapMode ? 'Tap to select for exchange or trade' : 'Tap to select for board placement'}
-                onClick={() => handleRackTileClick(tile)}
-                className={`relative rounded-lg border p-1 transition-all duration-150 ${
-                  selectedForAction
-                    ? 'border-success bg-success-subtle shadow-[0_0_0_3px_var(--success-subtle)]'
-                    : selectedTileId === tile.id
-                      ? 'border-accent bg-accent-subtle shadow-accent'
-                      : 'border-border bg-elevated'
-                } ${placed ? 'opacity-30' : ''}`}
+                disabled={!selectable}
+                aria-pressed={selectedForAction || selectedForBoard}
+                aria-label={`${tile.isBlank ? 'Blank tile' : `${tile.letter}, ${tile.value} point${tile.value === 1 ? '' : 's'}`}${placed ? ', pending on board' : selectedForAction || selectedForBoard ? ', selected' : ''}`}
+                onClick={() => {
+                  if (mirrored) {
+                    setSwapMode(true)
+                    toggleRackSelection(tile.id)
+                  } else {
+                    handleRackTileClick(tile)
+                  }
+                }}
+                className={`scr-rack-tile ${selectedForAction ? 'is-multi-selected' : ''} ${selectedForBoard ? 'is-place-selected' : ''}`}
               >
-                {selectedForAction && <span className="absolute -right-1 -top-1 z-10 rounded-full bg-success px-1.5 py-0.5 text-[0.55rem] font-bold uppercase leading-none text-text-on-accent">Swap</span>}
                 <TileFace tile={tile} variant="rack" />
               </button>
             )
           })}
         </div>
-        <div className="mt-4 flex flex-wrap gap-2">
-          <button onClick={submitPlacements} disabled={!isMyTurn || placements.length === 0 || Boolean(state.pendingTrade)} className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent disabled:cursor-not-allowed disabled:opacity-50">Play Tiles</button>
-          <button
-            type="button"
-            onClick={toggleSwapMode}
-            disabled={Boolean(pendingTradeForMe) || !isMyTurn || Boolean(state.pendingTrade)}
-            className={`rounded-lg border px-4 py-2 text-sm font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50 ${
-              swapMode
-                ? 'border-success bg-success text-text-on-accent'
-                : 'border-border bg-elevated text-text-primary'
-            }`}
-          >
-            Swap
-          </button>
-          <button onClick={exchangeSelected} disabled={!isMyTurn || selectedRackIds.length === 0 || Boolean(state.pendingTrade)} className="rounded-lg border border-border bg-elevated px-4 py-2 text-sm font-medium text-text-primary disabled:cursor-not-allowed disabled:opacity-50">Exchange</button>
-          <button onClick={() => onMove({ type: 'pass' })} disabled={!isMyTurn || Boolean(state.pendingTrade)} className="rounded-lg border border-border bg-elevated px-4 py-2 text-sm font-medium text-text-primary disabled:cursor-not-allowed disabled:opacity-50">Pass</button>
-          <button onClick={() => onMove({ type: 'giveUp' })} disabled={!isMyTurn || Boolean(state.pendingTrade)} className="rounded-lg border border-danger/30 bg-danger-subtle px-4 py-2 text-sm font-medium text-danger-text disabled:cursor-not-allowed disabled:opacity-50">Give Up</button>
+      </div>
+    )
+  }
+
+  function ActionPanel({ compact = false }: { compact?: boolean }) {
+    const title = actionTitle(actionMode)
+    return (
+      <section className={`scr-action-surface ${compact ? 'scr-action-surface--compact' : ''}`} aria-label="Current action">
+        <header className="scr-action-header">
+          <div>
+            <p className="scr-section-label">Current action</p>
+            <h2>{title}</h2>
+          </div>
+          {busyAction && <span className="scr-busy-label" role="status">Working…</span>}
+        </header>
+
+        {!isWaitingForPlayer && <RackTiles />}
+
+        {actionMode === 'completed' && (
+          <p className="scr-action-copy">{game.result?.winnerName ? `${game.result.winnerName} won the table.` : 'The final scores are in.'}</p>
+        )}
+        {actionMode === 'waitingForPlayer' && (
+          <div className="scr-invite"><GameInvite gameCode={game.gameCode} /></div>
+        )}
+        {actionMode === 'observing' && <p className="scr-action-copy">You gave up this round. You can still follow the board, scores, history, and chat.</p>}
+        {actionMode === 'waitingTurn' && <p className="scr-action-copy">{currentPlayer ? `${currentPlayer.username} is choosing their play.` : 'Waiting for the next play.'}</p>}
+        {actionMode === 'tradePending' && (
+          <div className="scr-action-stack">
+            <p className="scr-action-copy">{offeredByMe ? `Waiting for ${playerName(game.players, state.pendingTrade?.targetUserId ?? '')} to answer your trade.` : 'Another player is considering a trade.'}</p>
+            <button type="button" className="scr-secondary-button" onClick={() => openInspector('trade')}>View trade</button>
+          </div>
+        )}
+        {actionMode === 'incomingTrade' && (
+          <div className="scr-action-stack">
+            <p className="scr-action-copy">{playerName(game.players, pendingTradeForMe?.fromUserId ?? '')} offered {pendingTradeForMe?.offeredTiles.length ?? 0} tile{pendingTradeForMe?.offeredTiles.length === 1 ? '' : 's'}.</p>
+            <button type="button" className="scr-primary-button" onClick={() => openInspector('trade')}>Review trade</button>
+          </div>
+        )}
+        {actionMode === 'place' && (
+          <>
+            <p className="scr-action-copy">{selectedTileId ? 'Choose an open board square.' : placements.length ? `${placements.length} tile${placements.length === 1 ? '' : 's'} ready to play.` : 'Select a rack tile, then choose its square.'}</p>
+            <div className="scr-action-grid">
+              <button type="button" className="scr-primary-button" onClick={submitPlacements} disabled={placements.length === 0 || Boolean(busyAction)}>Play tiles</button>
+              <button type="button" className="scr-secondary-button" onClick={toggleSwapMode} disabled={Boolean(busyAction)}>Swap tiles</button>
+              <button type="button" className="scr-secondary-button" onClick={() => void act({ type: 'pass' }, 'pass')} disabled={Boolean(busyAction)}>Pass</button>
+              <button type="button" className="scr-danger-button" onClick={() => setShowGiveUpModal(true)} disabled={Boolean(busyAction)}>Give up</button>
+            </div>
+          </>
+        )}
+        {actionMode === 'exchange' && (
+          <>
+            <p className="scr-action-copy">Select tiles, then exchange them with the bag or offer them to another player.</p>
+            <div className="scr-action-grid">
+              <button type="button" className="scr-primary-button" onClick={exchangeSelected} disabled={selectedRackIds.length === 0 || Boolean(busyAction)}>Exchange ({selectedRackIds.length})</button>
+              <button type="button" className="scr-secondary-button" onClick={() => openInspector('trade')} disabled={selectedRackIds.length === 0}>Offer trade</button>
+              <button type="button" className="scr-secondary-button" onClick={toggleSwapMode}>Cancel</button>
+              <button type="button" className="scr-secondary-button" onClick={() => void act({ type: 'pass' }, 'pass')} disabled={Boolean(busyAction)}>Pass</button>
+              <button type="button" className="scr-danger-button" onClick={() => setShowGiveUpModal(true)} disabled={Boolean(busyAction)}>Give up</button>
+            </div>
+          </>
+        )}
+        {actionError && <p className="scr-inline-error" role="alert">{actionError}</p>}
+      </section>
+    )
+  }
+
+  function PlayersPanel() {
+    return (
+      <div className="scr-panel-stack">
+        <div className="scr-player-list">
+          {game.players.map((player, index) => {
+            const gaveUp = state.givenUpUserIds.includes(player.userId)
+            const current = game.status === 'active' && index === game.currentTurnIndex
+            return (
+              <div key={player.userId} className={`scr-player-row ${current ? 'is-current' : ''}`}>
+                <span className="scr-player-avatar" aria-hidden="true">{getInitials(player.username)}</span>
+                <span className="scr-player-name">
+                  <strong className={gaveUp ? 'line-through' : ''}>{player.username}</strong>
+                  <small>{gaveUp ? 'Gave up' : player.isConnected === false ? 'Offline' : index === 0 ? 'Host' : current ? 'Playing' : 'At the table'}</small>
+                </span>
+                <strong className="scr-player-score">{state.scores[player.userId] ?? 0}</strong>
+              </div>
+            )
+          })}
         </div>
-        <p className="mt-2 text-xs text-text-muted">
-          {pendingTradeForMe
-            ? 'Swap mode is active for this trade. Tap your rack tiles to mark them green, then accept or decline above.'
-            : swapMode
-              ? 'Swap mode is active. Tap rack tiles to mark them green, then exchange them with the bag or offer a trade.'
-              : 'Tap a tile to select it for board placement. Turn on Swap to choose tiles for exchange or trade.'}
-        </p>
+        <section className="scr-setting-card">
+          <div>
+            <p className="scr-section-label">Room setting</p>
+            <h3>Infinite letters</h3>
+            <p>{settingsLocked ? 'Locked after the first move.' : 'Draw from an unlimited supply instead of a finite bag.'}</p>
+          </div>
+          <label className={isHost && !settingsLocked ? 'is-enabled' : ''}>
+            <input
+              type="checkbox"
+              checked={state.infiniteLetters}
+              disabled={!isHost || settingsLocked || isSavingSettings}
+              onChange={(event) => void updateInfiniteLetters(event.target.checked)}
+            />
+            <span>{state.infiniteLetters ? 'On' : 'Off'}</span>
+          </label>
+          {settingsError && <p className="scr-inline-error" role="alert">{settingsError}</p>}
+        </section>
+      </div>
+    )
+  }
+
+  function TradePanel() {
+    if (pendingTradeForMe) {
+      const required = pendingTradeForMe.offeredTiles.length
+      return (
+        <div className="scr-panel-stack">
+          <div className="scr-trade-notice">
+            <p className="scr-section-label">Incoming offer</p>
+            <h3>{playerName(game.players, pendingTradeForMe.fromUserId)} offers</h3>
+            <div className="scr-offered-tiles">{pendingTradeForMe.offeredTiles.map((tile) => <TileFace key={tile.id} tile={tile} variant="rack" />)}</div>
+          </div>
+          <div>
+            <h3 className="scr-panel-title">Choose {required} tile{required === 1 ? '' : 's'} in return</h3>
+            <p className="scr-panel-copy">Selected {selectedRackIds.length} of {required}</p>
+            <RackTiles mirrored />
+          </div>
+          <div className="scr-action-grid">
+            <button type="button" className="scr-primary-button" onClick={acceptTrade} disabled={selectedRackIds.length !== required || Boolean(busyAction)}>Accept trade</button>
+            <button type="button" className="scr-secondary-button" onClick={() => void act({ type: 'respondTrade', accept: false }, 'decline')} disabled={Boolean(busyAction)}>Decline</button>
+          </div>
+        </div>
+      )
+    }
+
+    if (state.pendingTrade) {
+      return (
+        <div className="scr-trade-notice">
+          <p className="scr-section-label">Trade pending</p>
+          <h3>{offeredByMe ? 'Offer sent' : 'Players are negotiating'}</h3>
+          <p>{offeredByMe ? `${playerName(game.players, state.pendingTrade.targetUserId)} is choosing a response.` : 'The board will unlock when the trade is accepted or declined.'}</p>
+        </div>
+      )
+    }
+
+    return (
+      <div className="scr-panel-stack">
+        <div>
+          <p className="scr-panel-copy">Select tiles here or turn on Swap in the action panel. Your selection stays synchronized.</p>
+          <RackTiles mirrored />
+        </div>
+        <label className="scr-field-label">
+          Trade with
+          <select value={tradeTargetId} onChange={(event) => setTradeTargetId(event.target.value)} disabled={!isMyTurn || Boolean(busyAction)}>
+            <option value="">Choose a player</option>
+            {game.players.filter((player) => player.userId !== myId && !state.givenUpUserIds.includes(player.userId)).map((player) => (
+              <option key={player.userId} value={player.userId}>{player.username}</option>
+            ))}
+          </select>
+        </label>
+        <button type="button" className="scr-primary-button" onClick={offerTrade} disabled={!isMyTurn || !tradeTargetId || selectedRackIds.length === 0 || Boolean(busyAction)}>
+          {selectedRackIds.length ? `Offer ${selectedRackIds.length} tile${selectedRackIds.length === 1 ? '' : 's'}` : 'Offer trade'}
+        </button>
+        <p className="scr-panel-copy">The other player must return the same number of tiles or decline.</p>
+      </div>
+    )
+  }
+
+  function InspectorContent() {
+    switch (activeTab) {
+      case 'trade': return <TradePanel />
+      case 'history': return <MoveHistory moves={game.moveHistory} variant="embedded" />
+      case 'chat': return <GameChat messages={game.chatMessages ?? []} currentUserId={myId} onSend={onSendChat} variant="embedded" />
+      default: return <PlayersPanel />
+    }
+  }
+
+  const activeTabLabel = inspectorTabs.find((tab) => tab.id === activeTab)?.label ?? 'Game information'
+
+  return (
+    <div className="scrabble-tabletop min-w-0">
+      <section className="scr-hud" aria-label="Scrabble game status">
+        <div className="scr-hud-turn">
+          <span className="scr-turn-token" aria-hidden="true">{getInitials(currentPlayer?.username ?? '?')}</span>
+          <div>
+            <p className="scr-section-label">{game.status === 'completed' ? 'Final table' : isMyTurn ? 'Your turn' : 'Current turn'}</p>
+            <strong>{game.status === 'completed' ? 'Game complete' : currentPlayer?.username ?? 'Waiting'}</strong>
+          </div>
+        </div>
+        <HudStat label="Up next" value={nextPlayer?.username ?? '—'} />
+        <HudStat label="Your score" value={`${state.scores[myId] ?? 0}`} />
+        <HudStat label="Supply" value={state.infiniteLetters ? 'Infinite' : `${state.bag.length} tiles`} />
+        <HudStat label="Active" value={`${activePlayers.length}`} />
+        <ScoreAnimation event={state.lastScoreEvent} onHighlight={handleScoreHighlight} />
       </section>
 
-      <section className="grid gap-4 lg:grid-cols-[1fr_1fr]">
-        <div className="rounded-xl border border-border bg-surface p-4">
-          <h3 className="mb-3 text-base font-semibold text-text-primary">Scores</h3>
-          <div className="space-y-2">
-            {game.players.map((player) => (
-              <div key={player.userId} className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm ${player.userId === currentPlayer?.userId ? 'bg-accent-subtle text-accent' : 'bg-page'}`}>
-                <span className={state.givenUpUserIds.includes(player.userId) ? 'text-text-muted line-through' : 'text-text-primary'}>{player.username}</span>
-                <span className="font-mono font-bold text-accent">{state.scores[player.userId] || 0}</span>
-              </div>
-            ))}
-          </div>
+      <div className="scr-game-layout">
+        <ScrabbleCamera
+          state={state}
+          selectedTileId={selectedTileId}
+          pendingTilesBySquare={pendingTilesBySquare}
+          scoreHighlight={scoreHighlight}
+          onPlace={placeSelected}
+          onRemove={removePending}
+        />
+
+        <aside className="scr-desktop-rail" aria-label="Scrabble controls and information">
+          <ActionPanel />
+          <section className="scr-inspector-surface">
+            <TabletopTabs tabs={inspectorTabs} activeTab={activeTab} onSelect={selectInspector} ariaLabel="Scrabble information" idBase="scrabble-desktop" />
+            <div id="scrabble-desktop-panel" className="scr-inspector-content" role="tabpanel" aria-labelledby={`scrabble-desktop-tab-${activeTab}`}>
+              <InspectorContent />
+            </div>
+          </section>
+        </aside>
+      </div>
+
+      <div className="scr-mobile-dock">
+        <ActionPanel compact />
+        <TabletopTabs tabs={inspectorTabs} activeTab={activeTab} onSelect={openInspector} ariaLabel="Open Scrabble information" idBase="scrabble-mobile-dock" controlsIdBase="scrabble-sheet" variant="dock" />
+      </div>
+
+      <TabletopBottomSheet isOpen={sheetOpen} title={activeTabLabel} onClose={() => setSheetOpen(false)} idBase="scrabble-info-sheet">
+        <TabletopTabs tabs={inspectorTabs} activeTab={activeTab} onSelect={selectInspector} ariaLabel="Scrabble information" idBase="scrabble-sheet" />
+        <div id="scrabble-sheet-panel" className="scr-sheet-content" role="tabpanel" aria-labelledby={`scrabble-sheet-tab-${activeTab}`}>
+          <InspectorContent />
         </div>
-        <div className="rounded-xl border border-border bg-surface p-4">
-          <h3 className="mb-3 text-base font-semibold text-text-primary">Tile Trade</h3>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <select value={tradeTargetId} onChange={(event) => setTradeTargetId(event.target.value)} disabled={!isMyTurn || Boolean(state.pendingTrade)} className="min-h-10 flex-1 rounded-lg border border-border bg-overlay px-3 py-2 text-sm text-text-primary">
-              <option value="">Choose player</option>
-              {game.players.filter((player) => player.userId !== myId && !state.givenUpUserIds.includes(player.userId)).map((player) => (
-                <option key={player.userId} value={player.userId}>{player.username}</option>
-              ))}
-            </select>
-            <button onClick={offerTrade} disabled={!isMyTurn || !tradeTargetId || selectedRackIds.length === 0 || Boolean(state.pendingTrade)} className="rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent disabled:cursor-not-allowed disabled:opacity-50">Offer</button>
-          </div>
-          <p className="mt-2 text-xs text-text-muted">The other player chooses the same number of tiles back, or declines.</p>
-        </div>
-      </section>
+      </TabletopBottomSheet>
 
       <Modal
         isOpen={Boolean(blankPlacement)}
@@ -415,7 +579,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove }: Props) {
         secondaryAction={{ label: 'Cancel', onClick: closeBlankLetterModal }}
         onClose={closeBlankLetterModal}
       >
-        <label className="block text-sm font-medium text-text-secondary">
+        <label className="scr-blank-label">
           Letter
           <input
             autoFocus
@@ -433,19 +597,211 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove }: Props) {
                 confirmBlankLetter()
               }
             }}
-            className="mt-2 h-12 w-full rounded-lg border border-border bg-overlay px-4 text-center font-mono text-2xl font-black uppercase text-text-primary outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/20"
-            aria-describedby={blankLetterError ? 'blank-letter-error' : undefined}
+            aria-describedby={blankLetterError ? 'scrabble-blank-error' : undefined}
           />
         </label>
-        {blankLetterError && <p id="blank-letter-error" className="mt-2 text-sm font-medium text-danger-text">{blankLetterError}</p>}
+        {blankLetterError && <p id="scrabble-blank-error" className="scr-inline-error">{blankLetterError}</p>}
+      </Modal>
+
+      <Modal
+        isOpen={showGiveUpModal}
+        title="Give up this game?"
+        variant="danger"
+        primaryAction={{ label: 'Give up', onClick: () => {
+          setShowGiveUpModal(false)
+          void act({ type: 'giveUp' }, 'give-up')
+        } }}
+        secondaryAction={{ label: 'Keep playing', onClick: () => setShowGiveUpModal(false) }}
+        onClose={() => setShowGiveUpModal(false)}
+      >
+        You will leave the active turn order, but you can continue watching the table and using chat.
       </Modal>
     </div>
+  )
+}
+
+function ScrabbleCamera({
+  state,
+  selectedTileId,
+  pendingTilesBySquare,
+  scoreHighlight,
+  onPlace,
+  onRemove,
+}: {
+  state: ScrabbleState
+  selectedTileId: string | null
+  pendingTilesBySquare: Record<string, { tile?: ScrabbleTile; letter: string }>
+  scoreHighlight: ScoreHighlight | null
+  onPlace: (row: number, col: number) => void
+  onRemove: (row: number, col: number) => void
+}) {
+  const [zoom, setZoom] = useState(1)
+  const [focusedSquare, setFocusedSquare] = useState({ row: 7, col: 7 })
+  const cameraRef = useRef<HTMLDivElement>(null)
+  const pendingCenterRef = useRef<{ x: number; y: number } | null>(null)
+  const initialCenterRef = useRef(false)
+  const previousScoreMoveRef = useRef<number | null>(state.lastScoreEvent?.moveNumber ?? null)
+  const prefersReducedMotion = usePrefersReducedMotion()
+  const boardSize = Math.round(SCRABBLE_BOARD_BASE_SIZE * zoom)
+  const lastPlayCenter = getScrabbleLastPlayCenter(state.lastScoreEvent)
+
+  const centerSquare = useCallback((row: number, col: number, behavior: ScrollBehavior = 'smooth') => {
+    const camera = cameraRef.current
+    const square = camera?.querySelector<HTMLElement>(`[data-scrabble-square="${row},${col}"]`)
+    if (!camera || !square) return
+    const cameraRect = camera.getBoundingClientRect()
+    const squareRect = square.getBoundingClientRect()
+    camera.scrollTo({
+      left: camera.scrollLeft + squareRect.left - cameraRect.left + squareRect.width / 2 - camera.clientWidth / 2,
+      top: camera.scrollTop + squareRect.top - cameraRect.top + squareRect.height / 2 - camera.clientHeight / 2,
+      behavior: prefersReducedMotion ? 'auto' : behavior,
+    })
+  }, [prefersReducedMotion])
+
+  useEffect(() => {
+    if (initialCenterRef.current) return
+    initialCenterRef.current = true
+    const frame = requestAnimationFrame(() => centerSquare(7, 7, 'auto'))
+    return () => cancelAnimationFrame(frame)
+  }, [centerSquare])
+
+  useEffect(() => {
+    const nextMove = state.lastScoreEvent?.moveNumber ?? null
+    const previousMove = previousScoreMoveRef.current
+    previousScoreMoveRef.current = nextMove
+    if (nextMove == null || nextMove === previousMove) return
+    const center = getScrabbleLastPlayCenter(state.lastScoreEvent)
+    if (!center) return
+    const frame = requestAnimationFrame(() => centerSquare(center.row, center.col))
+    return () => cancelAnimationFrame(frame)
+  }, [centerSquare, state.lastScoreEvent])
+
+  useEffect(() => {
+    const pending = pendingCenterRef.current
+    if (!pending) return
+    pendingCenterRef.current = null
+    const frame = requestAnimationFrame(() => {
+      const camera = cameraRef.current
+      if (!camera) return
+      const position = restoreScrabbleCameraCenter(pending, camera.scrollWidth, camera.scrollHeight, camera.clientWidth, camera.clientHeight)
+      camera.scrollTo({ ...position, behavior: 'auto' })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [zoom])
+
+  function changeZoom(nextZoom: number) {
+    const camera = cameraRef.current
+    const next = clampScrabbleZoom(nextZoom)
+    if (next === zoom) return
+    if (camera) {
+      pendingCenterRef.current = captureScrabbleCameraCenter(
+        camera.scrollLeft,
+        camera.scrollTop,
+        camera.clientWidth,
+        camera.clientHeight,
+        camera.scrollWidth,
+        camera.scrollHeight,
+      )
+    }
+    setZoom(next)
+  }
+
+  function fitBoard() {
+    const camera = cameraRef.current
+    if (camera) changeZoom(fitScrabbleBoardZoom(camera.clientWidth, camera.clientHeight))
+  }
+
+  function handleSquareKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, row: number, col: number) {
+    const offsets: Record<string, [number, number]> = {
+      ArrowUp: [-1, 0],
+      ArrowDown: [1, 0],
+      ArrowLeft: [0, -1],
+      ArrowRight: [0, 1],
+    }
+    const offset = offsets[event.key]
+    if (!offset) return
+    event.preventDefault()
+    const nextRow = Math.min(SCRABBLE_BOARD_DIMENSION - 1, Math.max(0, row + offset[0]))
+    const nextCol = Math.min(SCRABBLE_BOARD_DIMENSION - 1, Math.max(0, col + offset[1]))
+    setFocusedSquare({ row: nextRow, col: nextCol })
+    requestAnimationFrame(() => {
+      const next = cameraRef.current?.querySelector<HTMLElement>(`[data-scrabble-square="${nextRow},${nextCol}"]`)
+      next?.focus({ preventScroll: true })
+      centerSquare(nextRow, nextCol)
+    })
+  }
+
+  return (
+    <section className="scr-board-surface" aria-label="Scrabble board">
+      <header className="scr-camera-toolbar">
+        <div>
+          <p className="scr-section-label">Board camera</p>
+          <strong aria-live="polite">{Math.round(zoom * 100)}% zoom</strong>
+        </div>
+        <div className="scr-camera-controls">
+          <button type="button" onClick={() => changeZoom(stepScrabbleZoom(zoom, -1))} disabled={zoom <= SCRABBLE_BOARD_MIN_ZOOM} aria-label="Zoom out"><Minus /></button>
+          <button type="button" onClick={() => changeZoom(stepScrabbleZoom(zoom, 1))} disabled={zoom >= SCRABBLE_BOARD_MAX_ZOOM} aria-label="Zoom in"><Plus /></button>
+          <button type="button" className="scr-camera-action" onClick={fitBoard} aria-label="Fit whole board"><Maximize2 /><span>Fit</span></button>
+          <button type="button" className="scr-camera-action" onClick={() => centerSquare(7, 7)} aria-label="Center board"><Crosshair /><span>Center</span></button>
+          <button type="button" className="scr-camera-action" disabled={!lastPlayCenter} onClick={() => lastPlayCenter && centerSquare(lastPlayCenter.row, lastPlayCenter.col)} aria-label="Center last scoring play"><Star /><span>Last play</span></button>
+        </div>
+      </header>
+
+      <div ref={cameraRef} className="scr-board-camera" tabIndex={0} aria-label="Scrollable Scrabble board">
+        <div className="scr-board-stage" style={{ width: boardSize, height: boardSize }}>
+          <div className={`scr-board-grid ${zoom <= 0.5 ? 'is-overview' : ''}`} style={{ width: boardSize, height: boardSize, '--scr-board-scale': zoom } as React.CSSProperties}>
+            {Array.from({ length: SCRABBLE_BOARD_DIMENSION * SCRABBLE_BOARD_DIMENSION }).map((_, index) => {
+              const row = Math.floor(index / SCRABBLE_BOARD_DIMENSION)
+              const col = index % SCRABBLE_BOARD_DIMENSION
+              const key = `${row},${col}`
+              const cell = state.board[row][col]
+              const pending = pendingTilesBySquare[key]
+              const premium = PREMIUMS[key]
+              const usedPremium = state.usedPremiumSquares.includes(key)
+              const actionable = Boolean(pending) || Boolean(selectedTileId && !cell)
+              const wordHighlighted = Boolean(scoreHighlight?.wordSquares.includes(key))
+              const letterHighlighted = scoreHighlight?.letterSquare === key
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  data-scrabble-square={key}
+                  tabIndex={focusedSquare.row === row && focusedSquare.col === col ? 0 : -1}
+                  aria-disabled={!actionable}
+                  aria-label={squareAriaLabel(row, col, cell?.tile, pending, premium, usedPremium, actionable)}
+                  onFocus={() => setFocusedSquare({ row, col })}
+                  onKeyDown={(event) => handleSquareKeyDown(event, row, col)}
+                  onClick={() => {
+                    if (pending) onRemove(row, col)
+                    else if (actionable) onPlace(row, col)
+                  }}
+                  className={`scr-board-square ${premium && !usedPremium ? `scr-premium-${premium.toLowerCase()}` : ''} ${cell ? 'has-tile' : ''} ${pending ? 'has-pending' : ''} ${wordHighlighted ? 'is-word-highlighted' : ''} ${letterHighlighted ? 'is-letter-highlighted' : ''}`}
+                >
+                  {cell ? (
+                    <TileFace tile={cell.tile} variant="board" />
+                  ) : pending?.tile ? (
+                    <TileFace tile={{ ...pending.tile, letter: pending.letter }} variant="board" pending />
+                  ) : row === 7 && col === 7 ? (
+                    <Star className="scr-center-star" aria-hidden="true" />
+                  ) : premium && !usedPremium ? (
+                    <span className="scr-premium-label">{premium}</span>
+                  ) : null}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+      <p className="scr-camera-hint">Drag or scroll to explore. Select a rack tile before choosing its square.</p>
+    </section>
   )
 }
 
 function ScoreAnimation({ event, onHighlight }: { event: ScrabbleScoreEvent | null; onHighlight: (highlight: ScoreHighlight | null) => void }) {
   const [step, setStep] = useState(0)
   const [displayTotal, setDisplayTotal] = useState(0)
+  const displayTotalRef = useRef(0)
+  const prefersReducedMotion = usePrefersReducedMotion()
   const steps = useMemo<ScoreStep[]>(() => {
     if (!event) return []
     let running = 0
@@ -454,28 +810,27 @@ function ScoreAnimation({ event, onHighlight }: { event: ScrabbleScoreEvent | nu
       const wordSquares = word.cells.map((cell) => `${cell.row},${cell.col}`)
       const additions = word.cells.map((cell) => {
         running += cell.baseValue
-        return { label: `${cell.letter}`, detail: `+${cell.baseValue}`, total: running, kind: 'add', wordSquares, letterSquare: `${cell.row},${cell.col}` }
+        return { label: cell.letter, detail: `+${cell.baseValue}`, total: running, wordSquares, letterSquare: `${cell.row},${cell.col}` }
       })
       const letterMultipliers = word.cells.filter((cell) => cell.letterMultiplier > 1).map((cell) => {
-        const bonus = cell.afterLetterMultiplier - cell.baseValue
-        running += bonus
-        return { label: `${cell.letter}`, detail: `x${cell.letterMultiplier} letter`, total: running, kind: 'letter', wordSquares, letterSquare: `${cell.row},${cell.col}` }
+        running += cell.afterLetterMultiplier - cell.baseValue
+        return { label: cell.letter, detail: `×${cell.letterMultiplier} letter`, total: running, wordSquares, letterSquare: `${cell.row},${cell.col}` }
       })
       running = wordStart + word.subtotal
-      const subtotal = { label: word.word.toUpperCase(), detail: `subtotal ${word.subtotal}`, total: running, kind: 'subtotal', wordSquares }
+      const subtotal = { label: word.word.toUpperCase(), detail: `subtotal ${word.subtotal}`, total: running, wordSquares }
       const multiplier = word.wordMultiplier > 1
-        ? [{ label: word.word.toUpperCase(), detail: `x${word.wordMultiplier} word`, total: wordStart + word.total, kind: 'word', wordSquares }]
+        ? [{ label: word.word.toUpperCase(), detail: `×${word.wordMultiplier} word`, total: wordStart + word.total, wordSquares }]
         : []
       running = wordStart + word.total
       return [...additions, ...letterMultipliers, subtotal, ...multiplier]
-    }).concat([{ label: 'Turn Total', detail: `+${event.total}`, total: event.total, kind: 'final', wordSquares: [] }])
+    }).concat([{ label: 'Turn total', detail: `+${event.total}`, total: event.total, wordSquares: [] }])
   }, [event])
 
   useEffect(() => {
-    setStep(0)
-    setDisplayTotal(0)
-    onHighlight(null)
-    if (steps.length === 0) return
+    setStep(prefersReducedMotion ? Math.max(0, steps.length - 1) : 0)
+    displayTotalRef.current = prefersReducedMotion ? event?.total ?? 0 : 0
+    setDisplayTotal(displayTotalRef.current)
+    if (steps.length === 0 || prefersReducedMotion) return
     const timer = window.setInterval(() => {
       setStep((current) => {
         if (current >= steps.length - 1) {
@@ -486,94 +841,113 @@ function ScoreAnimation({ event, onHighlight }: { event: ScrabbleScoreEvent | nu
       })
     }, 520)
     return () => window.clearInterval(timer)
-  }, [steps.length, onHighlight])
+  }, [event?.total, prefersReducedMotion, steps])
 
   useEffect(() => {
-    const current = steps[step]
-    if (!current || current.wordSquares.length === 0) {
+    if (!event) {
       onHighlight(null)
       return
     }
-    onHighlight({ wordSquares: current.wordSquares, letterSquare: current.letterSquare })
+    if (prefersReducedMotion) {
+      onHighlight({ wordSquares: [...new Set(event.words.flatMap((word) => word.cells.map((cell) => `${cell.row},${cell.col}`)))] })
+      return () => onHighlight(null)
+    }
+    const current = steps[step]
+    onHighlight(current?.wordSquares.length ? { wordSquares: current.wordSquares, letterSquare: current.letterSquare } : null)
     return () => onHighlight(null)
-  }, [step, steps, onHighlight])
+  }, [event, onHighlight, prefersReducedMotion, step, steps])
 
   useEffect(() => {
-    const target = steps[step]?.total || 0
-    const start = displayTotal
+    if (prefersReducedMotion) return
+    const target = steps[step]?.total ?? 0
+    const start = displayTotalRef.current
     const delta = target - start
     if (delta === 0) return
     const startedAt = performance.now()
     let frame = 0
     function animate(now: number) {
-      const progress = Math.min((now - startedAt) / 360, 1)
-      setDisplayTotal(Math.round(start + delta * progress))
+      const progress = Math.min((now - startedAt) / 320, 1)
+      const next = Math.round(start + delta * progress)
+      displayTotalRef.current = next
+      setDisplayTotal(next)
       if (progress < 1) frame = window.requestAnimationFrame(animate)
     }
     frame = window.requestAnimationFrame(animate)
     return () => window.cancelAnimationFrame(frame)
-  }, [step, steps])
+  }, [prefersReducedMotion, step, steps])
 
-  if (!event || steps.length === 0) return null
+  if (!event || steps.length === 0) {
+    return <p className="scr-hud-event">No scoring play yet.</p>
+  }
 
   return (
-    <section className="rounded-xl border border-accent/30 bg-accent-subtle p-4 text-accent">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-xs font-medium uppercase tracking-wider">Score</p>
-          <p className="text-sm font-semibold">{event.playerName}</p>
-        </div>
-        <div className="flex items-center gap-3 rounded-lg bg-surface px-4 py-3 shadow-sm">
-          <div className="animate-pulse-once rounded-md bg-accent px-3 py-2 font-mono text-2xl font-black text-text-on-accent">{displayTotal}</div>
-          <div>
-            <p className="font-mono text-lg font-black">{steps[step]?.label}</p>
-            <p className="text-sm font-semibold">{steps[step]?.detail}</p>
-          </div>
-        </div>
-      </div>
-    </section>
-  )
-}
-
-function StatusPanel({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-border bg-elevated px-4 py-3">
-      <p className="text-xs font-medium uppercase tracking-wider text-text-muted">{label}</p>
-      <p className="text-sm font-semibold text-text-primary">{value}</p>
+    <div className="scr-hud-event" aria-live="polite">
+      <span><strong>{event.playerName}</strong> scored</span>
+      <span className="scr-score-count">{displayTotal}</span>
+      <span><strong>{steps[step]?.label}</strong> · {steps[step]?.detail}</span>
     </div>
   )
 }
 
-function TileFace({ tile, variant }: { tile: ScrabbleTile; variant: 'board' | 'rack' }) {
-  const isBoard = variant === 'board'
+function HudStat({ label, value }: { label: string; value: string }) {
+  return <div className="scr-hud-stat"><span>{label}</span><strong>{value}</strong></div>
+}
+
+function TileFace({ tile, variant, pending = false }: { tile: ScrabbleTile; variant: 'board' | 'rack'; pending?: boolean }) {
   return (
-    <span className={`flex items-stretch justify-stretch rounded-md border border-warning/30 bg-warning-subtle font-mono text-warning-text shadow-sm ${
-      isBoard ? 'h-full w-full rounded-[inherit] border-0 shadow-none' : 'h-12 w-12'
-    }`}>
-      <TileContent letter={tile.letter} value={tile.value} variant={variant} />
+    <span className={`scr-tile-face scr-tile-face--${variant} ${pending ? 'is-pending' : ''}`} aria-hidden="true">
+      <span className="scr-tile-letter">{tile.letter}</span>
+      <span className="scr-tile-value">{tile.value}</span>
     </span>
   )
 }
 
-function TileContent({ letter, value, variant }: { letter: string; value: number; variant: 'board' | 'rack' }) {
-  const isBoard = variant === 'board'
-  return (
-    <span className={`relative block h-full w-full leading-none ${isBoard ? 'min-h-0 min-w-0' : 'min-h-9 min-w-9'}`}>
-      <span className={`absolute inset-0 flex items-center justify-center font-black ${isBoard ? 'text-[clamp(0.52rem,2.8vw,1rem)]' : 'text-xl'}`}>{letter}</span>
-      <span className={`absolute font-bold leading-none ${isBoard ? 'bottom-[12%] right-[12%] text-[clamp(0.28rem,1.35vw,0.55rem)]' : 'bottom-1 right-1 text-[0.6rem]'}`}>{value}</span>
-    </span>
-  )
+function squareAriaLabel(
+  row: number,
+  col: number,
+  tile: ScrabbleTile | undefined,
+  pending: { tile?: ScrabbleTile; letter: string } | undefined,
+  premium: ScrabblePremium | undefined,
+  usedPremium: boolean,
+  actionable: boolean,
+): string {
+  const coordinate = getScrabbleCoordinate(row, col)
+  if (tile) return `${coordinate}, ${tile.isBlank ? 'blank tile' : `${tile.letter}, ${tile.value} point${tile.value === 1 ? '' : 's'}`}, occupied`
+  if (pending?.tile) return `${coordinate}, pending ${pending.letter}, ${pending.tile.value} point${pending.tile.value === 1 ? '' : 's'}; activate to return it to your rack`
+  const squareType = row === 7 && col === 7 ? 'center star' : premium && !usedPremium ? PREMIUM_NAMES[premium] : 'open square'
+  return `${coordinate}, ${squareType}${actionable ? '; activate to place the selected tile' : '; select a rack tile to place here'}`
 }
 
-function premiumClass(premium: ScrabblePremium): string {
-  switch (premium) {
-    case 'DL': return 'border-info/40 bg-info-subtle text-info'
-    case 'TL': return 'border-accent/40 bg-accent-subtle text-accent'
-    case 'DW': return 'border-warning/40 bg-warning-subtle text-warning-text'
-    case 'TW': return 'border-danger/40 bg-danger-subtle text-danger-text'
+function actionTitle(mode: ReturnType<typeof resolveScrabbleActionMode>): string {
+  switch (mode) {
+    case 'completed': return 'Final scores'
+    case 'waitingForPlayer': return 'Invite another player'
+    case 'observing': return 'Watching the table'
+    case 'incomingTrade': return 'Trade offered'
+    case 'tradePending': return 'Trade in progress'
+    case 'exchange': return 'Choose tiles to swap'
+    case 'place': return 'Build your word'
+    case 'waitingTurn': return 'Watch the board'
   }
 }
 
 function playerName(players: Player[], userId: string): string {
-  return players.find((player) => player.userId === userId)?.username || 'Unknown'
+  return players.find((player) => player.userId === userId)?.username ?? 'Unknown player'
+}
+
+function getInitials(username: string): string {
+  const parts = username.trim().split(/[\s_-]+/).filter(Boolean)
+  if (parts.length > 1) return `${parts[0][0]}${parts[1][0]}`.toUpperCase()
+  return username.slice(0, 2).toUpperCase()
+}
+
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+  useEffect(() => {
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => setReduced(query.matches)
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+  return reduced
 }

@@ -15,14 +15,16 @@ import { getGameLabel } from '../lib/gameRules'
 import ticTacToeThumb from '../assets/game-tic-tac-toe.png'
 import wisecrackerThumb from '../assets/game-wisecracker.png'
 import scrabbleThumb from '../assets/game-scrabble.png'
+import propertyManagementThumb from '../assets/game-property-management.png'
 import mazeChaseThumb from '../assets/game-maze-chase.png'
 import snakeThumb from '../assets/game-snake.png'
 
-const GAME_TYPES: GameType[] = ['ticTacToe', 'wisecracker', 'scrabble']
+const GAME_TYPES: GameType[] = ['ticTacToe', 'wisecracker', 'scrabble', 'propertyManagement']
 const THUMBNAILS: Partial<Record<GameType, string>> = {
   ticTacToe: ticTacToeThumb,
   wisecracker: wisecrackerThumb,
   scrabble: scrabbleThumb,
+  propertyManagement: propertyManagementThumb,
 }
 
 type DashboardTab = 'multiplayer' | 'singlePlayer'
@@ -236,7 +238,9 @@ export default function Dashboard() {
     if (message === 'Game is full') {
       setModal({
         title: 'Game is full',
-        message: 'This Tic Tac Toe room already has two players. Choose another active game or create a new room.',
+        message: matchingGame
+          ? `This ${getGameLabel(matchingGame.gameType)} room is already full. Choose another active game or create a new room.`
+          : 'This room is already full. Choose another active game or create a new room.',
         variant: 'warning',
       })
       return
@@ -279,15 +283,7 @@ export default function Dashboard() {
                 onClick={() => handleCreate(type)}
                 className="card-glow group cursor-pointer overflow-hidden rounded-xl border border-border bg-elevated text-left shadow-sm"
               >
-                {THUMBNAILS[type] ? (
-                  <img src={THUMBNAILS[type]} alt="" className="h-28 w-full object-cover transition-transform duration-100 group-hover:scale-[1.02]" />
-                ) : (
-                  <div className="grid h-28 grid-cols-7 gap-1 bg-page p-4">
-                    {Array.from({ length: 21 }).map((_, index) => (
-                      <span key={index} className={`rounded-md border border-border ${index % 8 === 0 ? 'bg-danger-subtle' : index % 5 === 0 ? 'bg-info-subtle' : index % 3 === 0 ? 'bg-warning-subtle' : 'bg-elevated'}`} />
-                    ))}
-                  </div>
-                )}
+                <GameThumbnail type={type} />
                 <div className="flex items-center justify-between gap-3 p-3">
                   <span>
                     <span className="block text-base font-semibold text-text-primary">{getGameLabel(type)}</span>
@@ -515,6 +511,21 @@ export default function Dashboard() {
       >
         {modal?.message}
       </Modal>
+    </div>
+  )
+}
+
+function GameThumbnail({ type }: { type: GameType }) {
+  const thumbnail = THUMBNAILS[type]
+  if (thumbnail) {
+    return <img src={thumbnail} alt="" className="h-28 w-full object-cover transition-transform duration-100 group-hover:scale-[1.02]" />
+  }
+
+  return (
+    <div className="grid h-28 grid-cols-7 gap-1 bg-page p-4">
+      {Array.from({ length: 21 }).map((_, index) => (
+        <span key={index} className={`rounded-md border border-border ${index % 8 === 0 ? 'bg-danger-subtle' : index % 5 === 0 ? 'bg-info-subtle' : index % 3 === 0 ? 'bg-warning-subtle' : 'bg-elevated'}`} />
+      ))}
     </div>
   )
 }

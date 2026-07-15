@@ -11,6 +11,7 @@ import { Uno } from '../games/Uno'
 import { President } from '../games/President'
 import { Wisecracker, WisecrackerAction, WisecrackerState } from '../games/Wisecracker'
 import { Scrabble, ScrabbleAction, ScrabbleState } from '../games/Scrabble'
+import { PropertyManagement, PMAction, PropertyManagementState } from '../games/PropertyManagement'
 import { emitChatMessage, emitGameOver, emitGameReplayCreated, emitGameUpdated, emitGamesChanged, emitMoveMade } from './socketNotifier'
 import { userService } from './userService'
 
@@ -18,7 +19,7 @@ function generateGameCode(): string {
   return Math.random().toString(36).substring(2, 8).toUpperCase()
 }
 
-function getInitialState(gameType: GameType, hostUserId: string): unknown {
+function getInitialState(gameType: GameType, hostUserId: string, hostUsername?: string): unknown {
   switch (gameType) {
     case 'ticTacToe': return TicTacToe.createInitialState()
     case 'chess': return Chess.createInitialState()
@@ -27,6 +28,7 @@ function getInitialState(gameType: GameType, hostUserId: string): unknown {
     case 'president': return President.createInitialState(5)
     case 'wisecracker': return Wisecracker.createInitialState(hostUserId)
     case 'scrabble': return Scrabble.createInitialState(hostUserId, false)
+    case 'propertyManagement': return PropertyManagement.createInitialState(hostUserId, hostUsername)
     case 'snake': return createInitialSnakeState('medium')
     case 'mazeChase': return createInitialMazeChaseState()
   }
@@ -365,7 +367,7 @@ function validateMazeChaseStateForGame(state: MazeChaseState): void {
 class GameService {
   async createGame(userId: string, username: string, gameType: GameType, _options?: { opponentUserId?: string }): Promise<IGameDocument> {
     const gameCode = generateGameCode()
-    const initialState = getInitialState(gameType, userId)
+    const initialState = getInitialState(gameType, userId, username)
 
     const game = await Game.create({
       gameType,
@@ -557,7 +559,9 @@ class GameService {
     const game = await Game.findOne({ gameCode })
     if (!game) throw new NotFoundError('Game')
     if (game.players.some((p) => p.userId.toString() === userId)) throw new BadRequestError('Already in this game')
-    const maxPlayers = game.gameType === 'wisecracker' || game.gameType === 'scrabble' ? 4 : 2
+    const maxPlayers = game.gameType === 'wisecracker' || game.gameType === 'scrabble' ? 4
+      : game.gameType === 'propertyManagement' ? 8
+      : 2
     if (game.players.length >= maxPlayers) throw new BadRequestError('Game is full')
     if (game.status !== 'active') throw new BadRequestError('Game is not active')
 
@@ -575,6 +579,9 @@ class GameService {
     }
     if (game.gameType === 'scrabble') {
       game.gameState = Scrabble.addPlayer(game.gameState as unknown as ScrabbleState, userId) as unknown as Record<string, unknown>
+    }
+    if (game.gameType === 'propertyManagement') {
+      game.gameState = PropertyManagement.addPlayer(game.gameState as unknown as PropertyManagementState, userId, username) as unknown as Record<string, unknown>
     }
     await game.save()
 
@@ -602,7 +609,11 @@ class GameService {
       return this.makeScrabbleMoveOnGame(game, userId, move)
     }
 
-    throw new BadRequestError('Only Tic Tac Toe, Wisecracker, and Scrabble are available right now')
+    if (game.gameType === 'propertyManagement') {
+      return this.makePropertyManagementMoveOnGame(game, userId, move)
+    }
+
+    throw new BadRequestError('Only Tic Tac Toe, Wisecracker, Scrabble, and Property Management are available right now')
   }
 
   async setPlayerConnection(gameId: string, userId: string, isConnected: boolean): Promise<IGameDocument | null> {
@@ -946,6 +957,59 @@ class GameService {
     }
 
     emitMoveMade(game, Wisecracker.getMoveDescription(action))
+    emitGameUpdated(game)
+    emitGamesChanged(game)
+
+    if (game.status === 'completed') {
+      emitGameOver(game)
+    }
+
+    return game
+  }
+
+  private async makePropertyManagementMoveOnGame(game: IGameDocument, userId: string, move: unknown): Promise<IGameDocument> {
+    const action = parsePropertyManagementAction(move)
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
+    const playerIndex = game.players.findIndex((p) => p.userId.toString() === userId)
+    if (playerIndex === -1) throw new BadRequestError('You are not in this game')
+
+    const nextState = PropertyManagement.applyAction(game.gameState as unknown as PropertyManagementState, action, userId)
+    const player = game.players[playerIndex]
+
+    game.gameState = nextState as unknown as Record<string, unknown>
+    const currentPlayerDocIndex = game.players.findIndex((p) => p.userId.toString() === nextState.currentPlayerUserId)
+    game.currentTurnIndex = Math.max(currentPlayerDocIndex, 0)
+    game.currentTurn = game.players[game.currentTurnIndex]?.userId ?? player.userId
+
+    game.moveHistory.push({
+      moveNumber: game.moveHistory.length + 1,
+      playerId: player.userId,
+      playerName: player.username,
+      move: PropertyManagement.getMoveDescription(action),
+      timestamp: new Date(),
+    })
+    game.lastMoveAt = new Date()
+
+    if (nextState.phase === 'completed' && nextState.winnerId) {
+      const winner = game.players.find((p) => p.userId.toString() === nextState.winnerId)
+      game.status = 'completed'
+      game.completedAt = new Date()
+      game.result = {
+        winner: winner?.userId,
+        winnerName: winner?.username,
+        isDraw: false,
+        winType: 'lastStanding',
+      }
+    }
+
+    await game.save()
+    await this.cacheGame(game)
+
+    if (game.status === 'completed') {
+      await this.updateStatsForCompletedGame(game)
+    }
+
+    emitMoveMade(game, PropertyManagement.getMoveDescription(action))
     emitGameUpdated(game)
     emitGamesChanged(game)
 
@@ -1311,5 +1375,28 @@ function parseScrabbleAction(move: unknown): ScrabbleAction {
       return { type: 'giveUp' }
     default:
       throw new BadRequestError('Unknown Scrabble action')
+  }
+}
+
+function parsePropertyManagementAction(move: unknown): PMAction {
+  if (!move || typeof move !== 'object') throw new BadRequestError('Invalid Property Management action')
+  const action = move as Record<string, unknown>
+  switch (action.type) {
+    case 'startGame':           return { type: 'startGame' }
+    case 'rollDice':            return { type: 'rollDice' }
+    case 'buyProperty':         return { type: 'buyProperty' }
+    case 'declineProperty':     return { type: 'declineProperty' }
+    case 'auctionBid':          return { type: 'auctionBid', amount: Number(action.amount) }
+    case 'auctionPass':         return { type: 'auctionPass' }
+    case 'payJailFine':         return { type: 'payJailFine' }
+    case 'useGetOutOfJailCard': return { type: 'useGetOutOfJailCard' }
+    case 'buildHouse':          return { type: 'buildHouse', squareIndex: Number(action.squareIndex) }
+    case 'sellHouse':           return { type: 'sellHouse', squareIndex: Number(action.squareIndex) }
+    case 'mortgageProperty':    return { type: 'mortgageProperty', squareIndex: Number(action.squareIndex) }
+    case 'unmortgageProperty':  return { type: 'unmortgageProperty', squareIndex: Number(action.squareIndex) }
+    case 'declareBankruptcy':   return { type: 'declareBankruptcy' }
+    case 'endTurn':             return { type: 'endTurn' }
+    case 'acknowledgeCard':     return { type: 'acknowledgeCard' }
+    default: throw new BadRequestError('Unknown Property Management action')
   }
 }

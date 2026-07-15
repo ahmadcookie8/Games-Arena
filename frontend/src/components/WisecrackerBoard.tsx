@@ -1,6 +1,34 @@
-import { useEffect, useMemo, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import {
+  Check,
+  Clipboard,
+  Clock3,
+  Crown,
+  History,
+  Laugh,
+  MessageCircle,
+  Mic2,
+  RefreshCw,
+  Sparkles,
+  Trophy,
+  Users,
+  Vote,
+  WifiOff,
+} from 'lucide-react'
 import { Game, WisecrackerState } from '../types/game'
 import { User } from '../types/user'
+import {
+  WisecrackerActionMode,
+  getWisecrackerPhasePresentation,
+  getWisecrackerRoundProgress,
+  normalizeWisecrackerState,
+  resolveWisecrackerActionMode,
+  splitWisecrackerPrompt,
+} from '../lib/wisecrackerUi'
+import GameChat from './GameChat'
+import MoveHistory from './MoveHistory'
+import { TabletopBottomSheet, TabletopTab, TabletopTabs } from './TabletopShell'
+import './wisecracker-tabletop.css'
 
 type WisecrackerMove =
   | { type: 'startMatch'; maxScore: number }
@@ -12,37 +40,68 @@ type WisecrackerMove =
   | { type: 'startNextRound' }
   | { type: 'returnToLobby' }
 
+type InspectorTab = 'players' | 'history' | 'chat'
+
 interface Props {
   game: Game
   user: User | null
   onMove: (move: WisecrackerMove) => Promise<{ success: boolean; game?: Game; error?: string }>
+  onSendChat: (text: string) => Promise<{ success: boolean; error?: string }>
 }
 
-export default function WisecrackerBoard({ game, user, onMove }: Props) {
-  const state = game.gameState as unknown as WisecrackerState
+const INSPECTOR_TABS: TabletopTab<InspectorTab>[] = [
+  { id: 'players', label: 'Players', icon: Users },
+  { id: 'history', label: 'History', icon: History },
+  { id: 'chat', label: 'Chat', icon: MessageCircle },
+]
+
+export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Props) {
+  const state = normalizeWisecrackerState(game.gameState, game.players.map((player) => player.userId))
+  const myId = user?._id || ''
   const [maxScore, setMaxScore] = useState(state.maxScore || 3)
   const [prompt, setPrompt] = useState(state.prompt || '')
   const [answers, setAnswers] = useState<string[]>([])
   const [isSubmittingAnswers, setIsSubmittingAnswers] = useState(false)
   const [localAnswersLocked, setLocalAnswersLocked] = useState(false)
   const [isRefreshingPrompt, setIsRefreshingPrompt] = useState(false)
+  const [isStartingMatch, setIsStartingMatch] = useState(false)
+  const [isUsingPrompt, setIsUsingPrompt] = useState(false)
+  const [isRevealing, setIsRevealing] = useState(false)
+  const [selectingWinnerId, setSelectingWinnerId] = useState<string | null>(null)
+  const [isAdvancingRound, setIsAdvancingRound] = useState(false)
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [activeTab, setActiveTab] = useState<InspectorTab>('players')
+  const [sheetOpen, setSheetOpen] = useState(false)
 
-  const playersById = useMemo(() => Object.fromEntries(game.players.map((player) => [player.userId, player])), [game.players])
-  const myId = user?._id || ''
+  const playersById = useMemo(
+    () => Object.fromEntries(game.players.map((player) => [player.userId, player])),
+    [game.players],
+  )
+  const phasePresentation = getWisecrackerPhasePresentation(state.phase)
+  const resolvedActionMode = resolveWisecrackerActionMode(state, myId)
+  const actionMode: WisecrackerActionMode = resolvedActionMode === 'submitAnswers' && localAnswersLocked
+    ? 'answersLocked'
+    : resolvedActionMode
+  const progress = getWisecrackerRoundProgress(state)
   const isHost = state.hostUserId === myId
   const isChooser = state.chooserUserId === myId
-  const isActive = state.activePlayerIds.includes(myId)
-  const isWaiting = state.waitingPlayerIds.includes(myId)
-  const typers = state.activePlayerIds.filter((id) => id !== state.chooserUserId)
-  const submittedIds = Object.keys(state.submittedAnswers || {})
   const hasSubmitted = Boolean(myId && state.submittedAnswers?.[myId])
-  const answersAreLocked = hasSubmitted || localAnswersLocked
+  const typers = state.activePlayerIds.filter((id) => id !== state.chooserUserId)
   const revealedIds = state.answerOrder.slice(0, state.revealedCount)
-  const allAnswersRevealed = state.answerOrder.length > 0 && state.revealedCount >= state.answerOrder.length
+  const canSubmitAnswers = answers.length > 0 && answers.every((answer) => answer.trim().length > 0)
+  const chooser = state.chooserUserId ? playersById[state.chooserUserId] : undefined
+  const chooserIsConnected = chooser?.isConnected !== false
+  const latestMove = game.moveHistory[game.moveHistory.length - 1]
+  const myScore = state.scores[myId] ?? 0
+  const validMaxScore = Number.isInteger(maxScore) && maxScore >= 1 && maxScore <= 50
 
   useEffect(() => {
     setPrompt(state.prompt || '')
   }, [state.prompt, state.phase])
+
+  useEffect(() => {
+    if (state.phase === 'lobby') setMaxScore(state.maxScore || 3)
+  }, [state.maxScore, state.phase])
 
   useEffect(() => {
     const slots = Math.max(state.answerSlots || 0, 0)
@@ -61,262 +120,590 @@ export default function WisecrackerBoard({ game, user, onMove }: Props) {
       setLocalAnswersLocked(false)
       setIsSubmittingAnswers(false)
     }
-  }, [state.phase])
+    setIsRefreshingPrompt(false)
+    setIsStartingMatch(false)
+    setIsUsingPrompt(false)
+    setIsRevealing(false)
+    setSelectingWinnerId(null)
+    setIsAdvancingRound(false)
+  }, [state.phase, state.prompt, state.revealedCount, state.roundWinnerUserId])
 
-  async function submitAnswers() {
+  async function copyGameCode() {
+    try {
+      await navigator.clipboard.writeText(game.gameCode)
+      setCopyStatus('copied')
+      window.setTimeout(() => setCopyStatus('idle'), 2000)
+    } catch {
+      setCopyStatus('failed')
+    }
+  }
+
+  async function submitAnswers(event: FormEvent) {
+    event.preventDefault()
+    if (!canSubmitAnswers || isSubmittingAnswers) return
     setIsSubmittingAnswers(true)
     const result = await onMove({ type: 'submitAnswers', answers })
-    if (result.success) {
-      setLocalAnswersLocked(true)
-    } else {
-      setIsSubmittingAnswers(false)
-    }
+    if (result.success) setLocalAnswersLocked(true)
+    else setIsSubmittingAnswers(false)
   }
 
   async function refreshPrompt() {
+    if (isRefreshingPrompt) return
     setIsRefreshingPrompt(true)
-    const result = await onMove({ type: 'refreshPrompt' })
-    if (!result.success) {
-      setIsRefreshingPrompt(false)
+    await onMove({ type: 'refreshPrompt' })
+    setIsRefreshingPrompt(false)
+  }
+
+  async function startMatch() {
+    if (isStartingMatch || !validMaxScore || state.activePlayerIds.length < 3) return
+    setIsStartingMatch(true)
+    await onMove({ type: 'startMatch', maxScore })
+    setIsStartingMatch(false)
+  }
+
+  async function applyPrompt() {
+    if (!prompt.trim() || isUsingPrompt) return
+    setIsUsingPrompt(true)
+    await onMove({ type: 'setPrompt', prompt })
+    setIsUsingPrompt(false)
+  }
+
+  async function revealNextAnswer() {
+    if (isRevealing) return
+    setIsRevealing(true)
+    await onMove({ type: 'revealNextAnswer' })
+    setIsRevealing(false)
+  }
+
+  async function selectWinner(userId: string) {
+    if (selectingWinnerId) return
+    setSelectingWinnerId(userId)
+    await onMove({ type: 'selectRoundWinner', userId })
+    setSelectingWinnerId(null)
+  }
+
+  async function advanceRound(move: Extract<WisecrackerMove, { type: 'startNextRound' | 'returnToLobby' }>) {
+    if (isAdvancingRound) return
+    setIsAdvancingRound(true)
+    await onMove(move)
+    setIsAdvancingRound(false)
+  }
+
+  function selectInspector(tabId: InspectorTab) {
+    setActiveTab(tabId)
+  }
+
+  function openInspector(tabId: InspectorTab) {
+    selectInspector(tabId)
+    setSheetOpen(true)
+  }
+
+  function renderInspectorContent() {
+    switch (activeTab) {
+      case 'history':
+        return <MoveHistory moves={game.moveHistory} variant="embedded" />
+      case 'chat':
+        return <GameChat messages={game.chatMessages || []} currentUserId={myId} onSend={onSendChat} variant="embedded" />
+      default:
+        return <PlayersInspector game={game} state={state} currentUserId={myId} />
     }
   }
 
-  useEffect(() => {
-    setIsRefreshingPrompt(false)
-  }, [state.prompt])
+  function renderLobbyStage() {
+    const canStart = validMaxScore && state.activePlayerIds.length >= 3
+    return (
+      <div className="wc-stage-body wc-lobby">
+        <div className="wc-invite">
+          <div>
+            <p className="wc-kicker">Private room</p>
+            <p className="wc-invite__code">{game.gameCode}</p>
+            <p className="wc-muted">Share the code. Wisecracker needs at least three players.</p>
+          </div>
+          <button type="button" className="wc-button wc-button--quiet" onClick={() => void copyGameCode()}>
+            {copyStatus === 'copied' ? <Check aria-hidden="true" /> : <Clipboard aria-hidden="true" />}
+            {copyStatus === 'copied' ? 'Copied' : copyStatus === 'failed' ? 'Copy failed' : 'Copy code'}
+          </button>
+        </div>
 
-  async function usePrompt() {
-    await onMove({ type: 'setPrompt', prompt })
+        <div className="wc-lobby__count" aria-live="polite">
+          <div className="wc-count-orb"><Users aria-hidden="true" /></div>
+          <div>
+            <strong>{state.activePlayerIds.length} player{state.activePlayerIds.length === 1 ? '' : 's'} at the table</strong>
+            <span>{state.activePlayerIds.length >= 3 ? 'The room is ready.' : `${3 - state.activePlayerIds.length} more needed to start.`}</span>
+          </div>
+        </div>
+
+        {isHost ? (
+          <div className="wc-host-setting">
+            <label htmlFor="wc-max-score">
+              <span>Points to win</span>
+              <input
+                id="wc-max-score"
+                type="number"
+                min={1}
+                max={50}
+                inputMode="numeric"
+                value={maxScore}
+                onChange={(event) => setMaxScore(Number(event.target.value))}
+                aria-describedby="wc-max-score-help"
+              />
+            </label>
+            <p id="wc-max-score-help" className="wc-muted">Choose a target from 1 to 50.</p>
+            <button
+              type="button"
+              className="wc-button wc-button--primary"
+              disabled={!canStart || isStartingMatch}
+              onClick={() => void startMatch()}
+            >
+              <Mic2 aria-hidden="true" />
+              {isStartingMatch ? 'Starting match' : 'Start match'}
+            </button>
+          </div>
+        ) : (
+          <WaitingNotice icon={Clock3} title="Waiting for the host" detail="The host will choose the target and start the match." />
+        )}
+      </div>
+    )
   }
 
-  function renderFilledAnswer(playerId: string) {
-    const playerAnswers = state.submittedAnswers[playerId] || []
-    const segments = state.prompt ? state.prompt.split('_') : ['']
-
-    if (!state.prompt.includes('_')) {
+  function renderPromptStage() {
+    if (actionMode !== 'choosePrompt') {
       return (
-        <p>
-          {state.prompt}
-          <br />
-          <strong className="text-success">{playerAnswers[0]}</strong>
-        </p>
+        <div className="wc-stage-body wc-centered-state">
+          <div className="wc-stage-icon"><Mic2 aria-hidden="true" /></div>
+          <h3>{chooser?.username || 'The chooser'} is setting the scene</h3>
+          <p>{chooserIsConnected ? 'A fresh prompt is coming up.' : 'The chooser is offline. The round will continue when they reconnect.'}</p>
+          {!chooserIsConnected && <span className="wc-offline-callout"><WifiOff aria-hidden="true" /> Chooser offline</span>}
+        </div>
       )
     }
 
     return (
-      <p>
-        {segments.map((segment, index) => (
-          <span key={`${playerId}-${index}`}>
-            {segment}
-            {index < playerAnswers.length && <strong className="text-success">{playerAnswers[index]}</strong>}
-          </span>
-        ))}
-      </p>
+      <div className="wc-stage-body">
+        <div className="wc-cue-editor">
+          <label htmlFor="wc-prompt">Your prompt</label>
+          <textarea
+            id="wc-prompt"
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            rows={4}
+            maxLength={500}
+          />
+          <p className="wc-muted">Use underscores for blanks. With no underscore, everyone submits one punchline.</p>
+        </div>
+        <div className="wc-preview" aria-label="Prompt preview">
+          <span className="wc-kicker">On the card</span>
+          <PromptCard prompt={prompt || 'Your prompt will appear here.'} />
+        </div>
+        <div className="wc-action-row">
+          <button type="button" className="wc-button wc-button--quiet" disabled={isRefreshingPrompt} onClick={() => void refreshPrompt()}>
+            <RefreshCw className={isRefreshingPrompt ? 'wc-spin' : ''} aria-hidden="true" />
+            {isRefreshingPrompt ? 'Refreshing' : 'New prompt'}
+          </button>
+          <button type="button" className="wc-button wc-button--primary" disabled={!prompt.trim() || isUsingPrompt} onClick={() => void applyPrompt()}>
+            <Sparkles aria-hidden="true" />
+            {isUsingPrompt ? 'Using prompt' : 'Use prompt'}
+          </button>
+        </div>
+      </div>
     )
   }
 
-  return (
-    <div className="mx-auto w-full max-w-2xl space-y-5">
-      <div className="grid gap-3 md:grid-cols-3">
-        <StatusPanel title="Phase" value={phaseLabel(state.phase)} />
-        <StatusPanel title="Chooser" value={state.chooserUserId ? playersById[state.chooserUserId]?.username || 'Unknown' : 'Not chosen'} />
-        <StatusPanel title="Target" value={`${state.maxScore} point${state.maxScore === 1 ? '' : 's'}`} />
-      </div>
+  function renderAnsweringStage() {
+    return (
+      <div className="wc-stage-body">
+        <PromptCard prompt={state.prompt} featured />
 
-      {isWaiting && (
-        <div className="rounded-xl border border-warning/30 bg-warning-subtle px-4 py-3 text-sm text-warning-text">
-          You joined mid-round. You will enter when the next round starts.
-        </div>
-      )}
-
-      {state.phase === 'lobby' && (
-        <section className="rounded-2xl border border-border bg-surface p-5">
-          <h2 className="mb-3 text-base font-semibold text-text-primary">Lobby</h2>
-          <p className="mb-4 text-sm text-text-secondary">Share code <span className="font-mono font-medium text-accent">{game.gameCode}</span>. Wisecracker needs at least 3 players.</p>
-          {isHost && (
-            <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
-              <label className="text-sm font-medium text-text-secondary">
-                Max score
-                <input
-                  type="number"
-                  min={1}
-                  max={50}
-                  value={maxScore}
-                  onChange={(event) => setMaxScore(Number(event.target.value))}
-                  className="mt-1 w-32 rounded-lg border border-border bg-overlay px-3 py-2 text-text-primary focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-[var(--border-focus)]/20"
-                />
-              </label>
-              <button
-                onClick={() => onMove({ type: 'startMatch', maxScore })}
-                disabled={state.activePlayerIds.length < 3}
-                className="min-h-11 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Start Match
-              </button>
-            </div>
-          )}
-          {!isHost && <p className="text-sm text-text-muted">Waiting for the host to start.</p>}
-        </section>
-      )}
-
-      {state.phase === 'prompt' && (
-        <section className="rounded-2xl border border-border bg-surface p-5">
-          {isChooser ? (
-            <>
-              <h2 className="mb-3 text-base font-semibold text-text-primary">Choose A Prompt</h2>
-              <textarea
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                rows={4}
-                className="min-h-24 w-full resize-none rounded-lg border border-border bg-overlay px-3 py-2 text-text-primary focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-[var(--border-focus)]/20"
-              />
-              <p className="mt-2 text-sm text-text-muted">Use underscores for blanks. No blank means everyone submits one punchline.</p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button onClick={refreshPrompt} disabled={isRefreshingPrompt} className="rounded-lg border border-border bg-elevated px-4 py-2 text-sm font-medium text-text-primary transition-colors duration-150 hover:bg-overlay disabled:cursor-not-allowed disabled:opacity-70">
-                  {isRefreshingPrompt ? 'Refreshing...' : 'New Prompt'}
-                </button>
-                <button onClick={usePrompt} className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:bg-accent-hover">
-                  Use Prompt
-                </button>
+        {actionMode === 'submitAnswers' && (
+          <form className="wc-answer-form" onSubmit={(event) => void submitAnswers(event)}>
+            <div className="wc-answer-form__heading">
+              <div>
+                <p className="wc-kicker">Your turn</p>
+                <h3>Write the punchline</h3>
               </div>
-            </>
-          ) : (
-            <p className="text-sm text-text-secondary">{playersById[state.chooserUserId || '']?.username || 'The chooser'} is choosing a prompt.</p>
-          )}
-        </section>
-      )}
-
-      {state.phase === 'answering' && (
-        <section className="rounded-2xl border border-border bg-surface p-5">
-          <h2 className="mb-3 text-base font-semibold text-text-primary">{playersById[state.chooserUserId || '']?.username}'s Prompt</h2>
-          <p className="mb-4 rounded-xl border border-border bg-elevated p-4 text-center text-lg text-text-primary">{state.prompt}</p>
-          {!isChooser && isActive && !answersAreLocked && (
-            <div className="space-y-3">
-              {answers.map((answer, index) => (
+              <span>{answers.length} answer{answers.length === 1 ? '' : 's'}</span>
+            </div>
+            {answers.map((answer, index) => (
+              <label key={index} htmlFor={`wc-answer-${index}`}>
+                <span>{state.answerSlots === 1 ? 'Your answer' : `Blank ${index + 1}`}</span>
                 <input
-                  key={index}
+                  id={`wc-answer-${index}`}
                   value={answer}
                   disabled={isSubmittingAnswers}
+                  maxLength={300}
+                  autoComplete="off"
                   onChange={(event) => setAnswers((current) => current.map((item, itemIndex) => itemIndex === index ? event.target.value : item))}
-                  placeholder={state.answerSlots === 1 ? 'Answer' : `Blank ${index + 1}`}
-                  className="w-full rounded-lg border border-border bg-overlay px-3 py-2 text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-[var(--border-focus)]/20 disabled:cursor-not-allowed disabled:opacity-70"
+                  placeholder={state.answerSlots === 1 ? 'Make it count...' : `Fill blank ${index + 1}`}
                 />
-              ))}
-              <button
-                onClick={submitAnswers}
-                disabled={isSubmittingAnswers}
-                className="min-h-11 rounded-lg bg-success px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                {isSubmittingAnswers ? 'Submitting...' : 'Submit Answers'}
-              </button>
-            </div>
-          )}
-          {isSubmittingAnswers && !answersAreLocked && <p className="text-sm text-success">Submitting...</p>}
-          {answersAreLocked && <p className="rounded-xl border border-success/30 bg-success-subtle px-4 py-3 text-center text-sm text-success-text">Your answers are locked in.</p>}
-          {isChooser && <p className="text-sm text-text-secondary">Waiting for players to write their answers.</p>}
-          <WaitingList title="Still answering" ids={typers.filter((id) => !submittedIds.includes(id))} playersById={playersById} />
-        </section>
-      )}
+              </label>
+            ))}
+            <button type="submit" className="wc-button wc-button--success wc-button--wide" disabled={!canSubmitAnswers || isSubmittingAnswers}>
+              <Check aria-hidden="true" />
+              {isSubmittingAnswers ? 'Submitting' : 'Lock in answers'}
+            </button>
+          </form>
+        )}
 
-      {(state.phase === 'revealing' || state.phase === 'roundResult' || state.phase === 'completed') && (
-        <section className="rounded-2xl border border-border bg-surface p-5">
-          <h2 className="mb-3 text-base font-semibold text-text-primary">Answers</h2>
-          <div className="space-y-3">
-            {revealedIds.map((playerId, index) => {
-              const canSelect = isChooser && state.phase === 'revealing' && allAnswersRevealed
-              return (
-                <button
-                  key={playerId}
-                  onClick={() => canSelect && onMove({ type: 'selectRoundWinner', userId: playerId })}
-                  disabled={!canSelect}
-                  className="w-full rounded-xl border border-border bg-elevated px-4 py-3 text-left text-sm text-text-primary transition-all duration-150 hover:border-border-strong hover:bg-overlay disabled:cursor-default disabled:hover:bg-elevated"
-                >
-                  <span className="mb-2 block text-xs text-text-muted">
-                    {state.roundWinnerUserId || state.matchWinnerUserId ? playersById[playerId]?.username : `Answer ${index + 1}`}
-                  </span>
-                  {renderFilledAnswer(playerId)}
-                </button>
-              )
-            })}
+        {actionMode === 'answersLocked' && (
+          <WaitingNotice icon={Check} title="Answers locked in" detail="Sit tight while everyone else finishes writing." tone="success" />
+        )}
+
+        {actionMode === 'waitForAnswers' && (
+          <WaitingNotice
+            icon={Clock3}
+            title={isChooser ? 'The room is writing' : 'Waiting for the remaining answers'}
+            detail={isChooser ? 'You will reveal each response once every writer is ready.' : 'The reveal begins when every active writer submits.'}
+          />
+        )}
+
+        <SubmissionProgress typers={typers} state={state} playersById={playersById} />
+      </div>
+    )
+  }
+
+  function renderRevealStage() {
+    const canChoose = actionMode === 'chooseWinner'
+    return (
+      <div className="wc-stage-body">
+        <PromptCard prompt={state.prompt} featured />
+        <div className="wc-reveal-heading">
+          <div>
+            <p className="wc-kicker">Anonymous answers</p>
+            <h3>{canChoose ? 'Choose the winning punchline' : 'The answers take the stage'}</h3>
           </div>
-          {isChooser && state.phase === 'revealing' && !allAnswersRevealed && (
-            <button onClick={() => onMove({ type: 'revealNextAnswer' })} className="mt-4 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:bg-accent-hover">
-              Reveal Answer
-            </button>
-          )}
-          {isChooser && state.phase === 'revealing' && allAnswersRevealed && <p className="mt-4 text-sm text-text-secondary">Choose your favorite answer.</p>}
-          {!isChooser && localAnswersLocked && <p className="mt-4 text-sm text-success">Your answers are locked in.</p>}
-        </section>
-      )}
-
-      {(state.phase === 'roundResult' || state.phase === 'completed') && (
-        <section className="rounded-2xl border border-border bg-surface p-5">
-          <h2 className="mb-3 text-base font-semibold text-text-primary">{state.phase === 'completed' ? 'Match Complete' : 'Round Result'}</h2>
-          <p className="mb-4 text-sm text-text-secondary">
-            {state.phase === 'completed'
-              ? `${playersById[state.matchWinnerUserId || '']?.username} won the match.`
-              : `${playersById[state.roundWinnerUserId || '']?.username} won the round.`}
-          </p>
-          {!isHost && state.phase === 'completed' && (
-            <p className="mb-4 text-sm text-text-muted">Waiting for the host to play again with this lobby.</p>
-          )}
-          {isHost && state.phase === 'roundResult' && (
-            <button onClick={() => onMove({ type: 'startNextRound' })} className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:bg-accent-hover">
-              Start Next Round
-            </button>
-          )}
-          {isHost && state.phase === 'completed' && (
-            <button onClick={() => onMove({ type: 'returnToLobby' })} className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent transition-colors duration-150 hover:bg-accent-hover">
-              Play Again
-            </button>
-          )}
-        </section>
-      )}
-
-      <section className="rounded-2xl border border-border bg-surface p-5">
-        <h2 className="mb-3 text-base font-semibold text-text-primary">Scoreboard</h2>
-        <div className="grid gap-2 sm:grid-cols-2">
-          {state.activePlayerIds.map((id) => (
-            <div key={id} className="flex justify-between rounded-lg border border-border bg-page px-3 py-2">
-              <span className="text-sm font-medium text-text-primary">{playersById[id]?.username || 'Unknown'}</span>
-              <span className="font-mono text-sm font-bold text-accent">{state.scores[id] || 0}</span>
-            </div>
-          ))}
+          <span>{progress.revealed}/{progress.totalAnswers} revealed</span>
         </div>
-        <WaitingList title="Waiting for next round" ids={state.waitingPlayerIds} playersById={playersById} />
+        <div className="wc-answer-stack" aria-live="polite">
+          {revealedIds.length === 0 && <p className="wc-empty-answer">The first answer is waiting behind the curtain.</p>}
+          {revealedIds.map((playerId, index) => {
+            const card = (
+              <>
+                <span className="wc-answer-card__number">Answer {index + 1}</span>
+                <FilledPrompt prompt={state.prompt} answers={state.submittedAnswers[playerId] || []} />
+                {canChoose && <span className="wc-answer-card__vote"><Vote aria-hidden="true" /> Choose this answer</span>}
+              </>
+            )
+            return canChoose ? (
+              <button
+                key={playerId}
+                type="button"
+                className="wc-answer-card wc-answer-card--selectable"
+                disabled={Boolean(selectingWinnerId)}
+                aria-label={`Choose answer ${index + 1} as the round winner`}
+                onClick={() => void selectWinner(playerId)}
+              >
+                {card}
+              </button>
+            ) : (
+              <article key={playerId} className="wc-answer-card">{card}</article>
+            )
+          })}
+        </div>
+
+        {actionMode === 'revealAnswer' && (
+          <button type="button" className="wc-button wc-button--primary wc-button--wide" disabled={isRevealing} onClick={() => void revealNextAnswer()}>
+            <Sparkles aria-hidden="true" />
+            {isRevealing ? 'Revealing' : revealedIds.length === 0 ? 'Reveal first answer' : 'Reveal next answer'}
+          </button>
+        )}
+        {actionMode === 'waitForReveal' && (
+          <p className="wc-stage-note">{chooser?.username || 'The chooser'} controls the reveal and picks a favorite after every answer is shown.</p>
+        )}
+      </div>
+    )
+  }
+
+  function renderResultStage() {
+    const isComplete = state.phase === 'completed'
+    const winnerId = isComplete ? state.matchWinnerUserId : state.roundWinnerUserId
+    const winner = winnerId ? playersById[winnerId] : undefined
+    const isHostAction = actionMode === 'roundResultHost' || actionMode === 'completedHost'
+
+    return (
+      <div className="wc-stage-body">
+        <div className={`wc-winner ${isComplete ? 'wc-winner--final' : ''}`}>
+          <div className="wc-winner__icon">{isComplete ? <Trophy aria-hidden="true" /> : <Crown aria-hidden="true" />}</div>
+          <p className="wc-kicker">{isComplete ? 'Match winner' : 'Round winner'}</p>
+          <h3>{winner?.username || 'Winner'}</h3>
+          <p>{isComplete ? `First to ${state.maxScore} takes the spotlight.` : 'One point for the room favorite.'}</p>
+        </div>
+
+        {state.roundWinnerUserId && (
+          <article className="wc-answer-card wc-answer-card--winner">
+            <span className="wc-answer-card__number">Winning answer</span>
+            <FilledPrompt prompt={state.prompt} answers={state.submittedAnswers[state.roundWinnerUserId] || []} />
+          </article>
+        )}
+
+        {isHostAction ? (
+          <button
+            type="button"
+            className="wc-button wc-button--primary wc-button--wide"
+            disabled={isAdvancingRound}
+            onClick={() => void advanceRound({ type: isComplete ? 'returnToLobby' : 'startNextRound' })}
+          >
+            {isComplete ? <Laugh aria-hidden="true" /> : <Mic2 aria-hidden="true" />}
+            {isAdvancingRound ? 'Getting ready' : isComplete ? 'Play again' : 'Start next round'}
+          </button>
+        ) : (
+          <WaitingNotice
+            icon={Clock3}
+            title={isComplete ? 'Waiting for the host' : 'Next round coming up'}
+            detail={isComplete ? 'The host can bring this lobby back for another match.' : 'The host will start the next prompt when the room is ready.'}
+          />
+        )}
+      </div>
+    )
+  }
+
+  function renderRoundStage() {
+    switch (state.phase) {
+      case 'lobby': return renderLobbyStage()
+      case 'prompt': return renderPromptStage()
+      case 'answering': return renderAnsweringStage()
+      case 'revealing': return renderRevealStage()
+      case 'roundResult':
+      case 'completed': return renderResultStage()
+    }
+  }
+
+  return (
+    <div className="wisecracker-theme">
+      <section className={`wc-hud wc-tone--${phasePresentation.tone}`} aria-label="Wisecracker status">
+        <div className="wc-hud__lead">
+          <div className="wc-hud__avatar" aria-hidden="true">{chooser?.username?.[0]?.toUpperCase() || <Mic2 />}</div>
+          <div>
+            <p className="wc-kicker">{phasePresentation.eyebrow}</p>
+            <strong>{phasePresentation.label}</strong>
+            <span>{state.chooserUserId ? `${chooser?.username || 'Unknown'} is chooser${chooserIsConnected ? '' : ' · offline'}` : 'Waiting for a chooser'}</span>
+          </div>
+        </div>
+        <div className="wc-hud__stat"><span>Target</span><strong>{state.maxScore}</strong></div>
+        <div className="wc-hud__stat"><span>Your score</span><strong>{myScore}</strong></div>
+        <div className="wc-hud__stat">
+          <span>{state.phase === 'revealing' ? 'Revealed' : state.phase === 'lobby' ? 'Players' : 'Answers'}</span>
+          <strong>{state.phase === 'revealing' ? `${progress.revealed}/${progress.totalAnswers}` : state.phase === 'lobby' ? state.activePlayerIds.length : `${progress.submitted}/${progress.totalTypers}`}</strong>
+        </div>
+        {latestMove && <p className="wc-hud__event" aria-live="polite"><Sparkles aria-hidden="true" /> {latestMove.playerName} {latestMove.move}</p>}
       </section>
+
+      <div className="wc-game-layout">
+        <main className="wc-stage" aria-labelledby="wc-stage-title">
+          <header className="wc-stage__header">
+            <div>
+              <p className="wc-kicker">Current action</p>
+              <h2 id="wc-stage-title">{getStageTitle(actionMode)}</h2>
+            </div>
+            <span className={`wc-phase-pill wc-phase-pill--${phasePresentation.tone}`}>{phasePresentation.label}</span>
+          </header>
+          {actionMode === 'waitingPlayer' && (
+            <div className="wc-midround-banner">
+              <Clock3 aria-hidden="true" />
+              <span><strong>You are watching this round.</strong> You will enter when the next round begins.</span>
+            </div>
+          )}
+          {renderRoundStage()}
+        </main>
+
+        <aside className="wc-desktop-rail" aria-label="Wisecracker information">
+          <div className="wc-inspector">
+            <TabletopTabs
+              tabs={INSPECTOR_TABS}
+              activeTab={activeTab}
+              onSelect={selectInspector}
+              ariaLabel="Wisecracker information"
+              idBase="wisecracker-desktop"
+            />
+            <div
+              className="wc-inspector__content"
+              id="wisecracker-desktop-panel"
+              role="tabpanel"
+              aria-labelledby={`wisecracker-desktop-tab-${activeTab}`}
+            >
+              {renderInspectorContent()}
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <div className="wc-mobile-dock">
+        <TabletopTabs
+          tabs={INSPECTOR_TABS}
+          activeTab={activeTab}
+          onSelect={openInspector}
+          ariaLabel="Open Wisecracker information"
+          idBase="wisecracker-mobile"
+          controlsIdBase="wisecracker-sheet"
+          variant="dock"
+        />
+      </div>
+
+      <TabletopBottomSheet
+        isOpen={sheetOpen}
+        title={INSPECTOR_TABS.find((tab) => tab.id === activeTab)?.label || 'Game information'}
+        onClose={() => setSheetOpen(false)}
+      >
+        <div className="wisecracker-theme wc-sheet-content">
+          <TabletopTabs
+            tabs={INSPECTOR_TABS}
+            activeTab={activeTab}
+            onSelect={selectInspector}
+            ariaLabel="Wisecracker information"
+            idBase="wisecracker-sheet"
+          />
+          <div
+            className="wc-sheet-content__body"
+            id="wisecracker-sheet-panel"
+            role="tabpanel"
+            aria-labelledby={`wisecracker-sheet-tab-${activeTab}`}
+          >
+            {renderInspectorContent()}
+          </div>
+        </div>
+      </TabletopBottomSheet>
     </div>
   )
 }
 
-function StatusPanel({ title, value }: { title: string; value: string }) {
+function PromptCard({ prompt, featured = false }: { prompt: string; featured?: boolean }) {
+  const segments = splitWisecrackerPrompt(prompt)
+  const hasBlanks = segments.length > 1
   return (
-    <div className="rounded-xl border border-border bg-elevated px-4 py-3">
-      <p className="mb-1 text-xs font-medium uppercase tracking-wider text-text-muted">{title}</p>
-      <p className="text-sm font-semibold text-text-primary">{value}</p>
+    <div className={`wc-prompt-card ${featured ? 'wc-prompt-card--featured' : ''}`}>
+      <span className="wc-prompt-card__mark" aria-hidden="true"><Mic2 /></span>
+      <p>
+        {segments.map((segment, index) => (
+          <span key={index}>
+            {segment}
+            {hasBlanks && index < segments.length - 1 && <span className="wc-prompt-blank" aria-label={`blank ${index + 1}`} />}
+          </span>
+        ))}
+      </p>
     </div>
   )
 }
 
-function WaitingList({ title, ids, playersById }: { title: string; ids: string[]; playersById: Record<string, { username: string }> }) {
-  if (ids.length === 0) return null
+function FilledPrompt({ prompt, answers }: { prompt: string; answers: string[] }) {
+  const segments = splitWisecrackerPrompt(prompt)
+  const hasBlanks = segments.length > 1
+
+  if (!hasBlanks) {
+    return <p className="wc-filled-prompt"><span>{prompt}</span><strong>{answers[0]}</strong></p>
+  }
+
   return (
-    <div className="mt-4">
-      <p className="mb-2 text-xs font-medium uppercase tracking-wider text-text-muted">{title}</p>
-      <div className="flex flex-wrap gap-2">
-        {ids.map((id) => <span key={id} className="rounded-full bg-overlay px-3 py-1 text-sm text-text-secondary">{playersById[id]?.username || 'Unknown'}</span>)}
+    <p className="wc-filled-prompt">
+      {segments.map((segment, index) => (
+        <span key={index}>
+          {segment}
+          {index < segments.length - 1 && <strong>{answers[index] || '...'}</strong>}
+        </span>
+      ))}
+    </p>
+  )
+}
+
+function SubmissionProgress({
+  typers,
+  state,
+  playersById,
+}: {
+  typers: string[]
+  state: WisecrackerState
+  playersById: Record<string, { username: string; isConnected?: boolean }>
+}) {
+  if (typers.length === 0) return null
+  return (
+    <div className="wc-submission-progress">
+      <p className="wc-kicker">Around the room</p>
+      <div>
+        {typers.map((id) => {
+          const submitted = Boolean(state.submittedAnswers[id])
+          const connected = playersById[id]?.isConnected !== false
+          return (
+            <span key={id} className={submitted ? 'is-ready' : ''}>
+              {submitted ? <Check aria-hidden="true" /> : connected ? <Clock3 aria-hidden="true" /> : <WifiOff aria-hidden="true" />}
+              {playersById[id]?.username || 'Unknown'}
+              <small>{submitted ? 'Ready' : connected ? 'Writing' : 'Offline'}</small>
+            </span>
+          )
+        })}
       </div>
     </div>
   )
 }
 
-function phaseLabel(phase: WisecrackerState['phase']): string {
-  switch (phase) {
-    case 'lobby': return 'Lobby'
-    case 'prompt': return 'Prompt'
-    case 'answering': return 'Answering'
-    case 'revealing': return 'Revealing'
-    case 'roundResult': return 'Round Result'
-    case 'completed': return 'Completed'
+function WaitingNotice({
+  icon: Icon,
+  title,
+  detail,
+  tone = 'neutral',
+}: {
+  icon: typeof Clock3
+  title: string
+  detail: string
+  tone?: 'neutral' | 'success'
+}) {
+  return (
+    <div className={`wc-waiting-notice wc-waiting-notice--${tone}`}>
+      <span><Icon aria-hidden="true" /></span>
+      <div><strong>{title}</strong><p>{detail}</p></div>
+    </div>
+  )
+}
+
+function PlayersInspector({ game, state, currentUserId }: { game: Game; state: WisecrackerState; currentUserId: string }) {
+  const orderedIds = [...state.activePlayerIds, ...state.waitingPlayerIds.filter((id) => !state.activePlayerIds.includes(id))]
+  const playersById = Object.fromEntries(game.players.map((player) => [player.userId, player]))
+  return (
+    <div className="wc-player-list">
+      <div className="wc-player-list__summary">
+        <span><Users aria-hidden="true" /></span>
+        <div><strong>{state.activePlayerIds.length} active</strong><p>First to {state.maxScore} points wins.</p></div>
+      </div>
+      {orderedIds.map((id) => {
+        const player = playersById[id]
+        const connected = player?.isConnected !== false
+        const waiting = state.waitingPlayerIds.includes(id)
+        const isChooser = state.chooserUserId === id
+        const isWinner = state.matchWinnerUserId === id || state.roundWinnerUserId === id
+        return (
+          <div key={id} className={`wc-player-row ${isChooser ? 'is-chooser' : ''} ${isWinner ? 'is-winner' : ''}`}>
+            <span className="wc-player-row__avatar">{player?.username?.[0]?.toUpperCase() || '?'}</span>
+            <div className="wc-player-row__identity">
+              <strong>{player?.username || 'Unknown'}</strong>
+              <div>
+                {id === currentUserId && <span>You</span>}
+                {id === state.hostUserId && <span>Host</span>}
+                {isChooser && <span>Chooser</span>}
+                {waiting && <span>Next round</span>}
+              </div>
+              <p className={connected ? '' : 'is-offline'}>{connected ? waiting ? 'Waiting to join' : 'Online' : 'Offline'}</p>
+            </div>
+            <strong className="wc-player-row__score">{state.scores[id] ?? 0}</strong>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function getStageTitle(mode: WisecrackerActionMode): string {
+  switch (mode) {
+    case 'lobbyHost': return 'Set up the room'
+    case 'lobbyGuest': return 'The room is gathering'
+    case 'waitingPlayer': return 'Watch this round'
+    case 'choosePrompt': return 'Choose the prompt'
+    case 'waitForPrompt': return 'Prompt in progress'
+    case 'submitAnswers': return 'Write your answers'
+    case 'answersLocked': return 'Answers submitted'
+    case 'waitForAnswers': return 'Waiting on the room'
+    case 'revealAnswer': return 'Reveal the answers'
+    case 'chooseWinner': return 'Pick your favorite'
+    case 'waitForReveal': return 'Watch the reveal'
+    case 'roundResultHost':
+    case 'roundResultGuest': return 'Round result'
+    case 'completedHost':
+    case 'completedGuest': return 'Match complete'
   }
 }
