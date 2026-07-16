@@ -1,76 +1,108 @@
-# Production blue/green deployment prerequisites
+# Production backend deployment
 
-The GitHub deployment workflow stages an immutable backend image on one of two
-loopback-only slots:
+The production backend uses one Docker Compose application on EC2. GitHub
+Actions builds a commit-addressed backend image, pushes it to Docker Hub,
+resolves the registry digest, and deploys that exact immutable digest to the
+`node` service. Nginx continues to proxy the public API and Socket.IO traffic to
+the service bound on `127.0.0.1:3000`.
 
-- blue: `127.0.0.1:3001`
-- green: `127.0.0.1:3002`
+This is an **in-place deployment**, not blue/green. Recreating the Node
+container causes a brief API and WebSocket interruption. Production workflow
+concurrency prevents two automated deployments from overlapping.
 
-The currently active container remains available while the candidate starts and
-passes its Docker health check. Nginx is then reloaded with the candidate slot,
-and the workflow calls `https://api.penguincookie.ca/api/health` through the
-local TLS listener. A failed switch or post-cutover check restores the previous
-Nginx slot, Compose file, and running container. After success, the previous
-container is removed but its exact image ID remains tagged as
-`games-arena-backend:rollback-<image-id>`. `deployment-state.env` records that
-local recovery tag and, once the previous release came from the hardened
-pipeline, its immutable registry digest as `ROLLBACK_REFERENCE`.
+## Checks and deployment sequence
 
-GitHub serializes production jobs, and the host script also holds
-`/home/ubuntu/Games-Arena/backend/.deploy.lock` with `flock` so a manual run
-cannot overlap an automated deployment. If Nginx rollback cannot be confirmed,
-the script deliberately leaves the candidate running instead of removing a
-container that Nginx may still reference.
+Automatic pull-request CI is intentionally lean and can also be run manually:
 
-## One-time EC2 setup
+- Backend checks install locked dependencies under Node 24, test the shared
+  game engine, run the backend non-stress test suite, and build the backend.
+- Frontend checks install locked dependencies under Node 24 and build the
+  frontend.
 
-These privileged host changes are intentionally **not** performed by Codex or
-by an unprivileged deployment job. Back up the active Nginx configuration first,
-identify and remove or replace the existing `api.penguincookie.ca` server block,
-then install the reviewed files from this directory:
+The longer randomized backend stress test, frontend unit/browser/multiplayer
+and visual suites, lint, audits, broad scans, container scans, and SBOM tooling
+remain available for local or deliberate manual use. CodeQL is manual-only;
+these checks are not automatic gates on every pull request or release.
 
-```bash
-sudo install -o root -g root -m 0755 \
-  switch-nginx-upstream.sh \
-  /usr/local/sbin/games-arena-switch-upstream
+For a backend release, the deployment workflow:
 
-sudo install -o root -g root -m 0644 \
-  nginx-upstream.conf \
-  /etc/nginx/conf.d/games-arena-upstream.conf
+1. Builds and pushes an image tagged with the Git commit, then resolves and
+   validates its immutable Docker Hub `sha256` digest.
+2. Opens SSH only after matching the exact EC2 host against the trusted
+   `EC2_KNOWN_HOSTS` value, with batch mode and strict host-key checking.
+3. Copies only the reviewed `backend/docker-compose.yml` candidate to the
+   deployment directory. The remote shell verifies Docker, Compose, `curl`,
+   the protected `.env`, and the current and candidate Compose files.
+4. Forces `NODE_ENV=production` and the canonical frontend origin, validates
+   the candidate Compose model with the exact image digest, then records the
+   current Compose file and running Node image as rollback metadata. The image
+   reference is retained in `backend-image.previous` with mode `0600`.
+5. Atomically installs the candidate, pulls the exact Node digest, and
+   recreates the Compose `node` service in place. The existing Redis service
+   and its named data volume remain intact.
+6. Polls `http://127.0.0.1:3000/api/health`, then verifies the public TLS route
+   through the local Nginx listener. If either check fails after installation,
+   it restores the previous Compose file and local image, starts the old Node
+   service, checks both routes again, and preserves the original deployment
+   failure. A successful rollout retains the previous Compose file and Docker
+   image locally for a deliberate manual rollback.
 
-sudo install -o root -g root -m 0644 \
-  nginx-api.conf \
-  /etc/nginx/conf.d/games-arena-api.conf
-
-sudo visudo -cf games-arena-deploy.sudoers
-sudo install -o root -g root -m 0440 \
-  games-arena-deploy.sudoers \
-  /etc/sudoers.d/games-arena-deploy
-
-sudo nginx -t
-sudo systemctl reload nginx
-sudo -u ubuntu sudo -n /usr/local/sbin/games-arena-switch-upstream --check
-```
-
-`nginx -T` must show exactly one `games_arena_backend` upstream and both the
-HTTP and Socket.IO locations must proxy to it. The initial upstream points to
-the legacy service on port 3000, so the first workflow run can migrate without
-an outage. Do not end the maintenance window until the local TLS health check
-passes:
+The rollback protects a failed candidate deployment; it is not a zero-downtime
+cutover. After a successful deployment, verify the public endpoint and a
+representative Socket.IO connection before considering the release complete.
 
 ```bash
-curl --fail --resolve api.penguincookie.ca:443:127.0.0.1 \
-  https://api.penguincookie.ca/api/health
+curl --fail https://api.penguincookie.ca/api/health
 ```
 
-The sudo rule grants only the root-owned switch helper. That helper accepts one
-of `--check`, `--current`, `--version`, `3000`, `3001`, or `3002`; it validates
-Nginx before and after every atomic upstream replacement and restores the old
-file if reload fails. Reinstall the helper intentionally whenever its required
-version changes in the repository.
+## Required GitHub configuration
 
-The production user still needs Docker access, the existing protected `.env`,
-the pinned `EC2_KNOWN_HOSTS` GitHub secret, and a valid certificate for
-`api.penguincookie.ca`. AWS OIDC/SSM migration requires account-specific IAM,
-instance-profile, and SSM resources and remains an external prerequisite; the
-workflow therefore retains pinned-host SSH until those resources exist.
+The production environment requires these GitHub Actions secrets. Docker Hub
+credentials are repository secrets used to build and push; EC2 credentials may
+be repository secrets or production-environment secrets used by the deploy job:
+
+- `DOCKER_HUB_USERNAME`
+- `DOCKER_HUB_PASSWORD`
+- `EC2_HOST`
+- `EC2_SSH_KEY`
+- `EC2_KNOWN_HOSTS`
+
+`EC2_KNOWN_HOSTS` must contain the expected host-key entry obtained and
+verified through a trusted administrative channel. Do not generate and trust a
+fresh `ssh-keyscan` result inside the deployment job; doing so would remove the
+host-identity check that the secret is intended to provide.
+
+The EC2 host also needs:
+
+- Docker Engine and the Docker Compose plugin;
+- an `ubuntu` deployment user permitted to use Docker;
+- `/home/ubuntu/Games-Arena/backend/.env`, protected from other users and
+  containing the production MongoDB URI, application settings, and a
+  32-byte-or-longer `JWT_SECRET` (the workflow enforces `NODE_ENV=production`
+  and `CORS_ORIGIN=https://games.penguincookie.ca` during rollout);
+- a valid TLS certificate for `api.penguincookie.ca`; and
+- Nginx proxying both HTTP and Socket.IO traffic to the single backend service
+  on `127.0.0.1:3000`.
+
+When the API proxy configuration changes, install and validate the reviewed
+`nginx-api.conf` intentionally, then run `nginx -t` before reloading Nginx. A
+static `games_arena_backend` upstream may continue to point at port 3000; the
+active deployment does not switch it between slots.
+
+## Frontend deployment
+
+The frontend is deployed independently by Vercel's Git integration from
+`main`, with `frontend/` as the project root. Configure the production Vercel
+environment so `VITE_API_URL` and `VITE_SOCKET_URL` both use
+`https://api.penguincookie.ca`. No GitHub Actions workflow or GitHub deployment
+secret is required for the Vercel release.
+
+## Retained blue/green utilities
+
+`blue-green-deploy.sh`, `switch-nginx-upstream.sh`, and the associated slot
+switching/sudo files are retained in this directory for reference and possible
+future reactivation. They are currently inactive and unreferenced by the
+production deployment workflow. Do not install or invoke them as part of the
+in-place Compose deployment. If `nginx-upstream.conf` is already installed, it
+acts only as the static port-3000 upstream until an intentionally reviewed
+Nginx change replaces it.

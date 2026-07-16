@@ -191,8 +191,9 @@ reproduce; legacy or interrupted runs remain visible as explicitly unranked hist
 Games Arena is deployed on:
 
 - **Frontend:** Vercel (free tier)
-  - Automatic deploys on push to `main`
+  - Vercel's Git integration builds and deploys the `frontend/` project from `main`; there is no separate GitHub Actions frontend deployment
   - Domain: `https://games.penguincookie.ca`
+  - Production environment variables point `VITE_API_URL` and `VITE_SOCKET_URL` at `https://api.penguincookie.ca`
   - `https://games-arena.penguincookie.ca` is a retired/parked hostname and must not be used for auth, CORS, or frontend environment variables
 
 - **Backend:** AWS EC2 t4g.micro
@@ -200,13 +201,17 @@ Games Arena is deployed on:
   - Database: MongoDB Atlas (free tier, 5GB storage)
   - Cache: Redis (Docker container)
 
-Backend releases are gated by lint, tests, builds, dependency audits, image scanning, and SBOM generation. The workflow publishes only a commit-addressed image and deploys its immutable digest. It also synchronizes `backend/docker-compose.yml`, verifies the EC2 SSH host key through the `EC2_KNOWN_HOSTS` secret, waits for the health check, and rolls back a failed update.
+Pull-request CI is intentionally lean. It can also be started manually, and runs the locked Node 24 installs, shared game-engine tests, the backend non-stress test suite and build, and the frontend build. The longer randomized stress test, frontend unit and browser suites, lint, audits, visual checks, real-service multiplayer journeys, and broad repository/container security scans remain available as local or manual checks; they are not represented as automatic gates on every pull request. CodeQL is manual-only.
+
+The backend release workflow builds a commit-addressed Docker image, resolves its immutable registry digest, and deploys that exact digest to the existing EC2 Compose stack. Deployment is an in-place recreation of the service bound to `127.0.0.1:3000`, so a short API/WebSocket interruption is expected while the container is replaced. The workflow serializes production deployments, preserves the previous image reference, verifies the application health check, and restores the previous image if the candidate does not become healthy. This is not an active blue/green deployment.
+
+The older blue/green scripts and Nginx slot-switching utilities remain in `backend/deploy/` for reference and possible future use, but the production workflow does not call or install them. Nginx continues to proxy `api.penguincookie.ca` to the single Compose service on `127.0.0.1:3000`.
 
 Required production secrets are `DOCKER_HUB_USERNAME`, `DOCKER_HUB_PASSWORD`, `EC2_HOST`, `EC2_SSH_KEY`, and `EC2_KNOWN_HOSTS`. Capture the known-hosts entry through a trusted administrative channel; do not populate it with an unverified key scan during deployment. Install the versioned `backend/deploy/nginx-api.conf` on the host when the API proxy configuration changes.
 
 Before the first hardened release, schedule a maintenance window, verify a MongoDB backup, run `npm run security:migrate` in report-only mode, and review its counts. Writes require the explicit `-- --apply --backup-confirmed` guard. Rotate `JWT_SECRET` (minimum 32 random bytes) during the same maintenance window; this intentionally invalidates all existing sessions. Full rollout and verification steps are recorded in `agents.md`.
 
-See `getting_started/README_SETUP.md` for detailed deployment instructions.
+See `backend/deploy/README.md` for the current deployment and rollback procedure.
 
 ## Development Roadmap
 

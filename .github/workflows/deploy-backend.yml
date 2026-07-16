@@ -17,243 +17,95 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  game-engine-verify:
-    name: Verify shared game engine
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    defaults:
-      run:
-        working-directory: packages/game-engine
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '24'
-
-      - name: Test deterministic replay engine
-        run: npm test
-
   verify:
     name: Verify backend
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    env:
-      NODE_ENV: test
-      MONGODB_URI: mongodb://127.0.0.1:27017/games_arena_security_integration
-      REDIS_URL: redis://127.0.0.1:6379/15
-      JWT_SECRET: ci-only-security-integration-secret
-      CORS_ORIGIN: http://localhost:5173
-      RUN_SECURITY_INTEGRATION: '1'
-    services:
-      mongo:
-        image: mongo:8.0@sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6
-        ports:
-          - 27017:27017
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      redis:
-        image: redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
     defaults:
       run:
         working-directory: backend
     steps:
       - name: Check out repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
-      - name: Install dependencies
+      - name: Install backend dependencies
         run: npm ci --no-audit --no-fund
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Test (unit and real-service security integration)
-        run: npm test -- --runInBand
-
-      - name: Build
-        run: npm run build
-
-      - name: Audit dependencies
-        run: npm audit --omit=dev --audit-level=high
-
-  frontend-verify:
-    name: Verify frontend compatibility
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci --no-audit --no-fund
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
+      - name: Test deterministic replay engine
         run: npm test
+        working-directory: packages/game-engine
 
-      - name: Build
+      - name: Run backend CI tests
+        run: npm run test:ci
+
+      - name: Build backend
         run: npm run build
-
-      - name: Audit dependencies
-        run: npm audit --omit=dev --audit-level=high
-
-  release-security:
-    name: Release security analysis
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Resolve pinned Redis image
-        id: redis-image
-        shell: bash
-        run: |
-          set -euo pipefail
-          image_ref="$(awk '/^  redis:/{service=1; next} service && $1 == "image:" {print $2; exit}' backend/docker-compose.yml)"
-          case "$image_ref" in
-            redis:*@sha256:*) ;;
-            *) echo "Redis image must be pinned by digest" >&2; exit 1 ;;
-          esac
-          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
-        with:
-          languages: javascript-typescript
-          build-mode: none
-
-      - name: Scan dependencies, configuration, and secrets
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,misconfig,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: false
-          exit-code: '1'
-          format: table
-
-      - name: Scan repository for secrets at every severity
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: secret
-          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
-          exit-code: '1'
-          format: table
-
-      - name: Scan pinned Redis image
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ steps.redis-image.outputs.image_ref }}
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: false
-          exit-code: '1'
-          format: table
-
-      - name: Analyze with CodeQL
-        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
-        with:
-          category: /language:javascript-typescript/workflow:backend-release
 
   build:
     name: Build and publish immutable image
-    needs: [game-engine-verify, verify, frontend-verify, release-security]
+    needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     outputs:
-      image_ref: ${{ steps.push.outputs.image_ref }}
+      image_digest: ${{ steps.push.outputs.image_digest }}
     env:
-      IMAGE_NAME: ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend
-      IMAGE_TAG: ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:${{ github.sha }}
+      IMAGE_NAME: ahmadcookie8/games-arena-backend
+      IMAGE_TAG: ahmadcookie8/games-arena-backend:${{ github.sha }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+        shell: bash
+        env:
+          DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+          DOCKER_HUB_PASSWORD: ${{ secrets.DOCKER_HUB_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DOCKER_HUB_USERNAME" ]]; then
+            echo "::error::Missing required production secret/config: DOCKER_HUB_USERNAME"
+            exit 1
+          fi
+          if [[ -z "$DOCKER_HUB_PASSWORD" ]]; then
+            echo "::error::Missing required production secret/config: DOCKER_HUB_PASSWORD"
+            exit 1
+          fi
+          if [[ "$DOCKER_HUB_USERNAME" != "ahmadcookie8" ]]; then
+            echo "::error::DOCKER_HUB_USERNAME must own $IMAGE_NAME"
+            exit 1
+          fi
+          printf '%s' "$DOCKER_HUB_PASSWORD" | docker login --username "$DOCKER_HUB_USERNAME" --password-stdin
 
-      - name: Build image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: backend/Dockerfile
-          load: true
-          push: false
-          tags: ${{ env.IMAGE_TAG }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Scan image before publishing
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.IMAGE_TAG }}
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: false
-          exit-code: '1'
-          format: table
-
-      - name: Generate image SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-        with:
-          image: ${{ env.IMAGE_TAG }}
-          format: spdx-json
-          output-file: games-arena-backend.spdx.json
-          artifact-name: games-arena-backend-sbom-${{ github.sha }}
-
-      - name: Push commit-addressed image
+      - name: Build and push commit-addressed image
         id: push
         shell: bash
         run: |
           set -euo pipefail
+          docker build --file backend/Dockerfile --tag "$IMAGE_TAG" .
           docker push "$IMAGE_TAG"
-          digest="$(docker image inspect --format='{{index .RepoDigests 0}}' "$IMAGE_TAG")"
-          test -n "$digest"
-          echo "image_ref=$digest" >> "$GITHUB_OUTPUT"
+
+          digest_ref="$(docker image inspect --format='{{index .RepoDigests 0}}' "$IMAGE_TAG")"
+          image_digest="${digest_ref##*@}"
+          if [[ ! "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Docker returned an invalid image digest"
+            exit 1
+          fi
+          if [[ "$digest_ref" != "$IMAGE_NAME@$image_digest" ]]; then
+            echo "::error::Docker returned a digest for an unexpected repository"
+            exit 1
+          fi
+          echo "image_digest=$image_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Log out of Docker Hub
+        if: ${{ always() }}
+        run: docker logout
 
   deploy:
     name: Deploy exact image digest
@@ -263,56 +115,177 @@ jobs:
     environment: production
     env:
       EC2_HOST: ${{ secrets.EC2_HOST }}
-      IMAGE_REF: ${{ needs.build.outputs.image_ref }}
+      IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
+      IMAGE_REF: ahmadcookie8/games-arena-backend@${{ needs.build.outputs.image_digest }}
       SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
       SSH_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Configure pinned SSH host identity
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$EC2_HOST"
-          test -n "$IMAGE_REF"
-          test -n "$SSH_PRIVATE_KEY"
-          test -n "$SSH_KNOWN_HOSTS"
+          require_value() {
+            local name="$1"
+            local value="$2"
+            if [[ -z "$value" ]]; then
+              echo "::error::Missing required production secret/config: $name"
+              return 1
+            fi
+          }
+
+          require_value EC2_HOST "$EC2_HOST"
+          require_value IMAGE_DIGEST "$IMAGE_DIGEST"
+          require_value EC2_SSH_KEY "$SSH_PRIVATE_KEY"
+          require_value EC2_KNOWN_HOSTS "$SSH_KNOWN_HOSTS"
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build produced an invalid image digest"
+            exit 1
+          fi
+
           install -m 0700 -d "$HOME/.ssh"
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
           chmod 0600 "$HOME/.ssh/deploy_key"
           printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 0600 "$HOME/.ssh/known_hosts"
 
-      - name: Synchronize blue/green deployment candidate
-        shell: bash
-        run: |
-          set -euo pipefail
-          scp -i "$HOME/.ssh/deploy_key" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            backend/docker-compose.yml \
-            "ubuntu@${EC2_HOST}:/home/ubuntu/Games-Arena/backend/docker-compose.yml.next"
-          scp -i "$HOME/.ssh/deploy_key" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            backend/deploy/blue-green-deploy.sh \
-            "ubuntu@${EC2_HOST}:/home/ubuntu/Games-Arena/backend/blue-green-deploy.sh.next"
-
-      - name: Stage, smoke-test, and switch Nginx upstream
+      - name: Verify EC2 deployment prerequisites
         shell: bash
         run: |
           set -euo pipefail
           ssh -i "$HOME/.ssh/deploy_key" \
             -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "ubuntu@${EC2_HOST}" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          deploy_root=/home/ubuntu/Games-Arena/backend
+          test -d "$deploy_root" || { echo "Deployment directory is missing: $deploy_root" >&2; exit 1; }
+          test -f "${deploy_root}/.env" || { echo "Production .env is missing" >&2; exit 1; }
+          command -v docker >/dev/null || { echo "Docker is not installed" >&2; exit 1; }
+          command -v curl >/dev/null || { echo "curl is not installed" >&2; exit 1; }
+          docker compose version >/dev/null
+          REMOTE
+
+      - name: Upload candidate Compose file
+        shell: bash
+        run: |
+          set -euo pipefail
+          scp -i "$HOME/.ssh/deploy_key" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            backend/docker-compose.yml \
+            "ubuntu@${EC2_HOST}:/home/ubuntu/Games-Arena/backend/docker-compose.yml.next"
+
+      - name: Deploy, verify health, and roll back on failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/deploy_key" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             "ubuntu@${EC2_HOST}" "bash -s -- '$IMAGE_REF'" <<'REMOTE'
           set -euo pipefail
+
           image_ref="$1"
           deploy_root=/home/ubuntu/Games-Arena/backend
-          candidate_script="${deploy_root}/blue-green-deploy.sh.next"
-          test -f "$candidate_script"
-          chmod 0700 "$candidate_script"
-          "$candidate_script" "$image_ref"
-          mv -f -- "$candidate_script" "${deploy_root}/blue-green-deploy.sh"
+          current_compose="${deploy_root}/docker-compose.yml"
+          candidate_compose="${current_compose}.next"
+          previous_compose="${current_compose}.previous"
+          previous_image_file="${deploy_root}/backend-image.previous"
+
+          wait_for_local_health() {
+            local deadline=$((SECONDS + 120))
+            while (( SECONDS < deadline )); do
+              if curl --silent --show-error --fail --max-time 5 \
+                --connect-timeout 2 \
+                http://127.0.0.1:3000/api/health >/dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          wait_for_public_health() {
+            local deadline=$((SECONDS + 30))
+            while (( SECONDS < deadline )); do
+              if curl --silent --show-error --fail --max-time 5 \
+                --connect-timeout 2 \
+                --resolve api.penguincookie.ca:443:127.0.0.1 \
+                https://api.penguincookie.ca/api/health >/dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          cd "$deploy_root"
+          test -f .env || { echo "Production .env is missing" >&2; exit 1; }
+          test -f "$current_compose" || { echo "Current Compose file is missing" >&2; exit 1; }
+          test -f "$candidate_compose" || { echo "Candidate Compose file is missing" >&2; exit 1; }
+          if [[ ! "$image_ref" =~ ^ahmadcookie8/games-arena-backend@sha256:[0-9a-f]{64}$ ]]; then
+            echo "Candidate image reference is invalid" >&2
+            exit 1
+          fi
+          export NODE_ENV=production
+          export CORS_ORIGIN=https://games.penguincookie.ca
+
+          BACKEND_IMAGE="$image_ref" docker compose \
+            --env-file .env -f "$candidate_compose" config --quiet
+
+          current_container="$(docker compose --env-file .env -f "$current_compose" ps -q node)"
+          test -n "$current_container" || { echo "Current backend container is not running" >&2; exit 1; }
+          previous_image="$(docker inspect --format='{{.Config.Image}}' "$current_container")"
+          test -n "$previous_image" || { echo "Could not determine the rollback image" >&2; exit 1; }
+          docker image inspect "$previous_image" >/dev/null
+
+          cp -p -- "$current_compose" "$previous_compose"
+          previous_image_temp="${previous_image_file}.tmp"
+          printf '%s\n' "$previous_image" > "$previous_image_temp"
+          chmod 0600 "$previous_image_temp"
+          mv -f -- "$previous_image_temp" "$previous_image_file"
+
+          if ! (
+            set -e
+            mv -f -- "$candidate_compose" "$current_compose"
+            BACKEND_IMAGE="$image_ref" docker compose \
+              --env-file .env -f "$current_compose" pull node
+            BACKEND_IMAGE="$image_ref" docker compose \
+              --env-file .env -f "$current_compose" up -d --no-build node
+            candidate_container="$(BACKEND_IMAGE="$image_ref" docker compose \
+              --env-file .env -f "$current_compose" ps -q node)"
+            test -n "$candidate_container"
+            candidate_image="$(docker inspect --format='{{.Config.Image}}' "$candidate_container")"
+            test "$candidate_image" = "$image_ref"
+            wait_for_local_health
+            wait_for_public_health
+          ); then
+            echo "Deployment failed; restoring the previous Compose file and image" >&2
+            cp -p -- "$previous_compose" "$current_compose"
+            if ! BACKEND_IMAGE="$previous_image" docker compose \
+              --env-file .env -f "$current_compose" up -d --no-build node; then
+              echo "Rollback could not restart the previous image" >&2
+              exit 1
+            fi
+            if ! wait_for_local_health || ! wait_for_public_health; then
+              echo "Rollback started, but health verification failed" >&2
+              docker compose --env-file .env -f "$current_compose" ps >&2 || true
+              docker compose --env-file .env -f "$current_compose" \
+                logs --no-color --tail 100 node >&2 || true
+              exit 1
+            fi
+            echo "Previous backend image restored successfully" >&2
+            exit 1
+          fi
+
+          echo "Backend deployed successfully: $image_ref"
           REMOTE

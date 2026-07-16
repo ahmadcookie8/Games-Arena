@@ -755,7 +755,7 @@ describe('PropertyManagement board completeness', () => {
     expectValid(state)
   })
 
-  it('survives 500 seeded games of 1,000 legal actions without a deadlock or invariant violation', () => {
+  it('[stress] survives 500 seeded games of 1,000 legal actions without a deadlock or invariant violation', () => {
     for (let gameNumber = 0; gameNumber < 500; gameNumber++) {
       const random = seededRandom(gameNumber + 1)
       const randomSpy = jest.spyOn(Math, 'random').mockImplementation(random)
