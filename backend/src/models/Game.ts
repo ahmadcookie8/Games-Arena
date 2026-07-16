@@ -35,6 +35,13 @@ export interface IGameDocument extends Document {
   startedAt?: Date
   lastMoveAt: Date
   completedAt?: Date
+  inviteExpiresAt?: Date
+  statsProcessedAt?: Date
+  replay?: {
+    version: 1
+    seed: string
+    startedAt?: Date
+  }
   result?: {
     winner?: mongoose.Types.ObjectId
     winnerName?: string
@@ -42,6 +49,7 @@ export interface IGameDocument extends Document {
     loserName?: string
     isDraw: boolean
     winType: string
+    verification: 'server' | 'replay' | 'unverified'
   }
   metadata: {
     ratedGame: boolean
@@ -53,6 +61,28 @@ export interface IGameDocument extends Document {
     tournament?: string
   }
 }
+
+const ReplaySchema = new Schema(
+  {
+    version: { type: Number, enum: [1], required: true },
+    seed: { type: String, match: /^[a-f0-9]{64}$/, required: true },
+    startedAt: Date,
+  },
+  { _id: false }
+)
+
+const ResultSchema = new Schema(
+  {
+    winner: { type: Schema.Types.ObjectId, ref: 'User' },
+    winnerName: String,
+    loser: { type: Schema.Types.ObjectId, ref: 'User' },
+    loserName: String,
+    isDraw: { type: Boolean, default: false },
+    winType: String,
+    verification: { type: String, enum: ['server', 'replay', 'unverified'], default: 'unverified' },
+  },
+  { _id: false }
+)
 
 const GameSchema = new Schema<IGameDocument>(
   {
@@ -95,14 +125,10 @@ const GameSchema = new Schema<IGameDocument>(
     startedAt: Date,
     lastMoveAt: { type: Date, default: Date.now },
     completedAt: Date,
-    result: {
-      winner: { type: Schema.Types.ObjectId, ref: 'User' },
-      winnerName: String,
-      loser: { type: Schema.Types.ObjectId, ref: 'User' },
-      loserName: String,
-      isDraw: { type: Boolean, default: false },
-      winType: String,
-    },
+    inviteExpiresAt: Date,
+    statsProcessedAt: Date,
+    replay: { type: ReplaySchema, default: undefined },
+    result: { type: ResultSchema, default: undefined },
     metadata: {
       ratedGame: { type: Boolean, default: false },
       mode: { type: String, enum: ['multiplayer', 'singlePlayer'], default: 'multiplayer' },
@@ -113,12 +139,13 @@ const GameSchema = new Schema<IGameDocument>(
       tournament: String,
     },
   },
-  { timestamps: true }
+  { timestamps: true, optimisticConcurrency: true }
 )
 
 GameSchema.index({ createdAt: -1 })
 GameSchema.index({ 'players.userId': 1 })
 GameSchema.index({ status: 1 })
 GameSchema.index({ gameCode: 1 }, { unique: true })
+GameSchema.index({ inviteExpiresAt: 1 })
 
 export const Game = mongoose.model<IGameDocument>('Game', GameSchema)

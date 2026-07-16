@@ -15,6 +15,7 @@ export interface IUserDocument extends Document {
   }
   lastSeenAt: Date
   isActive: boolean
+  authVersion: number
   preferences?: {
     theme: 'light' | 'dark'
     notifications: boolean
@@ -25,7 +26,7 @@ export interface IUserDocument extends Document {
 const UserSchema = new Schema<IUserDocument>(
   {
     username: { type: String, required: true, unique: true, lowercase: true, trim: true },
-    email: { type: String, lowercase: true, trim: true, sparse: true },
+    email: { type: String, unique: true, lowercase: true, trim: true, sparse: true },
     passwordHash: { type: String, required: true, select: false },
     stats: {
       gamesPlayed: { type: Number, default: 0 },
@@ -36,6 +37,7 @@ const UserSchema = new Schema<IUserDocument>(
     },
     lastSeenAt: { type: Date, default: Date.now },
     isActive: { type: Boolean, default: true },
+    authVersion: { type: Number, default: 0, min: 0 },
     preferences: {
       theme: { type: String, enum: ['light', 'dark'], default: 'dark' },
       notifications: { type: Boolean, default: true },

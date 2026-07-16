@@ -1,10 +1,17 @@
 import { User } from '../models/User'
 import { Game } from '../models/Game'
 import { redisDel, redisGet, redisSet } from '../utils/redis'
+import { isReplayLeaderboardEnabled, multiplayerModeFilter, replayVerifiedResultFilter, verifiedResultFilter } from '../utils/resultVerification'
+import { reconcileVerifiedStats, zeroStats } from '../utils/statsReconciliation'
+import { logSecurityEvent } from '../utils/securityLogger'
+import { acquireRedisConcurrencySlot, releaseRedisConcurrencySlot } from '../middleware/rateLimit'
+import { randomUUID } from 'crypto'
 
 const STATS_TTL = 30 * 60 // 30 minutes
 const LEADERBOARD_TTL = 60 * 60 // 1 hour
-const GLOBAL_LEADERBOARD_CACHE_KEY = 'leaderboard:global'
+// Version the keys so a security release can never serve leaderboard entries
+// cached before result verification and mode filters were introduced.
+const GLOBAL_LEADERBOARD_CACHE_KEY = 'leaderboard:v2:global'
 
 export interface LeaderboardEntry {
   rank: number
@@ -156,14 +163,17 @@ export function buildSinglePlayerScoreLeaderboard(gameType: 'snake' | 'mazeChase
 
 class UserService {
   async getUserProfile(userId: string) {
-    const user = await User.findById(userId).select('-passwordHash')
+    const user = await User.findById(userId)
+      .select('_id username stats createdAt')
+      .lean()
     if (!user) return null
 
-    const recentGames = await Game.find({ 'players.userId': userId, status: 'completed' })
-      .sort({ completedAt: -1 })
-      .limit(10)
-
-    return { user, stats: user.stats, recentGames }
+    return {
+      _id: user._id,
+      username: user.username,
+      stats: user.stats,
+      createdAt: user.createdAt,
+    }
   }
 
   async getUserStats(userId: string) {
@@ -192,7 +202,13 @@ class UserService {
       return cached.slice(start, start + limit)
     }
 
-    const games = await Game.find({ status: 'completed', 'result.isDraw': false, 'result.winner': { $exists: true } })
+    const games = await Game.find({
+      status: 'completed',
+      'result.isDraw': false,
+      'result.winner': { $exists: true },
+      ...verifiedResultFilter,
+      ...multiplayerModeFilter,
+    })
       .select('players result')
       .lean()
 
@@ -204,7 +220,7 @@ class UserService {
   }
 
   async getLeaderboardByGameType(gameType: string, limit: number, page: number) {
-    const cacheKey = `leaderboard:${gameType}`
+    const cacheKey = `leaderboard:v2:${gameType}`
     const cached = await redisGet<unknown[]>(cacheKey)
     if (cached) {
       const start = (page - 1) * limit
@@ -213,7 +229,15 @@ class UserService {
 
     // Build leaderboard from completed games for this type
     const results = await Game.aggregate([
-      { $match: { gameType, status: 'completed', 'result.isDraw': false } },
+      {
+        $match: {
+          gameType,
+          status: 'completed',
+          'result.isDraw': false,
+          ...verifiedResultFilter,
+          ...multiplayerModeFilter,
+        },
+      },
       { $group: { _id: '$result.winner', wins: { $sum: 1 }, winnerName: { $first: '$result.winnerName' } } },
       { $sort: { wins: -1 } },
       { $limit: 100 },
@@ -233,7 +257,10 @@ class UserService {
   }
 
   async getSinglePlayerLeaderboard(gameType: 'ticTacToe' | 'snake' | 'mazeChase', limit: number, page: number): Promise<SinglePlayerLeaderboardEntry[]> {
-    const cacheKey = `leaderboard:singlePlayer:${gameType}`
+    // Only game types with a trusted server/replay completion path are exposed.
+    if (!isReplayLeaderboardEnabled(gameType)) return []
+
+    const cacheKey = `leaderboard:v2:singlePlayer:${gameType}`
     const cached = await redisGet<SinglePlayerLeaderboardEntry[]>(cacheKey)
     if (cached) {
       const start = (page - 1) * limit
@@ -244,6 +271,9 @@ class UserService {
       gameType,
       status: 'completed',
       'metadata.mode': 'singlePlayer',
+      ...(gameType === 'snake' || gameType === 'mazeChase'
+        ? replayVerifiedResultFilter
+        : verifiedResultFilter),
     })
       .select('players metadata result')
       .lean<CompletedSinglePlayerGame[]>()
@@ -321,33 +351,79 @@ class UserService {
       for (const playerId of drawPlayerIds) {
         participantIds.add(playerId)
       }
-      await User.updateMany({ _id: { $in: drawPlayerIds } }, { $inc: { 'stats.gamesPlayed': 1, 'stats.gamesDraw': 1 } })
     } else if (winnerId) {
       participantIds.add(winnerId)
-      await User.findByIdAndUpdate(winnerId, { $inc: { 'stats.gamesPlayed': 1, 'stats.gamesWon': 1 } })
-
       const uniqueLoserIds = [...new Set(loserIds.filter((loserId) => loserId && loserId !== winnerId))]
-      if (uniqueLoserIds.length > 0) {
-        uniqueLoserIds.forEach((loserId) => participantIds.add(loserId))
-        await User.updateMany({ _id: { $in: uniqueLoserIds } }, { $inc: { 'stats.gamesPlayed': 1, 'stats.gamesLost': 1 } })
-      }
+      uniqueLoserIds.forEach((loserId) => participantIds.add(loserId))
     }
 
-    for (const id of participantIds) {
-      const user = await User.findById(id)
-      if (user && user.stats.gamesPlayed > 0) {
-        user.stats.winRate = user.stats.gamesWon / user.stats.gamesPlayed
-        await user.save()
+    const ids = [...participantIds]
+    if (ids.length === 0) return
+    const lockUserIds = [...ids].sort()
+
+    // A game involving user A may complete while a different game involving A
+    // is also being reconciled. Serialize on every affected user, in a stable
+    // order, so an older derived snapshot cannot overwrite a newer one.
+    const reconciliationId = randomUUID()
+    const lockedUserIds: string[] = []
+    try {
+      for (const id of lockUserIds) {
+        const slot = await acquireRedisConcurrencySlot('stats-reconciliation', id, reconciliationId, 1, 2 * 60)
+        if (!slot.allowed) throw new Error('Statistics reconciliation is already in progress')
+        lockedUserIds.push(id)
       }
 
-      await redisDel(`stats:${id}`)
-    }
+      // Derive rather than increment. This makes retries and reconciliation
+      // idempotent even if a process dies after Mongo commits the game result.
+      const verifiedGames = await Game.find({
+        status: 'completed',
+        'players.userId': { $in: ids },
+        ...verifiedResultFilter,
+        ...multiplayerModeFilter,
+      })
+        .select('players metadata result')
+        .lean()
+      const reconciled = reconcileVerifiedStats(verifiedGames)
 
-    await redisDel(GLOBAL_LEADERBOARD_CACHE_KEY)
+      await Promise.all(ids.map((id) => User.findByIdAndUpdate(id, {
+        $set: { stats: reconciled.get(id) || zeroStats() },
+      })))
+
+      try {
+        await Promise.all(ids.map((id) => redisDel(`stats:${id}`)))
+        await redisDel(GLOBAL_LEADERBOARD_CACHE_KEY)
+      } catch (error) {
+        // MongoDB is authoritative; a cache outage must not turn a committed,
+        // idempotent stats update into a retried result application.
+        logSecurityEvent('redis.stats_cache_invalidation_failed', {
+          participantCount: ids.length,
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+        }, 'error')
+      }
+    } finally {
+      for (const id of lockedUserIds.reverse()) {
+        try {
+          await releaseRedisConcurrencySlot('stats-reconciliation', id, reconciliationId)
+        } catch (error) {
+          logSecurityEvent('stats.reconciliation_lock_release_failed', {
+            userId: id,
+            errorName: error instanceof Error ? error.name : 'UnknownError',
+          }, 'error')
+        }
+      }
+    }
   }
 
   async invalidateLeaderboardCache(gameType: string): Promise<void> {
-    await Promise.all([redisDel(GLOBAL_LEADERBOARD_CACHE_KEY), redisDel(`leaderboard:${gameType}`), redisDel(`leaderboard:singlePlayer:${gameType}`)])
+    await Promise.all([
+      redisDel(GLOBAL_LEADERBOARD_CACHE_KEY),
+      redisDel(`leaderboard:v2:${gameType}`),
+      redisDel(`leaderboard:v2:singlePlayer:${gameType}`),
+      // Remove legacy keys as a defense in depth measure during rolling deploys.
+      redisDel('leaderboard:global'),
+      redisDel(`leaderboard:${gameType}`),
+      redisDel(`leaderboard:singlePlayer:${gameType}`),
+    ])
   }
 }
 

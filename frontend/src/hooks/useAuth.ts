@@ -32,7 +32,7 @@ export function useAuth() {
         setInitialized(true)
         setLoading(false)
       })
-  }, [])
+  }, [initialized, setInitialized, setUser])
 
   async function login(identifier: string, password: string) {
     setLoading(true)
@@ -60,12 +60,9 @@ export function useAuth() {
     setLoading(true)
     try {
       await api.post('/api/auth/logout')
-    } catch {
-      // Still clear the client session so Logout never traps the user on the dashboard.
-    } finally {
       setUser(null)
-      localStorage.removeItem('token')
       setInitialized(true)
+    } finally {
       setLoading(false)
     }
   }
@@ -74,7 +71,6 @@ export function useAuth() {
     setLoading(true)
     try {
       setUser(null)
-      localStorage.removeItem('token')
       setInitialized(true)
     } finally {
       setLoading(false)

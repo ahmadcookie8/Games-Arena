@@ -11,7 +11,7 @@ export class AppError extends Error {
 
 export class NotFoundError extends AppError {
   constructor(resource: string) {
-    super(`${resource} not found`, 404, 'NOT_FOUND')
+    super(`${resource} not found`, 404, resource === 'Game' ? 'GAME_NOT_FOUND' : 'NOT_FOUND')
   }
 }
 

@@ -1,5 +1,5 @@
 import { gameService } from './gameService'
-import { BadRequestError, ForbiddenError } from '../utils/errors'
+import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
 
 jest.mock('../models/Game', () => ({
   Game: {
@@ -38,6 +38,10 @@ jest.mock('./userService', () => ({
   },
 }))
 
+jest.mock('../utils/securityLogger', () => ({
+  logSecurityEvent: jest.fn(),
+}))
+
 const { Game } = jest.requireMock('../models/Game') as {
   Game: { create: jest.Mock; findById: jest.Mock }
 }
@@ -57,6 +61,9 @@ const { userService } = jest.requireMock('./userService') as {
     updateStatsAfterGame: jest.Mock
     invalidateLeaderboardCache: jest.Mock
   }
+}
+const { logSecurityEvent } = jest.requireMock('../utils/securityLogger') as {
+  logSecurityEvent: jest.Mock
 }
 
 function createGame(overrides: Partial<Record<string, unknown>> = {}) {
@@ -193,8 +200,8 @@ describe('gameService.closeGame', () => {
     jest.clearAllMocks()
   })
 
-  it('marks an active game as abandoned and emits refresh events', async () => {
-    const game = createGame()
+  it('marks an active waiting room as abandoned and emits refresh events', async () => {
+    const game = createGame({ players: [{ userId: { toString: () => 'user-1' }, username: 'alice', index: 0 }] })
     Game.findById.mockResolvedValue(game)
 
     const result = await gameService.closeGame('game-1', 'user-1')
@@ -228,15 +235,73 @@ describe('gameService.closeGame', () => {
   it('rejects non-participants', async () => {
     Game.findById.mockResolvedValue(createGame())
 
-    await expect(gameService.closeGame('game-1', 'user-3')).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(gameService.closeGame('game-1', 'user-3')).rejects.toBeInstanceOf(NotFoundError)
     expect(redisDel).not.toHaveBeenCalled()
   })
 
-  it('rejects non-active games', async () => {
-    Game.findById.mockResolvedValue(createGame({ status: 'completed' }))
+  it.each(['paused', 'completed', 'abandoned'])('rejects %s games without changing them', async (status) => {
+    const game = createGame({ status })
+    Game.findById.mockResolvedValue(game)
 
     await expect(gameService.closeGame('game-1', 'user-1')).rejects.toBeInstanceOf(BadRequestError)
+    expect(game.status).toBe(status)
+    expect(game.save).not.toHaveBeenCalled()
     expect(redisDel).not.toHaveBeenCalled()
+  })
+
+  it('allows the host to abandon a started multiplayer game without recording a result or statistics', async () => {
+    const game = createGame({ statsProcessedAt: new Date('2024-01-02T00:00:00.000Z') })
+    Game.findById.mockResolvedValue(game)
+
+    await expect(gameService.closeGame('game-1', 'user-1')).resolves.toBe(game)
+
+    expect(game.status).toBe('abandoned')
+    expect(game.result).toBeUndefined()
+    expect(game.statsProcessedAt).toBeUndefined()
+    expect(game.save).toHaveBeenCalled()
+    expect(redisDel).toHaveBeenCalledWith('game:ticTacToe:game-1')
+    expect(userService.updateStatsAfterGame).not.toHaveBeenCalled()
+    expect(userService.invalidateLeaderboardCache).not.toHaveBeenCalled()
+    expect(emitGameUpdated).toHaveBeenCalledWith(game)
+    expect(emitGamesChanged).toHaveBeenCalledWith(game)
+    expect(logSecurityEvent).toHaveBeenCalledWith('game.host_closed_in_progress', {
+      gameId: 'game-1',
+      gameType: 'ticTacToe',
+      hostUserId: 'user-1',
+      playerCount: 2,
+    })
+  })
+
+  it('allows the host to abandon an active game with more than two players', async () => {
+    const game = createGame({
+      gameType: 'wisecracker',
+      players: [
+        { userId: { toString: () => 'user-1' }, username: 'alice' },
+        { userId: { toString: () => 'user-2' }, username: 'bob' },
+        { userId: { toString: () => 'user-3' }, username: 'carol' },
+      ],
+    })
+    Game.findById.mockResolvedValue(game)
+
+    await expect(gameService.closeGame('game-1', 'user-1')).resolves.toBe(game)
+
+    expect(game.status).toBe('abandoned')
+    expect(logSecurityEvent).toHaveBeenCalledWith('game.host_closed_in_progress', expect.objectContaining({
+      gameType: 'wisecracker',
+      playerCount: 3,
+    }))
+  })
+
+  it('rejects an in-progress close from a non-host participant', async () => {
+    const game = createGame()
+    Game.findById.mockResolvedValue(game)
+
+    await expect(gameService.closeGame('game-1', 'user-2')).rejects.toBeInstanceOf(ForbiddenError)
+
+    expect(game.status).toBe('active')
+    expect(game.save).not.toHaveBeenCalled()
+    expect(redisDel).not.toHaveBeenCalled()
+    expect(logSecurityEvent).not.toHaveBeenCalled()
   })
 })
 
@@ -278,7 +343,7 @@ describe('gameService.sendChatMessage', () => {
       ],
     }))
 
-    await expect(gameService.sendChatMessage('game-1', 'user-3', 'mallory', 'hi')).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(gameService.sendChatMessage('game-1', 'user-3', 'mallory', 'hi')).rejects.toBeInstanceOf(NotFoundError)
     await expect(gameService.sendChatMessage('game-1', chatUserId, 'alice', '   ')).rejects.toBeInstanceOf(BadRequestError)
   })
 
@@ -312,7 +377,7 @@ describe('gameService.replayGame', () => {
     jest.clearAllMocks()
   })
 
-  it('creates a fresh multiplayer Tic Tac Toe room with copied players', async () => {
+  it('creates a fresh invite-only Tic Tac Toe room for the replay requester', async () => {
     const sourceGame = createGame({ status: 'completed', chatMessages: [{ messageId: 'old' }], moveHistory: [{ moveNumber: 1 }] })
     const replayGame = createGame({ _id: 'game-2', status: 'active', gameCode: 'REPLAY', moveHistory: [], chatMessages: [] })
     Game.findById.mockResolvedValue(sourceGame)
@@ -326,21 +391,20 @@ describe('gameService.replayGame', () => {
       moveHistory: [],
       chatMessages: [],
       currentTurnIndex: 0,
-      currentTurn: sourceGame.players[0].userId,
+      currentTurn: sourceGame.players[1].userId,
       gameState: { board: Array(9).fill(null), currentSymbol: 'X' },
       metadata: { ratedGame: false, mode: 'multiplayer', infiniteLetters: undefined },
     }))
     expect(Game.create.mock.calls[0][0].players).toEqual([
-      expect.objectContaining({ userId: sourceGame.players[0].userId, username: 'alice', index: 0, isConnected: false }),
-      expect.objectContaining({ userId: sourceGame.players[1].userId, username: 'bob', index: 1, isConnected: false }),
+      expect.objectContaining({ userId: sourceGame.players[1].userId, username: 'bob', index: 0, isConnected: false }),
     ])
-    expect(redisSet).toHaveBeenCalledWith('game:ticTacToe:game-2', expect.objectContaining({ status: 'active' }))
-    expect(emitGameReplayCreated).toHaveBeenCalledWith(sourceGame, replayGame)
-    expect(emitGamesChanged).toHaveBeenCalledWith(sourceGame)
+    expect(redisSet).toHaveBeenCalledWith('game:ticTacToe:game-2', expect.objectContaining({ status: 'active' }), 3600)
+    expect(emitGameReplayCreated).toHaveBeenCalledWith(sourceGame, replayGame, 'user-2')
+    expect(emitGamesChanged).not.toHaveBeenCalledWith(sourceGame)
     expect(emitGamesChanged).toHaveBeenCalledWith(replayGame)
   })
 
-  it('preserves Scrabble infinite letters and creates fresh racks for all players', async () => {
+  it('preserves Scrabble infinite letters and creates a fresh rack only for the requester', async () => {
     const sourceGame = createGame({
       gameType: 'scrabble',
       status: 'completed',
@@ -355,14 +419,14 @@ describe('gameService.replayGame', () => {
     const created = Game.create.mock.calls[0][0]
     expect(created.metadata).toEqual({ ratedGame: false, mode: 'multiplayer', infiniteLetters: true })
     expect(created.gameState.infiniteLetters).toBe(true)
-    expect(Object.keys(created.gameState.racks).sort()).toEqual(['user-1', 'user-2'])
-    expect(created.gameState.scores).toEqual({ 'user-1': 0, 'user-2': 0 })
+    expect(Object.keys(created.gameState.racks)).toEqual(['user-1'])
+    expect(created.gameState.scores).toEqual({ 'user-1': 0 })
     expect(created.gameState.board.flat().every((cell: unknown) => cell === null)).toBe(true)
   })
 
   it('rejects non-players, non-completed games, single-player games, and unsupported games', async () => {
     Game.findById.mockResolvedValue(createGame({ status: 'completed' }))
-    await expect(gameService.replayGame('game-1', 'user-3')).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(gameService.replayGame('game-1', 'user-3')).rejects.toBeInstanceOf(NotFoundError)
 
     Game.findById.mockResolvedValue(createGame({ status: 'active' }))
     await expect(gameService.replayGame('game-1', 'user-1')).rejects.toBeInstanceOf(BadRequestError)
@@ -395,7 +459,7 @@ describe('gameService single player Tic Tac Toe', () => {
     expect(redisSet).toHaveBeenCalledWith('game:ticTacToe:game-1', expect.objectContaining({
       status: 'active',
       metadata: game.metadata,
-    }))
+    }), 3600)
   })
 
   it('defaults Tic Tac Toe difficulty to easy when omitted', async () => {
@@ -419,7 +483,7 @@ describe('gameService single player Tic Tac Toe', () => {
     expect(game.save).toHaveBeenCalled()
     expect(redisSet).toHaveBeenCalledWith('game:ticTacToe:game-1', expect.objectContaining({
       metadata: game.metadata,
-    }))
+    }), 3600)
   })
 
   it('rejects Tic Tac Toe difficulty changes after the first move', async () => {
@@ -484,6 +548,25 @@ describe('gameService single player Tic Tac Toe', () => {
     expect(userService.updateStatsAfterGame).not.toHaveBeenCalled()
     expect(userService.invalidateLeaderboardCache).toHaveBeenCalledWith('ticTacToe')
   })
+
+  it('keeps a committed single-player completion successful when Redis invalidation fails', async () => {
+    const game = createSoloGame({
+      gameState: {
+        board: ['X', 'X', null, 'O', 'O', null, null, null, null],
+        currentSymbol: 'X',
+      },
+      metadata: { ratedGame: false, mode: 'singlePlayer', difficulty: 'easy' },
+    })
+    Game.findById.mockResolvedValue(game)
+    userService.invalidateLeaderboardCache.mockRejectedValueOnce(new Error('Redis unavailable'))
+
+    await expect(gameService.makeSinglePlayerTicTacToeMove('game-1', 'user-1', '2')).resolves.toBe(game)
+
+    expect(game.status).toBe('completed')
+    expect(game.save).toHaveBeenCalled()
+    expect(emitGameUpdated).toHaveBeenCalledWith(game)
+    expect(emitGamesChanged).toHaveBeenCalledWith(game)
+  })
 })
 
 describe('gameService single player Snake', () => {
@@ -506,7 +589,7 @@ describe('gameService single player Snake', () => {
     expect(redisSet).toHaveBeenCalledWith('game:snake:game-1', expect.objectContaining({
       status: 'active',
       metadata: game.metadata,
-    }))
+    }), 3600)
   })
 
   it('defaults Snake to a medium solid-walls board when settings are omitted', async () => {
@@ -651,7 +734,7 @@ describe('gameService single player Maze Chase', () => {
     expect(redisSet).toHaveBeenCalledWith('game:mazeChase:game-1', expect.objectContaining({
       status: 'active',
       metadata: game.metadata,
-    }))
+    }), 3600)
   })
 
   it('saves an active Maze Chase checkpoint without completing the game', async () => {
@@ -719,23 +802,5 @@ describe('gameService single player Maze Chase', () => {
       },
     }))).rejects.toBeInstanceOf(BadRequestError)
     await expect(gameService.saveSinglePlayerMazeChaseState('game-1', 'user-1', createMazeChaseState({ width: 20 }))).rejects.toBeInstanceOf(BadRequestError)
-  })
-})
-
-describe('gameService.resumeGame', () => {
-  beforeEach(() => {
-    jest.clearAllMocks()
-  })
-
-  it('does not reactivate abandoned games', async () => {
-    const game = createGame({ status: 'abandoned' })
-    Game.findById.mockResolvedValue(game)
-
-    const result = await gameService.resumeGame('game-1')
-
-    expect(result).toBe(game)
-    expect(redisGet).not.toHaveBeenCalled()
-    expect(redisSet).not.toHaveBeenCalled()
-    expect(game.save).not.toHaveBeenCalled()
   })
 })

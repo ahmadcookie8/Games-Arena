@@ -1,17 +1,5 @@
 import { useState } from 'react'
-
-interface UnoCard {
-  color: string
-  value: string
-  type: string
-}
-
-interface UnoState {
-  hands: UnoCard[][]
-  discardPile: UnoCard[]
-  currentTurnIndex: number
-  currentColor: string
-}
+import { UnoState } from '../types/game'
 
 const COLOR_CLASS: Record<string, string> = {
   red: 'bg-red-500',
@@ -32,7 +20,8 @@ export default function UnoTable({ gameState, isMyTurn, playerIndex, onMove }: P
   const state = gameState as unknown as UnoState
   const [showColorPicker, setShowColorPicker] = useState<number | null>(null)
 
-  const myHand = state.hands?.[playerIndex] ?? []
+  const myHand = state.hand ?? []
+  const otherHandCounts = (state.handCounts ?? []).filter((_count, index) => index !== playerIndex)
   const topCard = state.discardPile?.[state.discardPile.length - 1]
 
   function playCard(cardIndex: number, colorChoice?: string) {
@@ -58,6 +47,10 @@ export default function UnoTable({ gameState, isMyTurn, playerIndex, onMove }: P
           Draw
         </button>
       </div>
+      <p className="text-sm text-text-muted" aria-live="polite">
+        {state.deckCount ?? 0} cards in the draw pile
+        {otherHandCounts.length > 0 ? ` · Opponent hands: ${otherHandCounts.join(', ')}` : ''}
+      </p>
 
       <div className="flex w-full max-w-2xl flex-wrap justify-center gap-2 px-2">
         {myHand.map((card, i) => (

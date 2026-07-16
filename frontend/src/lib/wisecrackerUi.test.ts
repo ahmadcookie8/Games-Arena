@@ -19,11 +19,10 @@ function makeState(overrides: Partial<WisecrackerState> = {}): WisecrackerState 
     waitingPlayerIds: [],
     prompt: '',
     answerSlots: 0,
-    submittedAnswers: {},
-    answerOrder: [],
-    revealedCount: 0,
+    submissionStatus: {},
+    revealedResponses: [],
     scores: { host: 0, 'writer-1': 0, 'writer-2': 0 },
-    roundWinnerUserId: null,
+    roundWinnerResponseId: null,
     matchWinnerUserId: null,
     ...overrides,
   }
@@ -36,11 +35,11 @@ describe('resolveWisecrackerActionMode', () => {
     ['chooser prompt', makeState({ phase: 'prompt', chooserUserId: 'host' }), 'host', 'choosePrompt'],
     ['prompt spectator', makeState({ phase: 'prompt', chooserUserId: 'host' }), 'writer-1', 'waitForPrompt'],
     ['active writer', makeState({ phase: 'answering', chooserUserId: 'host' }), 'writer-1', 'submitAnswers'],
-    ['submitted writer', makeState({ phase: 'answering', chooserUserId: 'host', submittedAnswers: { 'writer-1': ['A'] } }), 'writer-1', 'answersLocked'],
+    ['submitted writer', makeState({ phase: 'answering', chooserUserId: 'host', submissionStatus: { 'writer-1': true } }), 'writer-1', 'answersLocked'],
     ['chooser waiting for answers', makeState({ phase: 'answering', chooserUserId: 'host' }), 'host', 'waitForAnswers'],
-    ['chooser revealing', makeState({ phase: 'revealing', chooserUserId: 'host', answerOrder: ['writer-1', 'writer-2'], revealedCount: 1 }), 'host', 'revealAnswer'],
-    ['chooser voting', makeState({ phase: 'revealing', chooserUserId: 'host', answerOrder: ['writer-1', 'writer-2'], revealedCount: 2 }), 'host', 'chooseWinner'],
-    ['writer watching reveal', makeState({ phase: 'revealing', chooserUserId: 'host', answerOrder: ['writer-1', 'writer-2'], revealedCount: 2 }), 'writer-1', 'waitForReveal'],
+    ['chooser revealing', makeState({ phase: 'revealing', chooserUserId: 'host', submissionStatus: { 'writer-1': true, 'writer-2': true }, revealedResponses: [{ responseId: 'response-1', answers: ['A'] }] }), 'host', 'revealAnswer'],
+    ['chooser voting', makeState({ phase: 'revealing', chooserUserId: 'host', submissionStatus: { 'writer-1': true, 'writer-2': true }, revealedResponses: [{ responseId: 'response-1', answers: ['A'] }, { responseId: 'response-2', answers: ['B'] }] }), 'host', 'chooseWinner'],
+    ['writer watching reveal', makeState({ phase: 'revealing', chooserUserId: 'host', submissionStatus: { 'writer-1': true, 'writer-2': true }, revealedResponses: [{ responseId: 'response-1', answers: ['A'] }, { responseId: 'response-2', answers: ['B'] }] }), 'writer-1', 'waitForReveal'],
     ['round result host', makeState({ phase: 'roundResult' }), 'host', 'roundResultHost'],
     ['round result guest', makeState({ phase: 'roundResult' }), 'writer-1', 'roundResultGuest'],
     ['completed host', makeState({ phase: 'completed' }), 'host', 'completedHost'],
@@ -55,8 +54,8 @@ describe('resolveWisecrackerActionMode', () => {
       chooserUserId: 'host',
       activePlayerIds: ['host', 'writer-1', 'writer-2'],
       waitingPlayerIds: ['late'],
-      answerOrder: ['writer-1', 'writer-2'],
-      revealedCount: 2,
+      submissionStatus: { 'writer-1': true, 'writer-2': true },
+      revealedResponses: [{ responseId: 'response-1', answers: ['A'] }, { responseId: 'response-2', answers: ['B'] }],
     })
 
     expect(resolveWisecrackerActionMode(state, 'late')).toBe('waitingPlayer')
@@ -70,11 +69,11 @@ describe('Wisecracker presentation helpers', () => {
       hostUserId: 'host',
       activePlayerIds: ['host'],
       waitingPlayerIds: [],
-      answerOrder: [],
       scores: { host: 0 },
     })
 
-    expect(state.submittedAnswers).toEqual({})
+    expect(state.submissionStatus).toEqual({})
+    expect(state.revealedResponses).toEqual([])
     expect(getWisecrackerRoundProgress(state)).toEqual({ submitted: 0, totalTypers: 1, revealed: 0, totalAnswers: 0 })
   })
 
@@ -110,14 +109,30 @@ describe('Wisecracker presentation helpers', () => {
     const state = makeState({
       phase: 'revealing',
       chooserUserId: 'host',
-      submittedAnswers: { 'writer-1': ['one'], 'writer-2': ['two'] },
-      answerOrder: ['writer-2', 'writer-1'],
-      revealedCount: 1,
+      submissionStatus: { 'writer-1': true, 'writer-2': true },
+      revealedResponses: [{ responseId: 'response-2', answers: ['two'] }],
     })
     const snapshot = JSON.stringify(state)
 
     expect(getWisecrackerRoundProgress(state)).toEqual({ submitted: 2, totalTypers: 2, revealed: 1, totalAnswers: 2 })
     expect(JSON.stringify(state)).toBe(snapshot)
+  })
+
+  it('normalizes only the privacy-safe response projection', () => {
+    const state = normalizeWisecrackerState({
+      phase: 'revealing',
+      activePlayerIds: ['host', 'writer-1'],
+      submittedAnswers: { 'writer-1': ['private legacy answer'] },
+      answerOrder: ['writer-1'],
+      roundWinnerUserId: 'writer-1',
+      submissionStatus: { 'writer-1': true },
+      revealedResponses: [{ responseId: 'opaque-1', answers: ['public answer'] }],
+    })
+
+    expect(state).not.toHaveProperty('submittedAnswers')
+    expect(state).not.toHaveProperty('answerOrder')
+    expect(state).not.toHaveProperty('roundWinnerUserId')
+    expect(state.revealedResponses).toEqual([{ responseId: 'opaque-1', answers: ['public answer'] }])
   })
 
   it('splits blank prompts while leaving plain prompts intact', () => {

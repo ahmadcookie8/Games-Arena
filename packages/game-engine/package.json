@@ -1,0 +1,27 @@
+{
+  "name": "@games-arena/game-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deterministic shared Snake and Maze Chase replay engine",
+  "main": "./index.cjs",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.cjs"
+    }
+  },
+  "files": [
+    "index.cjs",
+    "index.mjs",
+    "index.d.ts"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

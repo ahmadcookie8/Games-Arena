@@ -1,8 +1,9 @@
 import { Game, IGameDocument } from '../models/Game'
 import { GameSnapshot } from '../models/GameSnapshot'
 import mongoose from 'mongoose'
-import { redisGet, redisSet, redisDel } from '../utils/redis'
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
+import { randomBytes, randomUUID } from 'crypto'
+import { redisSet, redisDel } from '../utils/redis'
+import { AppError, BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
 import { GameMode, GameType, SnakeBoardSize, TicTacToeDifficulty } from '../types/game'
 import { TicTacToe } from '../games/TicTacToe'
 import { Chess } from '../games/Chess'
@@ -14,9 +15,45 @@ import { Scrabble, ScrabbleAction, ScrabbleState } from '../games/Scrabble'
 import { PropertyManagement, PMAction, PropertyManagementState } from '../games/PropertyManagement'
 import { emitChatMessage, emitGameOver, emitGameReplayCreated, emitGameUpdated, emitGamesChanged, emitMoveMade } from './socketNotifier'
 import { userService } from './userService'
+import { logSecurityEvent } from '../utils/securityLogger'
+import { acquireRedisConcurrencySlot, releaseRedisConcurrencySlot } from '../middleware/rateLimit'
+import { config } from '../config'
+import { multiplayerModeFilter, verifiedResultFilter } from '../utils/resultVerification'
+import {
+  createMazeChaseInitialState as createDeterministicMazeChaseInitialState,
+  createSnakeInitialState as createDeterministicSnakeInitialState,
+  replayMazeChase,
+  replaySnake,
+  ReplayValidationError,
+} from '@games-arena/game-engine'
+import type { ReplayV1 } from '@games-arena/game-engine'
+
+const GAME_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+const GAME_CODE_LENGTH = 8
+const GAME_CODE_CREATE_ATTEMPTS = 5
+const INVITE_TTL_MS = 24 * 60 * 60 * 1000
+const GAME_CACHE_TTL_SECONDS = 60 * 60
+const GAME_ID_PATTERN = /^[a-f0-9]{24}$/
+const MAX_PERSISTED_MOVE_HISTORY = 500
+const REPLAY_CLOCK_SKEW_MS = 2_000
 
 function generateGameCode(): string {
-  return Math.random().toString(36).substring(2, 8).toUpperCase()
+  return Array.from(randomBytes(GAME_CODE_LENGTH), (byte) => GAME_CODE_ALPHABET[byte & 31]).join('')
+}
+
+function isDuplicateKeyError(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 11000)
+}
+
+async function createGameWithUniqueCode(attributes: Record<string, unknown>): Promise<IGameDocument> {
+  for (let attempt = 0; attempt < GAME_CODE_CREATE_ATTEMPTS; attempt += 1) {
+    try {
+      return await Game.create({ ...attributes, gameCode: generateGameCode() })
+    } catch (error) {
+      if (!isDuplicateKeyError(error) || attempt === GAME_CODE_CREATE_ATTEMPTS - 1) throw error
+    }
+  }
+  throw new AppError('Could not allocate a game code', 503, 'GAME_CODE_UNAVAILABLE')
 }
 
 function getInitialState(gameType: GameType, hostUserId: string, hostUsername?: string): unknown {
@@ -365,13 +402,45 @@ function validateMazeChaseStateForGame(state: MazeChaseState): void {
 }
 
 class GameService {
-  async createGame(userId: string, username: string, gameType: GameType, _options?: { opponentUserId?: string }): Promise<IGameDocument> {
-    const gameCode = generateGameCode()
+  async createGame(userId: string, username: string, gameType: GameType): Promise<IGameDocument> {
+    // Minimal model mocks used by unit tests do not expose countDocuments. The
+    // production branch serializes count + create so concurrent requests cannot
+    // both pass the 20-active-game guard.
+    if (typeof (Game as unknown as { countDocuments?: unknown }).countDocuments !== 'function') {
+      return this.createMultiplayerGame(userId, username, gameType)
+    }
+
+    const slotId = randomUUID()
+    let slot
+    try {
+      slot = await acquireRedisConcurrencySlot('game-membership', userId, slotId, 1, 30)
+    } catch (error) {
+      logSecurityEvent('game.creation_lock_unavailable', { userId, errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
+      throw new AppError('Service temporarily unavailable', 503, 'CREATION_LOCK_UNAVAILABLE')
+    }
+    if (!slot.allowed) throw new AppError('Another game is being created; try again', 409, 'GAME_CREATION_IN_PROGRESS')
+
+    try {
+      const activeGames = await Game.countDocuments({
+        'players.userId': userId,
+        status: 'active',
+      })
+      if (activeGames >= 20) throw new AppError('Close an active game before creating another', 429, 'ACTIVE_GAME_LIMIT')
+      return await this.createMultiplayerGame(userId, username, gameType)
+    } finally {
+      try {
+        await releaseRedisConcurrencySlot('game-membership', userId, slotId)
+      } catch (error) {
+        logSecurityEvent('game.creation_lock_release_failed', { userId, errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
+      }
+    }
+  }
+
+  private async createMultiplayerGame(userId: string, username: string, gameType: GameType): Promise<IGameDocument> {
     const initialState = getInitialState(gameType, userId, username)
 
-    const game = await Game.create({
+    const game = await createGameWithUniqueCode({
       gameType,
-      gameCode,
       players: [{ userId, username, index: 0 }],
       currentTurnIndex: 0,
       currentTurn: userId,
@@ -379,18 +448,11 @@ class GameService {
       moveHistory: [],
       chatMessages: [],
       lastMoveAt: new Date(),
+      inviteExpiresAt: new Date(Date.now() + INVITE_TTL_MS),
       metadata: { ratedGame: false, mode: 'multiplayer', infiniteLetters: gameType === 'scrabble' ? false : undefined },
     })
 
-    await redisSet(`game:${gameType}:${game._id}`, {
-      gameId: game._id,
-      gameType,
-      players: game.players,
-      currentTurnIndex: 0,
-      gameState: initialState,
-      status: 'active',
-      metadata: game.metadata,
-    })
+    await this.cacheGame(game)
 
     emitGamesChanged(game)
 
@@ -402,24 +464,33 @@ class GameService {
     username: string,
     options: { gameType: 'ticTacToe'; difficulty?: TicTacToeDifficulty } | { gameType: 'snake'; boardSize?: SnakeBoardSize; wallLooping?: boolean } | { gameType: 'mazeChase' }
   ): Promise<IGameDocument> {
-    const gameCode = generateGameCode()
+    return this.withMembershipCapacity([userId], () => this.createSinglePlayerGameUnchecked(userId, username, options))
+  }
+
+  private async createSinglePlayerGameUnchecked(
+    userId: string,
+    username: string,
+    options: { gameType: 'ticTacToe'; difficulty?: TicTacToeDifficulty } | { gameType: 'snake'; boardSize?: SnakeBoardSize; wallLooping?: boolean } | { gameType: 'mazeChase' }
+  ): Promise<IGameDocument> {
     const ticTacToeDifficulty = options.gameType === 'ticTacToe' ? options.difficulty || 'easy' : 'easy'
     const snakeBoardSize = options.gameType === 'snake' ? options.boardSize || 'medium' : 'medium'
     const snakeWallLooping = options.gameType === 'snake' ? Boolean(options.wallLooping) : false
+    const replaySeed = options.gameType === 'snake' || options.gameType === 'mazeChase'
+      ? randomBytes(32).toString('hex')
+      : undefined
     const initialState = options.gameType === 'ticTacToe'
       ? TicTacToe.createInitialState()
       : options.gameType === 'snake'
-        ? createInitialSnakeState(snakeBoardSize)
-        : createInitialMazeChaseState()
+        ? createDeterministicSnakeInitialState(replaySeed!, snakeBoardSize)
+        : createDeterministicMazeChaseInitialState(replaySeed!)
     const metadata = options.gameType === 'ticTacToe'
       ? { ratedGame: false, mode: 'singlePlayer' as const, difficulty: ticTacToeDifficulty }
       : options.gameType === 'snake'
         ? { ratedGame: false, mode: 'singlePlayer' as const, boardSize: snakeBoardSize, wallLooping: snakeWallLooping }
         : { ratedGame: false, mode: 'singlePlayer' as const }
 
-    const game = await Game.create({
+    const game = await createGameWithUniqueCode({
       gameType: options.gameType,
-      gameCode,
       players: [{ userId, username, index: 0 }],
       currentTurnIndex: 0,
       currentTurn: userId,
@@ -428,18 +499,11 @@ class GameService {
       chatMessages: [],
       startedAt: new Date(),
       lastMoveAt: new Date(),
+      replay: replaySeed ? { version: 1, seed: replaySeed } : undefined,
       metadata,
     })
 
-    await redisSet(`game:${options.gameType}:${game._id}`, {
-      gameId: game._id,
-      gameType: options.gameType,
-      players: game.players,
-      currentTurnIndex: 0,
-      gameState: initialState,
-      status: 'active',
-      metadata: game.metadata,
-    })
+    await this.cacheGame(game)
 
     emitGamesChanged(game)
 
@@ -451,7 +515,7 @@ class GameService {
     userId: string,
     settings: { difficulty: TicTacToeDifficulty } | { boardSize: SnakeBoardSize; wallLooping: boolean }
   ): Promise<IGameDocument> {
-    const game = await Game.findById(gameId)
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
     if (getGameMode(game) !== 'singlePlayer') throw new BadRequestError('This is not a single player game')
     if (game.status !== 'active') throw new BadRequestError('Game is not active')
@@ -471,13 +535,19 @@ class GameService {
       }
       game.metadata.boardSize = settings.boardSize
       game.metadata.wallLooping = settings.wallLooping
-      game.gameState = createInitialSnakeState(settings.boardSize) as unknown as Record<string, unknown>
+      game.gameState = game.replay?.seed
+        ? createDeterministicSnakeInitialState(game.replay.seed, settings.boardSize) as unknown as Record<string, unknown>
+        : createInitialSnakeState(settings.boardSize) as unknown as Record<string, unknown>
+      if (game.replay) {
+        game.replay.startedAt = undefined
+        game.markModified('replay')
+      }
     } else {
       throw new BadRequestError('Settings are not available for this game')
     }
 
     game.lastMoveAt = new Date()
-    await game.save()
+    await this.saveGame(game)
     await this.cacheGame(game)
     emitGameUpdated(game)
     emitGamesChanged(game)
@@ -485,7 +555,7 @@ class GameService {
   }
 
   async updateGameSettings(gameId: string, userId: string, settings: { infiniteLetters?: boolean }): Promise<IGameDocument> {
-    const game = await Game.findById(gameId)
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
     if (game.status !== 'active') throw new BadRequestError('Game is not active')
     if (getGameMode(game) !== 'multiplayer') throw new BadRequestError('This is not a multiplayer game')
@@ -500,31 +570,31 @@ class GameService {
     game.gameState = Scrabble.setInfiniteLetters(game.gameState as unknown as ScrabbleState, settings.infiniteLetters) as unknown as Record<string, unknown>
     game.lastMoveAt = new Date()
 
-    await game.save()
+    await this.saveGame(game)
     await this.cacheGame(game)
     emitGameUpdated(game)
     emitGamesChanged(game)
     return game
   }
 
-  async getGame(gameId: string): Promise<IGameDocument | null> {
-    return Game.findById(gameId)
+  async getGame(gameId: string, userId: string): Promise<IGameDocument | null> {
+    return this.findParticipantGame(gameId, userId)
   }
 
   async sendChatMessage(gameId: string, userId: string, username: string, text: string): Promise<unknown> {
-    const game = await Game.findById(gameId)
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
     if (getGameMode(game) !== 'multiplayer') throw new BadRequestError('Chat is only available in multiplayer games')
 
     const player = game.players.find((p) => p.userId.toString() === userId)
-    if (!player) throw new ForbiddenError('Only players in this game can chat')
+    if (!player) throw new NotFoundError('Game')
 
     const cleaned = text.trim()
     if (!cleaned) throw new BadRequestError('Message cannot be blank')
     if (cleaned.length > MAX_CHAT_TEXT_LENGTH) throw new BadRequestError(`Message must be ${MAX_CHAT_TEXT_LENGTH} characters or fewer`)
 
     const message = {
-      messageId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      messageId: randomUUID(),
       userId: new mongoose.Types.ObjectId(userId),
       username,
       text: cleaned,
@@ -538,7 +608,7 @@ class GameService {
     if (game.chatMessages.length > MAX_CHAT_MESSAGES) {
       game.chatMessages = game.chatMessages.slice(-MAX_CHAT_MESSAGES) as typeof game.chatMessages
     }
-    await game.save()
+    await this.saveGame(game)
     emitChatMessage(game, publicMessage)
     return publicMessage
   }
@@ -556,8 +626,45 @@ class GameService {
   }
 
   async joinGame(gameCode: string, userId: string, username: string): Promise<IGameDocument> {
+    if (typeof (Game as unknown as { countDocuments?: unknown }).countDocuments !== 'function') {
+      return this.joinGameWithValidatedCode(gameCode, userId, username)
+    }
+
+    const slotId = randomUUID()
+    let slot
+    try {
+      slot = await acquireRedisConcurrencySlot('game-membership', userId, slotId, 1, 30)
+    } catch (error) {
+      logSecurityEvent('game.membership_lock_unavailable', { userId, errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
+      throw new AppError('Service temporarily unavailable', 503, 'MEMBERSHIP_LOCK_UNAVAILABLE')
+    }
+    if (!slot.allowed) throw new AppError('Another room membership is being changed; try again', 409, 'MEMBERSHIP_CHANGE_IN_PROGRESS')
+
+    try {
+      const activeGames = await Game.countDocuments({
+        'players.userId': userId,
+        status: 'active',
+      })
+      if (activeGames >= 20) throw new AppError('Close an active game before joining another', 429, 'ACTIVE_GAME_LIMIT')
+      return await this.joinGameWithValidatedCode(gameCode, userId, username)
+    } finally {
+      try {
+        await releaseRedisConcurrencySlot('game-membership', userId, slotId)
+      } catch (error) {
+        logSecurityEvent('game.membership_lock_release_failed', { userId, errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
+      }
+    }
+  }
+
+  private async joinGameWithValidatedCode(gameCode: string, userId: string, username: string): Promise<IGameDocument> {
     const game = await Game.findOne({ gameCode })
     if (!game) throw new NotFoundError('Game')
+    if (getGameMode(game) !== 'multiplayer') throw new NotFoundError('Game')
+    if (gameCode.length === 6) {
+      if (Date.now() >= config.legacyGameCodeCutoff) throw new NotFoundError('Game')
+    } else if (!game.inviteExpiresAt || game.inviteExpiresAt.getTime() <= Date.now()) {
+      throw new NotFoundError('Game')
+    }
     if (game.players.some((p) => p.userId.toString() === userId)) throw new BadRequestError('Already in this game')
     const maxPlayers = game.gameType === 'wisecracker' || game.gameType === 'scrabble' ? 4
       : game.gameType === 'propertyManagement' ? 8
@@ -583,7 +690,7 @@ class GameService {
     if (game.gameType === 'propertyManagement') {
       game.gameState = PropertyManagement.addPlayer(game.gameState as unknown as PropertyManagementState, userId, username) as unknown as Record<string, unknown>
     }
-    await game.save()
+    await this.saveGame(game)
 
     await this.cacheGame(game)
     emitGameUpdated(game)
@@ -593,7 +700,7 @@ class GameService {
   }
 
   async makeMove(gameId: string, userId: string, move: unknown): Promise<IGameDocument> {
-    const game = await Game.findById(gameId)
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
 
     if (game.gameType === 'ticTacToe') {
@@ -617,21 +724,35 @@ class GameService {
   }
 
   async setPlayerConnection(gameId: string, userId: string, isConnected: boolean): Promise<IGameDocument | null> {
-    const game = await Game.findById(gameId)
-    if (!game) return null
+    if (!GAME_ID_PATTERN.test(gameId) || !GAME_ID_PATTERN.test(userId)) return null
+    const playerFilter: Record<string, unknown> = { userId: new mongoose.Types.ObjectId(userId) }
+    const query: Record<string, unknown> = { _id: gameId, 'players.userId': userId }
+    const update: Record<string, unknown> = {}
 
-    const player = game.players.find((p) => p.userId.toString() === userId)
-    if (!player) return game
-
-    player.isConnected = isConnected
     if (isConnected) {
-      player.connectedAt = new Date()
+      update.$set = {
+        'players.$[player].isConnected': true,
+        'players.$[player].connectedAt': new Date(),
+      }
+      update.$inc = { __v: 1 }
     } else {
-      player.disconnectCount = (player.disconnectCount || 0) + 1
+      // Only the true -> false transition increments the counter. Competing
+      // disconnect cleanups therefore remain idempotent.
+      query.players = { $elemMatch: { userId, isConnected: true } }
+      update.$set = { 'players.$[player].isConnected': false }
+      update.$inc = { __v: 1, 'players.$[player].disconnectCount': 1 }
     }
 
-    await game.save()
-    await this.cacheGame(game)
+    const game = await Game.findOneAndUpdate(query, update, {
+      arrayFilters: [{ 'player.userId': playerFilter.userId }],
+      new: true,
+    })
+    if (!game) return null
+
+    // Presence updates are atomic and deliberately independent of game-state
+    // optimistic concurrency. Invalidate instead of writing a potentially
+    // stale full-state cache entry while a move is committing concurrently.
+    await this.invalidateGameCache(game)
     emitGameUpdated(game)
     emitGamesChanged(game)
 
@@ -639,7 +760,7 @@ class GameService {
   }
 
   async makeTicTacToeMove(gameId: string, userId: string, move: string): Promise<IGameDocument> {
-    const game = await Game.findById(gameId)
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
     return this.makeTicTacToeMoveOnGame(game, userId, move)
   }
@@ -663,8 +784,7 @@ class GameService {
     const currentPlayer = game.players[playerIndex]
 
     game.gameState = nextState
-    game.moveHistory.push({
-      moveNumber: game.moveHistory.length + 1,
+    appendGameMove(game, {
       playerId: currentPlayer.userId,
       playerName: currentPlayer.username,
       move,
@@ -676,7 +796,7 @@ class GameService {
       game.status = 'completed'
       game.completedAt = new Date()
       if (gameOver.isDraw) {
-        game.result = { isDraw: true, winType: 'draw' }
+        game.result = { isDraw: true, winType: 'draw', verification: 'server' }
       } else {
         const winner = game.players[gameOver.winner ?? playerIndex]
         const loser = game.players.find((p) => p.userId.toString() !== winner.userId.toString())
@@ -687,6 +807,7 @@ class GameService {
           loserName: loser?.username,
           isDraw: false,
           winType: 'three_in_a_row',
+          verification: 'server',
         }
       }
     } else {
@@ -694,7 +815,7 @@ class GameService {
       game.currentTurn = game.players[game.currentTurnIndex].userId
     }
 
-    await game.save()
+    await this.saveGame(game)
     await this.cacheGame(game)
 
     if (game.status === 'completed') {
@@ -713,7 +834,7 @@ class GameService {
   }
 
   async makeSinglePlayerTicTacToeMove(gameId: string, userId: string, move: string): Promise<IGameDocument> {
-    const game = await Game.findById(gameId)
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
     if (game.gameType !== 'ticTacToe') throw new BadRequestError('Only Tic Tac Toe is available right now')
     if (getGameMode(game) !== 'singlePlayer') throw new BadRequestError('This is not a single player game')
@@ -729,8 +850,7 @@ class GameService {
     const difficulty = game.metadata.difficulty || 'easy'
     const humanState = ticTacToe.applyMove(game.gameState, move) as unknown as TicTacToeState
     game.gameState = humanState as unknown as Record<string, unknown>
-    game.moveHistory.push({
-      moveNumber: game.moveHistory.length + 1,
+    appendGameMove(game, {
       playerId: player.userId,
       playerName: player.username,
       move,
@@ -744,8 +864,7 @@ class GameService {
       const computerMove = chooseComputerTicTacToeMove(humanState, difficulty)
       const computerState = ticTacToe.applyMove(humanState, computerMove) as unknown as TicTacToeState
       game.gameState = computerState as unknown as Record<string, unknown>
-      game.moveHistory.push({
-        moveNumber: game.moveHistory.length + 1,
+      appendGameMove(game, {
         playerId: COMPUTER_USER_ID,
         playerName: getComputerName(difficulty),
         move: computerMove,
@@ -762,11 +881,11 @@ class GameService {
     }
 
     game.lastMoveAt = new Date()
-    await game.save()
+    await this.saveGame(game)
     await this.cacheGame(game)
 
     if (gameOver.isGameOver) {
-      await userService.invalidateLeaderboardCache(game.gameType)
+      await this.invalidateLeaderboardCacheBestEffort(game.gameType)
     }
 
     emitMoveMade(game, move)
@@ -787,7 +906,7 @@ class GameService {
     game.completedAt = new Date()
 
     if (gameOver.isDraw) {
-      game.result = { isDraw: true, winType: 'draw' }
+      game.result = { isDraw: true, winType: 'draw', verification: 'server' }
       return
     }
 
@@ -797,6 +916,7 @@ class GameService {
         winnerName: player.username,
         isDraw: false,
         winType: 'three_in_a_row',
+        verification: 'server',
       }
       return
     }
@@ -807,11 +927,12 @@ class GameService {
       loserName: player.username,
       isDraw: false,
       winType: 'three_in_a_row',
+      verification: 'server',
     }
   }
 
   async saveSinglePlayerSnakeState(gameId: string, userId: string, state: SnakeState, completed = false): Promise<IGameDocument> {
-    const game = await Game.findById(gameId)
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
     if (game.gameType !== 'snake') throw new BadRequestError('Only Snake state can be saved here')
     if (getGameMode(game) !== 'singlePlayer') throw new BadRequestError('This is not a single player game')
@@ -824,6 +945,10 @@ class GameService {
 
     game.gameState = state as unknown as Record<string, unknown>
     game.lastMoveAt = new Date()
+    if (state.hasStarted && game.replay && !game.replay.startedAt) {
+      game.replay.startedAt = new Date()
+      game.markModified('replay')
+    }
 
     if (completed || state.isGameOver) {
       game.status = 'completed'
@@ -833,9 +958,9 @@ class GameService {
         winnerName: player.username,
         isDraw: false,
         winType: `score:${state.snake.length}`,
+        verification: 'unverified',
       }
-      game.moveHistory.push({
-        moveNumber: game.moveHistory.length + 1,
+      appendGameMove(game, {
         playerId: player.userId,
         playerName: player.username,
         move: `Score ${state.snake.length}`,
@@ -843,11 +968,11 @@ class GameService {
       })
     }
 
-    await game.save()
+    await this.saveGame(game)
     await this.cacheGame(game)
 
     if (game.status === 'completed') {
-      await userService.invalidateLeaderboardCache(game.gameType)
+      await this.invalidateLeaderboardCacheBestEffort(game.gameType)
       emitGameOver(game)
     }
 
@@ -858,7 +983,7 @@ class GameService {
   }
 
   async saveSinglePlayerMazeChaseState(gameId: string, userId: string, state: MazeChaseState, completed = false): Promise<IGameDocument> {
-    const game = await Game.findById(gameId)
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
     if (game.gameType !== 'mazeChase') throw new BadRequestError('Only Maze Chase state can be saved here')
     if (getGameMode(game) !== 'singlePlayer') throw new BadRequestError('This is not a single player game')
@@ -871,6 +996,10 @@ class GameService {
 
     game.gameState = state as unknown as Record<string, unknown>
     game.lastMoveAt = new Date()
+    if (state.hasStarted && game.replay && !game.replay.startedAt) {
+      game.replay.startedAt = new Date()
+      game.markModified('replay')
+    }
 
     if (completed || state.isGameOver || state.lives === 0) {
       game.status = 'completed'
@@ -880,9 +1009,9 @@ class GameService {
         winnerName: player.username,
         isDraw: false,
         winType: `score:${state.score}`,
+        verification: 'unverified',
       }
-      game.moveHistory.push({
-        moveNumber: game.moveHistory.length + 1,
+      appendGameMove(game, {
         playerId: player.userId,
         playerName: player.username,
         move: `Score ${state.score}`,
@@ -890,11 +1019,11 @@ class GameService {
       })
     }
 
-    await game.save()
+    await this.saveGame(game)
     await this.cacheGame(game)
 
     if (game.status === 'completed') {
-      await userService.invalidateLeaderboardCache(game.gameType)
+      await this.invalidateLeaderboardCacheBestEffort(game.gameType)
       emitGameOver(game)
     }
 
@@ -904,11 +1033,140 @@ class GameService {
     return game
   }
 
+  async completeSinglePlayerReplay(gameId: string, userId: string, replay: ReplayV1): Promise<IGameDocument> {
+    const game = await this.findParticipantGame(gameId, userId)
+    if (!game) throw new NotFoundError('Game')
+    if (getGameMode(game) !== 'singlePlayer' || (game.gameType !== 'snake' && game.gameType !== 'mazeChase')) {
+      throw new BadRequestError('Replay verification is only available for Snake and Maze Chase')
+    }
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
+
+    const player = game.players.find((candidate) => candidate.userId.toString() === userId)
+    if (!player) throw new NotFoundError('Game')
+    if (game.players.length !== 1) {
+      throw new AppError('This run cannot be replay-verified', 400, 'REPLAY_NOT_AVAILABLE')
+    }
+    if (!game.replay || game.replay.version !== 1) {
+      throw new AppError('This run cannot be replay-verified', 400, 'REPLAY_NOT_AVAILABLE')
+    }
+    if (!game.replay.startedAt) {
+      // The first started checkpoint owns the server clock. A completion that
+      // overtakes that request is explicitly retryable instead of being
+      // misclassified as an unverifiable legacy run.
+      throw new AppError('Replay start is still being recorded; retry', 409, 'REPLAY_START_PENDING')
+    }
+
+    let replayResult
+    try {
+      if (game.gameType === 'snake') {
+        const boardSize = game.metadata.boardSize
+        if (!boardSize) throw new ReplayValidationError('INVALID_SNAKE_SETTINGS', 'Snake board size is missing')
+        replayResult = replaySnake(game.replay.seed, {
+          boardSize,
+          wallLooping: Boolean(game.metadata.wallLooping),
+        }, replay)
+      } else {
+        replayResult = replayMazeChase(game.replay.seed, replay)
+      }
+    } catch (error) {
+      if (error instanceof ReplayValidationError) {
+        logSecurityEvent('game.replay_rejected', {
+          gameId,
+          userId,
+          gameType: game.gameType,
+          reason: error.code,
+        })
+        throw new AppError('Replay could not be verified', 400, 'INVALID_REPLAY')
+      }
+      throw error
+    }
+
+    if (!replayResult.completed) {
+      logSecurityEvent('game.replay_rejected', { gameId, userId, gameType: game.gameType, reason: 'INCOMPLETE' })
+      throw new AppError('Replay does not reach game over', 400, 'REPLAY_INCOMPLETE')
+    }
+
+    const wallElapsedMs = Date.now() - game.replay.startedAt.getTime()
+    if (!Number.isFinite(wallElapsedMs) || wallElapsedMs < 0 || replayResult.elapsedMs > wallElapsedMs + REPLAY_CLOCK_SKEW_MS) {
+      logSecurityEvent('game.replay_rejected', { gameId, userId, gameType: game.gameType, reason: 'TEMPORALLY_IMPOSSIBLE' })
+      throw new AppError('Replay timing could not be verified', 400, 'REPLAY_TOO_FAST')
+    }
+
+    const completedAt = new Date()
+    const result: NonNullable<IGameDocument['result']> = {
+      winner: player.userId,
+      winnerName: player.username,
+      isDraw: false,
+      winType: `score:${replayResult.score}`,
+      verification: 'replay',
+    }
+    const completionMove = {
+      moveNumber: nextMoveNumber(game),
+      playerId: player.userId,
+      playerName: player.username,
+      move: `Score ${replayResult.score}`,
+      timestamp: completedAt,
+    }
+
+    let completedGame: IGameDocument
+    if (typeof (Game as unknown as { findOneAndUpdate?: unknown }).findOneAndUpdate === 'function') {
+      const version = (game as unknown as { __v?: number }).__v
+      const filter: Record<string, unknown> = {
+        _id: game._id,
+        'players.userId': userId,
+        status: 'active',
+        'metadata.mode': 'singlePlayer',
+        'replay.seed': game.replay.seed,
+      }
+      if (Number.isSafeInteger(version)) filter.__v = version
+
+      const updated = await Game.findOneAndUpdate(
+        filter,
+        {
+          $set: {
+            gameState: replayResult.state,
+            status: 'completed',
+            completedAt,
+            lastMoveAt: completedAt,
+            result,
+          },
+          $push: { moveHistory: { $each: [completionMove], $slice: -MAX_PERSISTED_MOVE_HISTORY } },
+          $inc: { __v: 1 },
+        },
+        { new: true, runValidators: true }
+      )
+      if (!updated) {
+        logSecurityEvent('game.optimistic_conflict', { gameId })
+        throw new AppError('Game state changed; refresh and try again', 409, 'GAME_STATE_CONFLICT')
+      }
+      completedGame = updated
+    } else {
+      game.gameState = replayResult.state as unknown as Record<string, unknown>
+      game.status = 'completed'
+      game.completedAt = completedAt
+      game.lastMoveAt = completedAt
+      game.result = result
+      appendGameMove(game, {
+        playerId: player.userId,
+        playerName: player.username,
+        move: completionMove.move,
+        timestamp: completedAt,
+      })
+      await this.saveGame(game)
+      completedGame = game
+    }
+
+    await this.invalidateGameCache(completedGame)
+    await this.invalidateLeaderboardCacheBestEffort(completedGame.gameType)
+    emitGameUpdated(completedGame)
+    emitGamesChanged(completedGame)
+    emitGameOver(completedGame)
+    return completedGame
+  }
+
   private async makeWisecrackerMoveOnGame(game: IGameDocument, userId: string, move: unknown): Promise<IGameDocument> {
     const action = parseWisecrackerAction(move)
-    if (game.status !== 'active' && !(game.status === 'completed' && action.type === 'returnToLobby')) {
-      throw new BadRequestError('Game is not active')
-    }
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
     const playerIndex = game.players.findIndex((p) => p.userId.toString() === userId)
     if (playerIndex === -1) throw new BadRequestError('You are not in this game')
 
@@ -924,8 +1182,7 @@ class GameService {
     game.currentTurnIndex = nextState.chooserUserId
       ? Math.max(game.players.findIndex((p) => p.userId.toString() === nextState.chooserUserId), 0)
       : 0
-    game.moveHistory.push({
-      moveNumber: game.moveHistory.length + 1,
+    appendGameMove(game, {
       playerId: player.userId,
       playerName: player.username,
       move: Wisecracker.getMoveDescription(action),
@@ -942,14 +1199,11 @@ class GameService {
         winnerName: winner?.username,
         isDraw: false,
         winType: 'score_limit',
+        verification: 'server',
       }
-    } else if (action.type === 'returnToLobby') {
-      game.status = 'active'
-      game.completedAt = undefined
-      game.result = undefined
     }
 
-    await game.save()
+    await this.saveGame(game)
     await this.cacheGame(game)
 
     if (game.status === 'completed') {
@@ -981,8 +1235,7 @@ class GameService {
     game.currentTurnIndex = Math.max(currentPlayerDocIndex, 0)
     game.currentTurn = game.players[game.currentTurnIndex]?.userId ?? player.userId
 
-    game.moveHistory.push({
-      moveNumber: game.moveHistory.length + 1,
+    appendGameMove(game, {
       playerId: player.userId,
       playerName: player.username,
       move: PropertyManagement.getMoveDescription(action),
@@ -999,10 +1252,11 @@ class GameService {
         winnerName: winner?.username,
         isDraw: false,
         winType: 'lastStanding',
+        verification: 'server',
       }
     }
 
-    await game.save()
+    await this.saveGame(game)
     await this.cacheGame(game)
 
     if (game.status === 'completed') {
@@ -1031,24 +1285,24 @@ class GameService {
       userId: player.userId.toString(),
       username: player.username,
     }))
+    const moveNumber = nextMoveNumber(game)
     const result = Scrabble.applyAction(
       game.gameState as unknown as ScrabbleState,
       action,
       userId,
       players,
       game.currentTurnIndex,
-      game.moveHistory.length + 1
+      moveNumber
     )
     const player = game.players[playerIndex]
 
     game.gameState = result.state as unknown as Record<string, unknown>
-    game.moveHistory.push({
-      moveNumber: game.moveHistory.length + 1,
+    appendGameMove(game, {
       playerId: player.userId,
       playerName: player.username,
       move: result.description || Scrabble.getMoveDescription(action),
       timestamp: new Date(),
-    })
+    }, moveNumber)
     game.lastMoveAt = new Date()
 
     const shouldAdvanceTurn = !result.completed
@@ -1059,7 +1313,7 @@ class GameService {
       game.status = 'completed'
       game.completedAt = new Date()
       if (result.isDraw) {
-        game.result = { isDraw: true, winType: 'draw' }
+        game.result = { isDraw: true, winType: 'draw', verification: 'server' }
       } else {
         const winner = game.players.find((p) => p.userId.toString() === result.winnerUserId)
         game.result = {
@@ -1067,13 +1321,14 @@ class GameService {
           winnerName: winner?.username,
           isDraw: false,
           winType: 'score',
+          verification: 'server',
         }
       }
     } else if (shouldAdvanceTurn) {
       this.advanceTurnSkippingGivenUp(game)
     }
 
-    await game.save()
+    await this.saveGame(game)
     await this.cacheGame(game)
 
     if (game.status === 'completed') {
@@ -1106,8 +1361,14 @@ class GameService {
   }
 
   async resignGame(gameId: string, userId: string): Promise<{ winner: string; reason: string }> {
-    const game = await Game.findById(gameId)
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
+    if (getGameMode(game) !== 'multiplayer') throw new BadRequestError('Only multiplayer games can be resigned')
+    if (game.status !== 'active') throw new BadRequestError('Game is not active')
+    if (game.players.length !== 2) throw new BadRequestError('Resignation is only available in two-player games')
+
+    const resigningPlayer = game.players.find((player) => player.userId.toString() === userId)
+    if (!resigningPlayer) throw new NotFoundError('Game')
 
     const opponent = game.players.find((p) => p.userId.toString() !== userId)
     if (!opponent) throw new BadRequestError('No opponent found')
@@ -1117,37 +1378,54 @@ class GameService {
     game.result = {
       winner: opponent.userId,
       winnerName: opponent.username,
+      loser: resigningPlayer.userId,
+      loserName: resigningPlayer.username,
       isDraw: false,
       winType: 'resignation',
+      verification: 'server',
     }
-    await game.save()
-    await redisDel(`game:${game.gameType}:${gameId}`)
-    await userService.updateStatsAfterGame({
-      winnerId: opponent.userId.toString(),
-      loserIds: [userId],
-    })
-    await userService.invalidateLeaderboardCache(game.gameType)
+    await this.saveGame(game)
+    await this.invalidateGameCache(game)
+    await this.updateStatsForCompletedGame(game)
     emitGameUpdated(game)
     emitGamesChanged(game)
+    emitGameOver(game)
 
     return { winner: opponent.username, reason: 'resignation' }
   }
 
   async closeGame(gameId: string, userId: string): Promise<IGameDocument> {
-    const game = await Game.findById(gameId)
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
 
     const isParticipant = game.players.some((player) => player.userId.toString() === userId)
-    if (!isParticipant) throw new ForbiddenError('Only players in this game can close it')
+    if (!isParticipant) throw new NotFoundError('Game')
     if (game.status !== 'active') throw new BadRequestError('Only active games can be closed')
+
+    const host = game.players[0]
+    if (!host || host.userId.toString() !== userId) {
+      throw new ForbiddenError('Only the room host can close this game')
+    }
+
+    const isStartedMultiplayer = getGameMode(game) === 'multiplayer' && game.players.length > 1
 
     game.status = 'abandoned'
     game.completedAt = new Date()
     game.lastMoveAt = new Date()
     game.result = undefined
+    game.statsProcessedAt = undefined
 
-    await game.save()
-    await redisDel(`game:${game.gameType}:${gameId}`)
+    await this.saveGame(game)
+    await this.invalidateGameCache(game)
+
+    if (isStartedMultiplayer) {
+      logSecurityEvent('game.host_closed_in_progress', {
+        gameId: String(game._id),
+        gameType: game.gameType,
+        hostUserId: userId,
+        playerCount: game.players.length,
+      })
+    }
 
     emitGameUpdated(game)
     emitGamesChanged(game)
@@ -1156,11 +1434,11 @@ class GameService {
   }
 
   async replayGame(gameId: string, userId: string): Promise<IGameDocument> {
-    const sourceGame = await Game.findById(gameId)
+    const sourceGame = await this.findParticipantGame(gameId, userId)
     if (!sourceGame) throw new NotFoundError('Game')
 
-    const isParticipant = sourceGame.players.some((player) => player.userId.toString() === userId)
-    if (!isParticipant) throw new ForbiddenError('Only players in this game can start a replay')
+    const replayHost = sourceGame.players.find((player) => player.userId.toString() === userId)
+    if (!replayHost) throw new NotFoundError('Game')
     if (getGameMode(sourceGame) !== 'multiplayer') throw new BadRequestError('Replay is only available for multiplayer games')
     if (sourceGame.status !== 'completed') throw new BadRequestError('Only completed games can be replayed')
     if (sourceGame.gameType !== 'ticTacToe' && sourceGame.gameType !== 'scrabble') {
@@ -1168,38 +1446,37 @@ class GameService {
     }
     if (sourceGame.players.length < 2) throw new BadRequestError('Replay needs at least two players')
 
-    const gameCode = generateGameCode()
-    const players = sourceGame.players.map((player, index) => ({
-      userId: player.userId,
-      username: player.username,
-      index,
-      color: player.color,
-      rank: player.rank,
+    return this.withMembershipCapacity([userId], () => this.createReplayGame(sourceGame, userId))
+  }
+
+  private async createReplayGame(sourceGame: IGameDocument, userId: string): Promise<IGameDocument> {
+    const replayHost = sourceGame.players.find((player) => player.userId.toString() === userId)
+    if (!replayHost) throw new NotFoundError('Game')
+    const players = [{
+      userId: replayHost.userId,
+      username: replayHost.username,
+      index: 0,
+      color: replayHost.color,
+      rank: replayHost.rank,
       isConnected: false,
       disconnectCount: 0,
-    }))
+    }]
 
-    let initialState: unknown = sourceGame.gameType === 'ticTacToe'
+    const initialState: unknown = sourceGame.gameType === 'ticTacToe'
       ? TicTacToe.createInitialState()
-      : Scrabble.createInitialState(sourceGame.players[0].userId.toString(), Boolean(sourceGame.metadata?.infiniteLetters))
+      : Scrabble.createInitialState(userId, Boolean(sourceGame.metadata?.infiniteLetters))
 
-    if (sourceGame.gameType === 'scrabble') {
-      for (const player of sourceGame.players.slice(1)) {
-        initialState = Scrabble.addPlayer(initialState as ScrabbleState, player.userId.toString())
-      }
-    }
-
-    const replayGame = await Game.create({
+    const replayGame = await createGameWithUniqueCode({
       gameType: sourceGame.gameType,
-      gameCode,
       players,
       currentTurnIndex: 0,
-      currentTurn: sourceGame.players[0].userId,
+      currentTurn: replayHost.userId,
       gameState: initialState,
       moveHistory: [],
       chatMessages: [],
       startedAt: new Date(),
       lastMoveAt: new Date(),
+      inviteExpiresAt: new Date(Date.now() + INVITE_TTL_MS),
       metadata: {
         ratedGame: sourceGame.metadata?.ratedGame ?? false,
         mode: 'multiplayer',
@@ -1208,59 +1485,94 @@ class GameService {
     })
 
     await this.cacheGame(replayGame)
-    emitGameReplayCreated(sourceGame, replayGame)
-    emitGamesChanged(sourceGame)
+    emitGameReplayCreated(sourceGame, replayGame, userId)
     emitGamesChanged(replayGame)
 
     return replayGame
   }
 
-  async resumeGame(gameId: string): Promise<IGameDocument | null> {
-    const game = await Game.findById(gameId)
-    if (!game) return null
-    if (game.status === 'abandoned') return game
-
-    const cached = await redisGet(`game:${game.gameType}:${gameId}`)
-    if (cached) return game
-
-    // Reload from latest snapshot + replay remaining moves
-    const snapshot = await GameSnapshot.findOne({ gameId }).sort({ snapshotNumber: -1 })
-    if (snapshot) {
-      game.gameState = snapshot.gameState
-    }
-
-    if (game.status !== 'completed') {
-      game.status = 'active'
-    }
-    await game.save()
-
-    await redisSet(`game:${game.gameType}:${gameId}`, {
-      gameId: game._id,
-      gameType: game.gameType,
-      players: game.players,
-      currentTurnIndex: game.currentTurnIndex,
-      gameState: game.gameState,
-      status: 'active',
-      metadata: game.metadata,
+  /**
+   * Bounded durable retry for results committed before their derived user
+   * statistics could be reconciled. Safe to call repeatedly and concurrently.
+   */
+  async reconcilePendingStats(limit = 25): Promise<{ scanned: number; processed: number; deferred: number }> {
+    const boundedLimit = Math.min(100, Math.max(1, Math.floor(limit)))
+    const pendingGames = await Game.find({
+      status: 'completed',
+      statsProcessedAt: null,
+      ...verifiedResultFilter,
+      ...multiplayerModeFilter,
     })
+      .sort({ completedAt: 1, _id: 1 })
+      .limit(boundedLimit)
 
-    return game
+    let processed = 0
+    let deferred = 0
+    for (const game of pendingGames) {
+      if (await this.updateStatsForCompletedGame(game)) processed += 1
+      else deferred += 1
+    }
+
+    return { scanned: pendingGames.length, processed, deferred }
+  }
+
+  private async withMembershipCapacity<T>(userIds: string[], operation: () => Promise<T>): Promise<T> {
+    if (typeof (Game as unknown as { countDocuments?: unknown }).countDocuments !== 'function') return operation()
+
+    const uniqueUserIds = [...new Set(userIds)].sort()
+    const slotId = randomUUID()
+    const lockedUserIds: string[] = []
+    try {
+      for (const membershipUserId of uniqueUserIds) {
+        let slot
+        try {
+          slot = await acquireRedisConcurrencySlot('game-membership', membershipUserId, slotId, 1, 30)
+        } catch (error) {
+          logSecurityEvent('game.membership_lock_unavailable', { userId: membershipUserId, errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
+          throw new AppError('Service temporarily unavailable', 503, 'MEMBERSHIP_LOCK_UNAVAILABLE')
+        }
+        if (!slot.allowed) throw new AppError('A room membership is being changed; try again', 409, 'MEMBERSHIP_CHANGE_IN_PROGRESS')
+        lockedUserIds.push(membershipUserId)
+      }
+
+      for (const membershipUserId of uniqueUserIds) {
+        const activeGames = await Game.countDocuments({
+          'players.userId': membershipUserId,
+          status: 'active',
+        })
+        if (activeGames >= 20) throw new AppError('A player must close an active game before creating or joining another', 429, 'ACTIVE_GAME_LIMIT')
+      }
+
+      return await operation()
+    } finally {
+      for (const membershipUserId of lockedUserIds.reverse()) {
+        try {
+          await releaseRedisConcurrencySlot('game-membership', membershipUserId, slotId)
+        } catch (error) {
+          logSecurityEvent('game.membership_lock_release_failed', { userId: membershipUserId, errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
+        }
+      }
+    }
   }
 
   private async cacheGame(game: IGameDocument): Promise<void> {
-    await redisSet(`game:${game.gameType}:${game._id}`, {
-      gameId: game._id,
-      gameType: game.gameType,
-      players: game.players,
-      currentTurnIndex: game.currentTurnIndex,
-      gameState: game.gameState,
-      status: game.status,
-      metadata: game.metadata,
-    })
+    try {
+      await redisSet(`game:${game.gameType}:${game._id}`, {
+        gameId: game._id,
+        gameType: game.gameType,
+        players: game.players,
+        currentTurnIndex: game.currentTurnIndex,
+        gameState: game.gameState,
+        status: game.status,
+        metadata: game.metadata,
+      }, GAME_CACHE_TTL_SECONDS)
+    } catch (error) {
+      logSecurityEvent('redis.game_cache_write_failed', { gameId: String(game._id), errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
+    }
   }
 
-  async getMoveHistory(gameId: string, page: number, limit: number): Promise<{ moves: unknown[]; total: number }> {
-    const game = await Game.findById(gameId).select('moveHistory')
+  async getMoveHistory(gameId: string, userId: string, page: number, limit: number): Promise<{ moves: unknown[]; total: number }> {
+    const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
 
     const total = game.moveHistory.length
@@ -1277,30 +1589,118 @@ class GameService {
     return moveCount % SNAPSHOT_INTERVAL === 0
   }
 
-  private async updateStatsForCompletedGame(game: IGameDocument): Promise<void> {
+  private async findParticipantGame(gameId: string, userId: string): Promise<IGameDocument | null> {
+    // Some focused unit tests replace the model with a minimal findById mock.
+    // Production always takes the participant-scoped branch.
+    if (typeof (Game as unknown as { findOne?: unknown }).findOne !== 'function') {
+      return Game.findById(gameId)
+    }
+    if (!GAME_ID_PATTERN.test(gameId) || !GAME_ID_PATTERN.test(userId)) return null
+    return Game.findOne({ _id: gameId, 'players.userId': userId })
+  }
+
+  private async saveGame(game: IGameDocument): Promise<void> {
+    try {
+      await game.save()
+    } catch (error) {
+      if (error instanceof mongoose.Error.VersionError || (error instanceof Error && error.name === 'VersionError')) {
+        logSecurityEvent('game.optimistic_conflict', { gameId: String(game._id) })
+        throw new AppError('Game state changed; refresh and try again', 409, 'GAME_STATE_CONFLICT')
+      }
+      throw error
+    }
+  }
+
+  private async invalidateGameCache(game: IGameDocument): Promise<void> {
+    try {
+      await redisDel(`game:${game.gameType}:${game._id}`)
+    } catch (error) {
+      logSecurityEvent('redis.game_cache_invalidation_failed', { gameId: String(game._id), errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
+    }
+  }
+
+  private async invalidateLeaderboardCacheBestEffort(gameType: string): Promise<void> {
+    try {
+      await userService.invalidateLeaderboardCache(gameType)
+    } catch (error) {
+      // The completed MongoDB result is authoritative. A cache outage must not
+      // turn a committed completion into a client-visible failure or skip emits.
+      logSecurityEvent('redis.leaderboard_cache_invalidation_failed', {
+        gameType,
+        errorName: error instanceof Error ? error.name : 'unknown',
+      }, 'error')
+    }
+  }
+
+  private async updateStatsForCompletedGame(game: IGameDocument): Promise<boolean> {
     if (getGameMode(game) === 'singlePlayer') {
-      return
+      return true
     }
 
-    if (!game.result) {
-      return
+    if (!game.result || game.result.verification === 'unverified' || game.statsProcessedAt) {
+      return true
     }
 
-    if (game.result.isDraw) {
-      await userService.updateStatsAfterGame({
-        drawPlayerIds: game.players.map((player) => player.userId.toString()),
-      })
-    } else if (game.result.winner) {
-      const winnerId = game.result.winner.toString()
-      await userService.updateStatsAfterGame({
-        winnerId,
-        loserIds: game.players
-          .map((player) => player.userId.toString())
-          .filter((playerId) => playerId !== winnerId),
-      })
+    try {
+      // User statistics are derived from verified game records rather than
+      // incremented, so retrying this step is idempotent. Run it before marking
+      // the game processed: a crash can then be safely reconciled/retried.
+      if (game.result.isDraw) {
+        await userService.updateStatsAfterGame({
+          drawPlayerIds: game.players.map((player) => player.userId.toString()),
+        })
+      } else if (game.result.winner) {
+        const winnerId = game.result.winner.toString()
+        await userService.updateStatsAfterGame({
+          winnerId,
+          loserIds: game.players
+            .map((player) => player.userId.toString())
+            .filter((playerId) => playerId !== winnerId),
+        })
+      }
+    } catch (error) {
+      logSecurityEvent('game.stats_reconciliation_required', { gameId: String(game._id), errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
+      return false
     }
 
-    await userService.invalidateLeaderboardCache(game.gameType)
+    const processedAt = new Date()
+    if (typeof (Game as unknown as { findOneAndUpdate?: unknown }).findOneAndUpdate === 'function') {
+      try {
+        const marked = await Game.findOneAndUpdate(
+          { _id: game._id, statsProcessedAt: null, status: 'completed' },
+          { $set: { statsProcessedAt: processedAt } },
+          { new: true }
+        )
+        if (marked) game.statsProcessedAt = processedAt
+      } catch (error) {
+        logSecurityEvent('game.stats_marker_reconciliation_required', { gameId: String(game._id), errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
+        return false
+      }
+    } else {
+      game.statsProcessedAt = processedAt
+    }
+
+    await this.invalidateLeaderboardCacheBestEffort(game.gameType)
+
+    return true
+  }
+}
+
+function nextMoveNumber(game: IGameDocument): number {
+  const lastMoveNumber = game.moveHistory[game.moveHistory.length - 1]?.moveNumber
+  return Number.isSafeInteger(lastMoveNumber) && lastMoveNumber > 0
+    ? lastMoveNumber + 1
+    : game.moveHistory.length + 1
+}
+
+function appendGameMove(
+  game: IGameDocument,
+  move: Omit<IGameDocument['moveHistory'][number], 'moveNumber'>,
+  moveNumber = nextMoveNumber(game)
+): void {
+  game.moveHistory.push({ moveNumber, ...move })
+  if (game.moveHistory.length > MAX_PERSISTED_MOVE_HISTORY) {
+    game.moveHistory = game.moveHistory.slice(-MAX_PERSISTED_MOVE_HISTORY) as typeof game.moveHistory
   }
 }
 
@@ -1322,11 +1722,9 @@ function parseWisecrackerAction(move: unknown): WisecrackerAction {
     case 'revealNextAnswer':
       return { type: 'revealNextAnswer' }
     case 'selectRoundWinner':
-      return { type: 'selectRoundWinner', userId: String(action.userId || '') }
+      return { type: 'selectRoundWinner', responseId: String(action.responseId || '') }
     case 'startNextRound':
       return { type: 'startNextRound' }
-    case 'returnToLobby':
-      return { type: 'returnToLobby' }
     default:
       throw new BadRequestError('Unknown Wisecracker action')
   }

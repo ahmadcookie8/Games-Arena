@@ -1,4 +1,5 @@
 import { BadRequestError } from '../utils/errors'
+import { randomBytes } from 'crypto'
 
 export type WisecrackerPhase = 'lobby' | 'prompt' | 'answering' | 'revealing' | 'roundResult' | 'completed'
 
@@ -8,9 +9,8 @@ export type WisecrackerAction =
   | { type: 'setPrompt'; prompt: string }
   | { type: 'submitAnswers'; answers: string[] }
   | { type: 'revealNextAnswer' }
-  | { type: 'selectRoundWinner'; userId: string }
+  | { type: 'selectRoundWinner'; responseId: string }
   | { type: 'startNextRound' }
-  | { type: 'returnToLobby' }
 
 export interface WisecrackerPlayerView {
   userId: string
@@ -28,6 +28,7 @@ export interface WisecrackerState {
   prompt: string
   answerSlots: number
   submittedAnswers: Record<string, string[]>
+  responseIds: Record<string, string>
   answerOrder: string[]
   revealedCount: number
   scores: Record<string, number>
@@ -37,6 +38,7 @@ export interface WisecrackerState {
 
 const DEFAULT_MAX_SCORE = 3
 const MIN_PLAYERS = 3
+const MAX_ANSWER_SLOTS = 10
 
 export const WISECRACKER_PROMPTS = [
   'TSA guidelines now prohibit ________ on airplanes.',
@@ -129,6 +131,7 @@ export class Wisecracker {
       prompt: '',
       answerSlots: 0,
       submittedAnswers: {},
+      responseIds: {},
       answerOrder: [],
       revealedCount: 0,
       scores: { [hostUserId]: 0 },
@@ -182,7 +185,11 @@ export class Wisecracker {
         next.prompt = cleanPrompt(action.prompt)
         if (!next.prompt) throw new BadRequestError('Prompt cannot be blank')
         next.answerSlots = countAnswerSlots(next.prompt)
+        if (next.answerSlots > MAX_ANSWER_SLOTS) {
+          throw new BadRequestError(`Prompts cannot contain more than ${MAX_ANSWER_SLOTS} answer slots`)
+        }
         next.submittedAnswers = {}
+        next.responseIds = {}
         next.answerOrder = []
         next.revealedCount = 0
         next.roundWinnerUserId = null
@@ -197,6 +204,8 @@ export class Wisecracker {
         if (!Array.isArray(action.answers) || action.answers.length !== next.answerSlots) throw new BadRequestError(`Submit ${next.answerSlots} answer${next.answerSlots === 1 ? '' : 's'}`)
         next.submittedAnswers[userId] = action.answers.map((answer) => answer.trim())
         if (next.submittedAnswers[userId].some((answer) => !answer)) throw new BadRequestError('Answers cannot be blank')
+        if (next.submittedAnswers[userId].some((answer) => answer.length > 160)) throw new BadRequestError('Answers must be 160 characters or fewer')
+        next.responseIds[userId] = createResponseId()
         if (getTypers(next).every((id) => next.submittedAnswers[id])) {
           next.answerOrder = shuffle(getTypers(next))
           next.revealedCount = 0
@@ -210,20 +219,22 @@ export class Wisecracker {
         if (next.revealedCount < next.answerOrder.length) next.revealedCount += 1
         return next
 
-      case 'selectRoundWinner':
+      case 'selectRoundWinner': {
         ensureChooser(next, userId)
         if (next.phase !== 'revealing') throw new BadRequestError('It is not time to choose a winner')
         if (next.revealedCount < next.answerOrder.length) throw new BadRequestError('Reveal all answers before choosing a winner')
-        if (!next.answerOrder.includes(action.userId)) throw new BadRequestError('Winner must be one of this round\'s typers')
-        next.roundWinnerUserId = action.userId
-        next.scores[action.userId] = (next.scores[action.userId] ?? 0) + 1
-        if (next.scores[action.userId] >= next.maxScore) {
-          next.matchWinnerUserId = action.userId
+        const winningUserId = Object.entries(next.responseIds).find(([, responseId]) => responseId === action.responseId)?.[0]
+        if (!winningUserId || !next.answerOrder.includes(winningUserId)) throw new BadRequestError('Winner must be one of this round\'s responses')
+        next.roundWinnerUserId = winningUserId
+        next.scores[winningUserId] = (next.scores[winningUserId] ?? 0) + 1
+        if (next.scores[winningUserId] >= next.maxScore) {
+          next.matchWinnerUserId = winningUserId
           next.phase = 'completed'
         } else {
           next.phase = 'roundResult'
         }
         return next
+      }
 
       case 'startNextRound':
         ensureHost(next, userId)
@@ -234,22 +245,6 @@ export class Wisecracker {
         startPromptPhase(next)
         return next
 
-      case 'returnToLobby':
-        ensureHost(next, userId)
-        if (next.phase !== 'completed') throw new BadRequestError('Only completed matches can return to lobby')
-        next.phase = 'lobby'
-        next.activePlayerIds = [...next.activePlayerIds, ...next.waitingPlayerIds]
-        next.waitingPlayerIds = []
-        next.prompt = ''
-        next.answerSlots = 0
-        next.submittedAnswers = {}
-        next.answerOrder = []
-        next.revealedCount = 0
-        next.roundWinnerUserId = null
-        next.matchWinnerUserId = null
-        next.chooserUserId = null
-        normalize(next, players)
-        return next
     }
   }
 
@@ -262,7 +257,6 @@ export class Wisecracker {
       case 'revealNextAnswer': return 'revealed an answer'
       case 'selectRoundWinner': return 'selected the round winner'
       case 'startNextRound': return 'started the next round'
-      case 'returnToLobby': return 'returned the match to lobby'
     }
   }
 }
@@ -272,7 +266,13 @@ function clone(state: WisecrackerState): WisecrackerState {
 }
 
 function cleanPrompt(prompt: string): string {
-  return prompt.trim().replace(/_{2,}/g, '_')
+  const cleaned = prompt.trim().replace(/_{2,}/g, '_')
+  if (cleaned.length > 240) throw new BadRequestError('Prompt must be 240 characters or fewer')
+  return cleaned
+}
+
+function createResponseId(): string {
+  return randomBytes(16).toString('hex')
 }
 
 function countAnswerSlots(prompt: string): number {
@@ -302,6 +302,10 @@ function normalizeCollections(state: WisecrackerState): void {
   if (!Array.isArray(state.waitingPlayerIds)) state.waitingPlayerIds = []
   if (!Array.isArray(state.answerOrder)) state.answerOrder = []
   if (!state.submittedAnswers || typeof state.submittedAnswers !== 'object' || Array.isArray(state.submittedAnswers)) state.submittedAnswers = {}
+  if (!state.responseIds || typeof state.responseIds !== 'object' || Array.isArray(state.responseIds)) state.responseIds = {}
+  for (const userId of Object.keys(state.submittedAnswers)) {
+    if (!/^[a-f0-9]{32}$/.test(state.responseIds[userId] || '')) state.responseIds[userId] = createResponseId()
+  }
   if (!state.scores || typeof state.scores !== 'object' || Array.isArray(state.scores)) state.scores = {}
   if (!Number.isFinite(state.revealedCount)) state.revealedCount = 0
   if (!Number.isFinite(state.answerSlots)) state.answerSlots = 0
@@ -324,6 +328,7 @@ function startPromptPhase(state: WisecrackerState): void {
   state.prompt = Wisecracker.getRandomPrompt()
   state.answerSlots = 0
   state.submittedAnswers = {}
+  state.responseIds = {}
   state.answerOrder = []
   state.revealedCount = 0
   state.roundWinnerUserId = null

@@ -1,24 +1,39 @@
 import { Request, Response, NextFunction } from 'express'
-import { AuthPayload } from '../types/api'
+import { authenticateSessionPayload } from '../services/sessionAuthService'
 import { UnauthorizedError } from '../utils/errors'
-import { getTokenFromHeaders, verifyAuthToken } from '../utils/authToken'
+import { clearAuthCookie, getAuthTokenFromCookie, VerifiedAuthPayload, verifyAuthToken } from '../utils/authToken'
 
 export interface AuthRequest extends Request {
-  user?: AuthPayload
+  user?: VerifiedAuthPayload
 }
 
-export function authMiddleware(req: AuthRequest, res: Response, next: NextFunction): void {
-  const token = getTokenFromHeaders(req.headers.authorization, req.headers.cookie)
+export async function authMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  const token = getAuthTokenFromCookie(req.headers.cookie)
   if (!token) {
-    next(new UnauthorizedError('No token provided'))
+    next(new UnauthorizedError('Authentication required'))
+    return
+  }
+
+  let payload: VerifiedAuthPayload
+  try {
+    payload = verifyAuthToken(token)
+  } catch {
+    clearAuthCookie(res)
+    next(new UnauthorizedError('Invalid session'))
     return
   }
 
   try {
-    const payload = verifyAuthToken(token)
-    req.user = payload
+    const activeSession = await authenticateSessionPayload(payload)
+    if (!activeSession) {
+      clearAuthCookie(res)
+      next(new UnauthorizedError('Invalid session'))
+      return
+    }
+
+    req.user = activeSession
     next()
-  } catch {
-    next(new UnauthorizedError('Invalid token'))
+  } catch (err) {
+    next(err)
   }
 }

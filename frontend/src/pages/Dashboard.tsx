@@ -11,6 +11,7 @@ import Modal, { ModalVariant } from '../components/Modal'
 import PageBackdrop from '../components/PageBackdrop'
 import { useSocket } from '../hooks/useSocket'
 import { useReveal } from '../hooks/useReveal'
+import { canHostCloseGame, getCloseGamePrompt } from '../lib/gameClose'
 import { getGameLabel } from '../lib/gameRules'
 import ticTacToeThumb from '../assets/game-tic-tac-toe.png'
 import wisecrackerThumb from '../assets/game-wisecracker.png'
@@ -50,12 +51,9 @@ interface ModalState {
 }
 
 function getCloseGameModal(game: Game, onConfirm: () => void, onCancel: () => void): ModalState {
-  const isSinglePlayer = game.metadata?.mode === 'singlePlayer'
+  const prompt = getCloseGamePrompt(game)
   return {
-    title: isSinglePlayer ? 'Close this solo game?' : 'Close this game?',
-    message: isSinglePlayer
-      ? 'This will close the active solo match and remove it from your Single Player active games list.'
-      : `This will close the ${getGameLabel(game.gameType)} room and remove it from your active games list. Other players will no longer be able to join or continue it.`,
+    ...prompt,
     variant: 'warning',
     primaryAction: {
       label: 'Close game',
@@ -188,6 +186,7 @@ export default function Dashboard() {
   }
 
   function promptCloseGame(game: Game) {
+    if (!canHostCloseGame(game, user?._id)) return
     setModal(getCloseGameModal(game, () => {
       void confirmCloseGame(game)
     }, closeModal))
@@ -322,13 +321,15 @@ export default function Dashboard() {
                   </button>
                   <div className="flex items-center gap-2">
                     <span className="rounded-full bg-accent-subtle px-2.5 py-0.5 font-mono text-xs font-medium text-accent">{game.gameCode}</span>
-                    <button
-                      type="button"
-                      onClick={() => promptCloseGame(game)}
-                      className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-1.5 text-xs font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
-                    >
-                      Close
-                    </button>
+                    {canHostCloseGame(game, user?._id) && (
+                      <button
+                        type="button"
+                        onClick={() => promptCloseGame(game)}
+                        className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-1.5 text-xs font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
+                      >
+                        Close
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -437,13 +438,15 @@ export default function Dashboard() {
                     >
                       Resume
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => promptCloseGame(game)}
-                      className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-1.5 text-xs font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
-                    >
-                      Close
-                    </button>
+                    {canHostCloseGame(game, user?._id) && (
+                      <button
+                        type="button"
+                        onClick={() => promptCloseGame(game)}
+                        className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-1.5 text-xs font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
+                      >
+                        Close
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}

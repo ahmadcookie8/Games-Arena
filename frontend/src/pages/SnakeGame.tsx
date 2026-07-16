@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import axios from 'axios'
+import {
+  REPLAY_SEED_PATTERN,
+  stepSnakeState,
+  type Direction,
+  type SnakeBoardSize,
+  type SnakeState,
+} from '@games-arena/game-engine'
 import Header from '../components/Header'
 import Modal, { ModalVariant } from '../components/Modal'
 import MoveHistory from '../components/MoveHistory'
@@ -8,27 +15,19 @@ import PageBackdrop from '../components/PageBackdrop'
 import PlayerCard from '../components/PlayerCard'
 import { useGameState } from '../hooks/useGameState'
 import api from '../lib/api'
-import { SnakeBoardSize } from '../types/game'
-
-type Direction = 'up' | 'down' | 'left' | 'right'
-
-interface SnakeCell {
-  x: number
-  y: number
-}
-
-interface SnakeState {
-  width: number
-  height: number
-  snake: SnakeCell[]
-  direction: Direction
-  pendingDirection: Direction
-  food: SnakeCell
-  score: number
-  isGameOver: boolean
-  hasStarted?: boolean
-  tickMs: number
-}
+import {
+  buildReplayPayload,
+  createReplayRecorder,
+  getCompletedReplayStatus,
+  getInitialReplayEligibility,
+  getReplayRunPresentation,
+  invalidateReplayRecorder,
+  isExplicitReplayRejection,
+  recordReplayTick,
+  type ReplayRunStatus,
+  type ReplayUnrankedReason,
+} from '../lib/singlePlayerReplay'
+import type { Game } from '../types/game'
 
 interface ModalState {
   title: string
@@ -44,11 +43,10 @@ interface ModalState {
   }
 }
 
-const DIRECTION_DELTA: Record<Direction, SnakeCell> = {
-  up: { x: 0, y: -1 },
-  down: { x: 0, y: 1 },
-  left: { x: -1, y: 0 },
-  right: { x: 1, y: 0 },
+interface ReplayCompletionResponse {
+  game: Game
+  gameState: SnakeState
+  moveHistory: Game['moveHistory']
 }
 
 const OPPOSITE_DIRECTION: Record<Direction, Direction> = {
@@ -59,6 +57,7 @@ const OPPOSITE_DIRECTION: Record<Direction, Direction> = {
 }
 
 const SNAKE_BOARD_SIZES: SnakeBoardSize[] = ['small', 'medium', 'large']
+const LEGACY_FALLBACK_SEED = '0'.repeat(64)
 
 function getErrorMessage(err: unknown): string {
   if (axios.isAxiosError(err)) {
@@ -67,62 +66,20 @@ function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : 'Something went wrong'
 }
 
-function cellsMatch(left: SnakeCell, right: SnakeCell): boolean {
+function cellsMatch(left: SnakeState['snake'][number], right: SnakeState['snake'][number]): boolean {
   return left.x === right.x && left.y === right.y
 }
 
-function getCellKey(cell: SnakeCell): string {
+function getCellKey(cell: SnakeState['snake'][number]): string {
   return `${cell.x}:${cell.y}`
 }
 
-function findFood(width: number, height: number, snake: SnakeCell[]): SnakeCell {
-  const occupied = new Set(snake.map(getCellKey))
-  const openCells: SnakeCell[] = []
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const cell = { x, y }
-      if (!occupied.has(getCellKey(cell))) {
-        openCells.push(cell)
-      }
-    }
-  }
-
-  return openCells[Math.floor(Math.random() * openCells.length)] || snake[0]
-}
-
-function nextSnakeState(state: SnakeState, wallLooping: boolean): SnakeState {
-  if (state.isGameOver) return state
-
-  const direction = state.pendingDirection
-  const delta = DIRECTION_DELTA[direction]
-  const head = state.snake[0]
-  let nextHead = { x: head.x + delta.x, y: head.y + delta.y }
-
-  if (wallLooping) {
-    nextHead = {
-      x: (nextHead.x + state.width) % state.width,
-      y: (nextHead.y + state.height) % state.height,
-    }
-  } else if (nextHead.x < 0 || nextHead.x >= state.width || nextHead.y < 0 || nextHead.y >= state.height) {
-    return { ...state, direction, pendingDirection: direction, isGameOver: true }
-  }
-
-  const ateFood = cellsMatch(nextHead, state.food)
-  const nextSnake = ateFood ? [nextHead, ...state.snake] : [nextHead, ...state.snake.slice(0, -1)]
-
-  if (nextSnake.slice(1).some((cell) => cellsMatch(cell, nextHead))) {
-    return { ...state, direction, pendingDirection: direction, isGameOver: true }
-  }
-
+function normalizeLegacySnakeState(state: SnakeState): SnakeState {
+  if (Number.isSafeInteger(state.tick) && state.tick >= 0 && typeof state.hasStarted === 'boolean') return state
   return {
     ...state,
-    hasStarted: true,
-    snake: nextSnake,
-    direction,
-    pendingDirection: direction,
-    food: ateFood ? findFood(state.width, state.height, nextSnake) : state.food,
-    score: nextSnake.length,
+    hasStarted: Boolean(state.hasStarted),
+    tick: 0,
   }
 }
 
@@ -133,6 +90,7 @@ export default function SnakeGame() {
   const [snakeState, setSnakeState] = useState<SnakeState | null>(null)
   const [modal, setModal] = useState<ModalState | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
+  const [isStarting, setIsStarting] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
   const [selectedBoardSize, setSelectedBoardSize] = useState<SnakeBoardSize>('medium')
   const [selectedWallLooping, setSelectedWallLooping] = useState(false)
@@ -140,20 +98,49 @@ export default function SnakeGame() {
   const pendingDirectionRef = useRef<Direction>('right')
   const lastCheckpointAtRef = useRef(0)
   const completedRef = useRef(false)
+  const sessionGameIdRef = useRef<string | null>(null)
+  const startCheckpointConfirmedRef = useRef(false)
+  const startPromiseRef = useRef<Promise<boolean> | null>(null)
+  const replayRecorderRef = useRef(createReplayRecorder('right'))
+  const replayEligibleRef = useRef(false)
+  const [replayStatus, setReplayStatus] = useState<ReplayRunStatus>('unranked')
+  const [unrankedReason, setUnrankedReason] = useState<ReplayUnrankedReason>('legacy')
 
   const wallLooping = Boolean(game?.metadata?.wallLooping)
   const boardSize = game?.metadata?.boardSize || 'medium'
   const snakeTickMs = snakeState?.tickMs ?? 120
+  const engineSeed = game?.replay && REPLAY_SEED_PATTERN.test(game.replay.seed)
+    ? game.replay.seed
+    : LEGACY_FALLBACK_SEED
 
   useEffect(() => {
     if (!game) return
-    const state = game.gameState as unknown as SnakeState
+    const rawState = game.gameState as unknown as SnakeState
+    const state = normalizeLegacySnakeState(rawState)
     setSnakeState(state)
     latestStateRef.current = state
     pendingDirectionRef.current = state.pendingDirection
     setSelectedBoardSize(game.metadata?.boardSize || 'medium')
     setSelectedWallLooping(Boolean(game.metadata?.wallLooping))
     setIsPlaying(Boolean(state.hasStarted && game.status === 'active' && !state.isGameOver))
+
+    if (sessionGameIdRef.current !== game._id) {
+      sessionGameIdRef.current = game._id
+      completedRef.current = game.status === 'completed'
+      startCheckpointConfirmedRef.current = Boolean(state.hasStarted)
+      startPromiseRef.current = null
+      replayRecorderRef.current = createReplayRecorder(state.pendingDirection)
+      const eligibility = getInitialReplayEligibility(game.replay, rawState)
+      replayEligibleRef.current = eligibility.eligible
+      setUnrankedReason(eligibility.reason || 'legacy')
+      setReplayStatus(game.status === 'completed'
+        ? getCompletedReplayStatus(game.result?.verification)
+        : eligibility.eligible ? 'eligible' : 'unranked')
+    } else if (game.status === 'completed') {
+      replayEligibleRef.current = false
+      setReplayStatus(getCompletedReplayStatus(game.result?.verification))
+      if (game.result?.verification !== 'replay') setUnrankedReason('verification')
+    }
   }, [game])
 
   useEffect(() => {
@@ -167,6 +154,111 @@ export default function SnakeGame() {
       setGame(res.data.game)
     }
   }, [game, setGame])
+
+  const markReplayUnranked = useCallback((reason: ReplayUnrankedReason) => {
+    replayEligibleRef.current = false
+    invalidateReplayRecorder(replayRecorderRef.current, reason)
+    setUnrankedReason(reason)
+    setReplayStatus('unranked')
+  }, [])
+
+  const ensureRunStarted = useCallback(async (state: SnakeState): Promise<boolean> => {
+    if (startCheckpointConfirmedRef.current) return true
+    if (startPromiseRef.current) return startPromiseRef.current
+
+    const startedState = { ...state, hasStarted: true }
+    latestStateRef.current = startedState
+    setSnakeState(startedState)
+    setIsStarting(true)
+
+    const startPromise = (async () => {
+      try {
+        await saveState(startedState)
+        startCheckpointConfirmedRef.current = true
+        setIsPlaying(true)
+        return true
+      } catch (error: unknown) {
+        const latest = latestStateRef.current
+        if (latest && latest.tick === startedState.tick) {
+          const stoppedState = { ...latest, hasStarted: false }
+          latestStateRef.current = stoppedState
+          setSnakeState(stoppedState)
+        }
+        setModal({ title: 'Could not start run', message: getErrorMessage(error), variant: 'danger' })
+        return false
+      } finally {
+        setIsStarting(false)
+        startPromiseRef.current = null
+      }
+    })()
+
+    startPromiseRef.current = startPromise
+    return startPromise
+  }, [saveState])
+
+  const completeRun = useCallback(async (state: SnakeState) => {
+    if (!game || game.status !== 'active') return
+
+    const recorder = replayRecorderRef.current
+    const replay = buildReplayPayload(recorder)
+    const canVerify = replayEligibleRef.current
+      && replay !== null
+      && recorder.tickCount === state.tick
+
+    if (canVerify) {
+      setReplayStatus('verifying')
+      try {
+        const response = await api.post<ReplayCompletionResponse>(
+          `/api/games/${game._id}/single-player/replay`,
+          replay,
+        )
+        const verified = response.data
+        setGame({
+          ...verified.game,
+          gameState: verified.gameState as unknown as Record<string, unknown>,
+          moveHistory: verified.moveHistory,
+        })
+        replayEligibleRef.current = false
+        setReplayStatus('verified')
+        return
+      } catch (error: unknown) {
+        const rejectionStatus = axios.isAxiosError(error) ? error.response?.status : undefined
+        const rejectionCode = axios.isAxiosError(error) ? error.response?.data?.code : undefined
+        if (!isExplicitReplayRejection(rejectionStatus, rejectionCode)) {
+          setReplayStatus('retry')
+          setModal({
+            title: 'Replay verification is pending',
+            message: 'The replay is still available in this tab. Keep this page open and retry verification when the connection is available.',
+            variant: 'warning',
+          })
+          return
+        }
+
+        markReplayUnranked('verification')
+        try {
+          await saveState(state, true, true)
+          setModal({
+            title: 'Score saved without ranking',
+            message: 'The server could not reproduce this replay. Your run remains in history, but it was not added to the leaderboard.',
+            variant: 'warning',
+          })
+          return
+        } catch (error: unknown) {
+          completedRef.current = false
+          setModal({ title: 'Could not save score', message: getErrorMessage(error), variant: 'danger' })
+          return
+        }
+      }
+    }
+
+    if (replayEligibleRef.current) markReplayUnranked(recorder.reason || 'interrupted')
+    try {
+      await saveState(state, true, true)
+    } catch (error: unknown) {
+      completedRef.current = false
+      setModal({ title: 'Could not save score', message: getErrorMessage(error), variant: 'danger' })
+    }
+  }, [game, markReplayUnranked, saveState, setGame])
 
   async function updateSettings(boardSize: SnakeBoardSize, wallLooping: boolean) {
     if (!game || game.status !== 'active' || snakeState?.hasStarted) return
@@ -185,30 +277,24 @@ export default function SnakeGame() {
     }
   }
 
-  function startGame() {
+  async function startGame() {
     if (!snakeState || snakeState.isGameOver || game?.status !== 'active') return
-    const next = { ...snakeState, hasStarted: true }
-    setSnakeState(next)
-    latestStateRef.current = next
-    pendingDirectionRef.current = next.pendingDirection
-    setIsPlaying(true)
-    void saveState(next).catch(() => undefined)
+    pendingDirectionRef.current = snakeState.pendingDirection
+    await ensureRunStarted(snakeState)
   }
 
   const setPendingDirection = useCallback((direction: Direction) => {
     const current = latestStateRef.current
     if (game?.status !== 'active' || !current || current.isGameOver) return
-    if (OPPOSITE_DIRECTION[current.direction] === direction || OPPOSITE_DIRECTION[pendingDirectionRef.current] === direction) return
+    if (OPPOSITE_DIRECTION[current.direction] === direction) return
 
     pendingDirectionRef.current = direction
-    setSnakeState((current) => {
-      if (!current || current.isGameOver) return current
-      const next = { ...current, pendingDirection: direction, hasStarted: true }
-      latestStateRef.current = next
-      return next
-    })
-    setIsPlaying(true)
-  }, [game?.status])
+    const next = { ...current, pendingDirection: direction, hasStarted: true }
+    latestStateRef.current = next
+    setSnakeState(next)
+    if (startCheckpointConfirmedRef.current) setIsPlaying(true)
+    else void ensureRunStarted(next)
+  }, [ensureRunStarted, game?.status])
 
   const handleDirectionPress = useCallback((event: React.PointerEvent<HTMLButtonElement>, direction: Direction) => {
     event.preventDefault()
@@ -253,8 +339,17 @@ export default function SnakeGame() {
       const current = latestStateRef.current
       if (!current) return
 
-      const queuedState = { ...current, pendingDirection: pendingDirectionRef.current }
-      const next = nextSnakeState(queuedState, wallLooping)
+      const direction = pendingDirectionRef.current
+      if (replayEligibleRef.current) {
+        const recorder = replayRecorderRef.current
+        if (current.tick !== recorder.tickCount) {
+          markReplayUnranked('interrupted')
+        } else if (!recordReplayTick(recorder, direction)) {
+          markReplayUnranked(recorder.reason || 'limit')
+        }
+      }
+
+      const next = stepSnakeState(current, { seed: engineSeed, wallLooping, direction })
       pendingDirectionRef.current = next.pendingDirection
       latestStateRef.current = next
       setSnakeState(next)
@@ -265,9 +360,7 @@ export default function SnakeGame() {
       if (next.isGameOver && !completedRef.current) {
         completedRef.current = true
         setIsPlaying(false)
-        void saveState(next, true, true).catch((err: unknown) => {
-          setModal({ title: 'Could not save score', message: getErrorMessage(err), variant: 'danger' })
-        })
+        void completeRun(next)
       } else if (ateFood || now - lastCheckpointAtRef.current > 3000) {
         lastCheckpointAtRef.current = now
         void saveState(next).catch(() => undefined)
@@ -275,14 +368,18 @@ export default function SnakeGame() {
     }, snakeTickMs)
 
     return () => window.clearInterval(interval)
-  }, [game?.status, isPlaying, saveState, snakeTickMs, wallLooping])
+  }, [completeRun, engineSeed, game?.status, isPlaying, markReplayUnranked, saveState, snakeTickMs, wallLooping])
 
   useEffect(() => {
     function handleBeforeUnload() {
       const state = latestStateRef.current
       if (!game || game.status !== 'active' || !state) return
+      if (state.isGameOver && replayEligibleRef.current) return
       const url = `/api/games/${game._id}/single-player/snake/state`
-      const payload = JSON.stringify({ gameState: state, completed: state.isGameOver })
+      const payload = JSON.stringify({
+        gameState: state,
+        completed: state.isGameOver && !replayEligibleRef.current,
+      })
       navigator.sendBeacon?.(url, new Blob([payload], { type: 'application/json' }))
     }
 
@@ -359,7 +456,14 @@ export default function SnakeGame() {
   const isActive = game.status === 'active'
   const isCompleted = game.status === 'completed'
   const canRetry = snakeState.isGameOver || !isActive
+  const canStartNewRun = canRetry && replayStatus !== 'verifying' && replayStatus !== 'retry'
   const settingsLocked = Boolean(snakeState.hasStarted || !isActive)
+  const replayPresentation = getReplayRunPresentation(replayStatus, unrankedReason)
+  const replayPresentationClass = replayPresentation.tone === 'success'
+    ? 'border-success/30 bg-success-subtle text-success-text'
+    : replayPresentation.tone === 'warning'
+      ? 'border-warning/30 bg-warning-subtle text-warning-text'
+      : 'border-accent/30 bg-accent-subtle text-accent'
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
@@ -378,7 +482,7 @@ export default function SnakeGame() {
             <p className="text-sm capitalize text-text-muted">{boardSize} grid - {wallLooping ? 'Looping walls' : 'Solid walls'}</p>
           </div>
           <div className="flex items-center gap-3">
-            {canRetry && (
+            {canStartNewRun && (
               <button
                 type="button"
                 onClick={() => void retryGame()}
@@ -441,17 +545,30 @@ export default function SnakeGame() {
                 </label>
               </div>
             </div>
+            <div className={`mb-4 rounded-xl border px-4 py-3 ${replayPresentationClass}`} aria-live="polite">
+              <p className="text-sm font-semibold">{replayPresentation.label}</p>
+              <p className="mt-1 text-xs opacity-90">{replayPresentation.detail}</p>
+            </div>
             {snakeState.isGameOver && (
               <div className="mb-4 flex flex-col items-center justify-center gap-3 rounded-xl border border-success/30 bg-success-subtle px-4 py-3 text-center text-sm font-medium text-success-text sm:flex-row">
                 <span>Game over: final length {snakeState.score}</span>
-                <button
+                {replayStatus === 'retry' && (
+                  <button
+                    type="button"
+                    onClick={() => void completeRun(snakeState)}
+                    className="min-h-10 cursor-pointer rounded-lg border border-warning/40 bg-warning-subtle px-4 py-2 text-sm font-medium text-warning-text"
+                  >
+                    Retry verification
+                  </button>
+                )}
+                {canStartNewRun && <button
                   type="button"
                   onClick={() => void retryGame()}
                   disabled={isRetrying}
                   className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isRetrying ? 'Starting...' : 'Retry'}
-                </button>
+                </button>}
               </div>
             )}
             <div className="mx-auto w-full max-w-[min(86vw,70vh,38rem)]">
@@ -489,15 +606,15 @@ export default function SnakeGame() {
                   type="button"
                   onClick={() => {
                     if (!snakeState.hasStarted) {
-                      startGame()
+                      void startGame()
                       return
                     }
                     setIsPlaying((value) => !value)
                   }}
-                  disabled={!isActive || snakeState.isGameOver}
+                  disabled={!isActive || snakeState.isGameOver || isStarting}
                   className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {!snakeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
+                  {isStarting ? 'Starting...' : !snakeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
                 <span className="rounded-lg bg-overlay px-3 py-2 text-sm text-text-secondary">Use WASD or arrow keys</span>
               </div>
@@ -524,15 +641,15 @@ export default function SnakeGame() {
                   type="button"
                   onClick={() => {
                     if (!snakeState.hasStarted) {
-                      startGame()
+                      void startGame()
                       return
                     }
                     setIsPlaying((value) => !value)
                   }}
-                  disabled={!isActive || snakeState.isGameOver}
+                  disabled={!isActive || snakeState.isGameOver || isStarting}
                   className="min-h-12 rounded-lg bg-accent text-xs font-bold text-text-on-accent disabled:opacity-60"
                 >
-                  {!snakeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
+                  {isStarting ? 'Starting' : !snakeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
                 <button
                   type="button"

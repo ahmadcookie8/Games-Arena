@@ -89,7 +89,8 @@ Behavior:
 - Mongo stores `passwordHash`, not a plain `password`
 - `email` is optional and unique when present
 - Login accepts either `identifier=username` or `identifier=email`
-- JWT payload stays minimal: `{ userId, username }`
+- JWTs use fixed issuer/audience/algorithm checks, a standard subject for the user ID, a unique token ID, and the user's `authVersion` for server-side revocation
+- Auth responses never expose the JWT; the HttpOnly cookie is the only client transport
 - The frontend no longer relies on localStorage for auth persistence
 - Session restore happens by calling `/api/auth/me` on app load
 
@@ -203,20 +204,27 @@ Important frontend game files:
 Current socket events in practice:
 
 - Client -> server: `joinRoom`
-- Client -> server: `joinGame`
 - Client -> server: `makeMove`
+- Client -> server: `sendChatMessage`
 - Server -> client: `welcome`
 - Server -> client: `gameUpdated`
 - Server -> client: `moveMade`
 - Server -> client: `gameOver`
 - Server -> client: `gamesChanged`
-- Server -> client: `gamePaused`
+- Server -> client: `chatMessage`
 
 Socket auth:
 
-- Server reads JWT from the HttpOnly cookie first
-- Bearer token fallback still exists for transition/debugging
+- Server accepts the JWT only from the HttpOnly auth cookie; bearer/header and Socket.io auth-payload fallbacks are intentionally disabled
 - Frontend socket client uses `withCredentials: true`
+
+Socket acknowledgements:
+
+- Success: `{ ok: true, data: { ... } }`
+- Failure: `{ ok: false, error: { code, message } }`
+- The frontend applies a bounded acknowledgement timeout and treats missing or malformed envelopes as failures
+
+New Snake and Maze Chase runs use the shared `@games-arena/game-engine` package and a server-issued seed. The frontend submits a bounded direction-at-tick replay, and only results the server reproduces with `result.verification = replay` enter the solo leaderboards. Legacy, resumed, interrupted, over-limit, and rejected runs remain playable history with `result.verification = unverified` and are labeled unranked in the UI.
 
 ## Data Model
 
@@ -275,9 +283,10 @@ Important local note:
 
 Current public deployment layout:
 
-- Frontend: `https://games-arena.penguincookie.ca` on Vercel
+- Frontend: `https://games.penguincookie.ca` on Vercel
+- Retired hostname: `https://games-arena.penguincookie.ca` is parked and must not be used for auth, CORS, or frontend configuration
 - Backend API: `https://api.penguincookie.ca` on EC2 behind Nginx
-- Backend CORS origin in production: `https://games-arena.penguincookie.ca`
+- Backend CORS origin in production: `https://games.penguincookie.ca`
 - Vercel frontend env vars should point at `https://api.penguincookie.ca`
 - EC2 Nginx proxies `api.penguincookie.ca` to the Node container on `127.0.0.1:3000`
 - Certbot/Let's Encrypt is used for HTTPS on the API domain
@@ -292,9 +301,29 @@ Current public deployment layout:
    - the browser is not sending/keeping the cookie, or
    - the wrong database is being used.
 5. The project uses Docker for the backend in development/verification, so rebuilds matter when source changes.
-6. For production deploys, the GitHub Actions backend workflow builds a Docker image, pushes it to Docker Hub, then SSHes into EC2 and runs `docker compose pull` / `docker compose up -d --no-build`.
-7. The EC2 host does not automatically `git pull` repo files during deploy, so host-side config files like `backend/docker-compose.yml` must be synced manually if they change.
-8. `backend/docker-compose.yml` must pass `CORS_ORIGIN` into the container so production CORS follows `games-arena.penguincookie.ca`.
+6. For production deploys, the GitHub Actions backend workflow gates the release on tests and audits, scans the image, produces an SBOM, pushes a commit-addressed image, and deploys its immutable digest.
+7. The deploy workflow synchronizes `backend/docker-compose.yml`; Nginx configuration in `backend/deploy/nginx-api.conf` still requires an intentional privileged host update.
+8. `backend/docker-compose.yml` must pass `CORS_ORIGIN` into the container so production CORS follows `games.penguincookie.ca`.
+9. Production deploys require a trusted `EC2_KNOWN_HOSTS` GitHub secret in addition to the SSH key; never accept a freshly scanned host key inside the deployment job.
+
+## Security Migration And JWT Rotation
+
+`npm run security:migrate` is report-only by default. It classifies legacy results, reports required changes, and calculates reconciled verified stats without writing. Apply mode is deliberately guarded and requires both flags:
+
+```bash
+npm run security:migrate -- --apply --backup-confirmed
+```
+
+Production rollout order:
+
+1. Schedule a maintenance window and stop game/stat writes.
+2. Take and verify a restorable MongoDB backup.
+3. Run the report-only migration with production configuration and review every count.
+4. Run guarded apply mode only after the backup is confirmed, then rerun report-only mode to verify zero unexpected pending changes.
+5. Rotate `JWT_SECRET` to a new randomly generated value of at least 32 bytes and deploy the hardened backend. Rotation intentionally signs every user out.
+6. Verify health, cookie login/logout, Socket.io auth, leaderboard totals, and representative completed games before ending maintenance.
+
+Run the migration from a trusted administrative environment with backend development dependencies installed; the minimal production runtime image intentionally excludes `ts-node` and source files.
 
 ## Useful Commands
 

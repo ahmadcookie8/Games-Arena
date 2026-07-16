@@ -5,34 +5,314 @@ on:
     branches: [main]
     paths:
       - 'backend/**'
+      - 'packages/game-engine/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-production
+  cancel-in-progress: false
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
+  game-engine-verify:
+    name: Verify shared game engine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/game-engine
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Build Docker image
-        run: |
-          cd backend
-          docker build -t ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:latest .
-          docker tag ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:latest ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:${{ github.sha }}
-
-      - name: Push to Docker Hub
-        run: |
-          echo "${{ secrets.DOCKER_HUB_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" --password-stdin
-          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:latest
-          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:${{ github.sha }}
-
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.2.0
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          port: 22
-          script: |
-            cd /home/ubuntu/Games-Arena/backend
-            export BACKEND_IMAGE=${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:latest
-            docker compose pull
-            docker compose up -d --no-build
+          node-version: '24'
+
+      - name: Test deterministic replay engine
+        run: npm test
+
+  verify:
+    name: Verify backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NODE_ENV: test
+      MONGODB_URI: mongodb://127.0.0.1:27017/games_arena_security_integration
+      REDIS_URL: redis://127.0.0.1:6379/15
+      JWT_SECRET: ci-only-security-integration-secret
+      CORS_ORIGIN: http://localhost:5173
+      RUN_SECURITY_INTEGRATION: '1'
+    services:
+      mongo:
+        image: mongo:8.0@sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test (unit and real-service security integration)
+        run: npm test -- --runInBand
+
+      - name: Build
+        run: npm run build
+
+      - name: Audit dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  frontend-verify:
+    name: Verify frontend compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Audit dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  release-security:
+    name: Release security analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve pinned Redis image
+        id: redis-image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="$(awk '/^  redis:/{service=1; next} service && $1 == "image:" {print $2; exit}' backend/docker-compose.yml)"
+          case "$image_ref" in
+            redis:*@sha256:*) ;;
+            *) echo "Redis image must be pinned by digest" >&2; exit 1 ;;
+          esac
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+
+      - name: Scan dependencies, configuration, and secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          format: table
+
+      - name: Scan repository for secrets at every severity
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: '1'
+          format: table
+
+      - name: Scan pinned Redis image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.redis-image.outputs.image_ref }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          format: table
+
+      - name: Analyze with CodeQL
+        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
+        with:
+          category: /language:javascript-typescript/workflow:backend-release
+
+  build:
+    name: Build and publish immutable image
+    needs: [game-engine-verify, verify, frontend-verify, release-security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      image_ref: ${{ steps.push.outputs.image_ref }}
+    env:
+      IMAGE_NAME: ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend
+      IMAGE_TAG: ${{ secrets.DOCKER_HUB_USERNAME }}/games-arena-backend:${{ github.sha }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+
+      - name: Build image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          load: true
+          push: false
+          tags: ${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image before publishing
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_TAG }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          format: table
+
+      - name: Generate image SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ env.IMAGE_TAG }}
+          format: spdx-json
+          output-file: games-arena-backend.spdx.json
+          artifact-name: games-arena-backend-sbom-${{ github.sha }}
+
+      - name: Push commit-addressed image
+        id: push
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE_TAG"
+          digest="$(docker image inspect --format='{{index .RepoDigests 0}}' "$IMAGE_TAG")"
+          test -n "$digest"
+          echo "image_ref=$digest" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy exact image digest
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      IMAGE_REF: ${{ needs.build.outputs.image_ref }}
+      SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+      SSH_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Configure pinned SSH host identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$EC2_HOST"
+          test -n "$IMAGE_REF"
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+          install -m 0700 -d "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
+          chmod 0600 "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/known_hosts"
+
+      - name: Synchronize blue/green deployment candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          scp -i "$HOME/.ssh/deploy_key" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            backend/docker-compose.yml \
+            "ubuntu@${EC2_HOST}:/home/ubuntu/Games-Arena/backend/docker-compose.yml.next"
+          scp -i "$HOME/.ssh/deploy_key" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            backend/deploy/blue-green-deploy.sh \
+            "ubuntu@${EC2_HOST}:/home/ubuntu/Games-Arena/backend/blue-green-deploy.sh.next"
+
+      - name: Stage, smoke-test, and switch Nginx upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/deploy_key" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "ubuntu@${EC2_HOST}" "bash -s -- '$IMAGE_REF'" <<'REMOTE'
+          set -euo pipefail
+          image_ref="$1"
+          deploy_root=/home/ubuntu/Games-Arena/backend
+          candidate_script="${deploy_root}/blue-green-deploy.sh.next"
+          test -f "$candidate_script"
+          chmod 0700 "$candidate_script"
+          "$candidate_script" "$image_ref"
+          mv -f -- "$candidate_script" "${deploy_root}/blue-green-deploy.sh"
+          REMOTE
