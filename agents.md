@@ -301,8 +301,8 @@ Current public deployment layout:
    - the browser is not sending/keeping the cookie, or
    - the wrong database is being used.
 5. The project uses Docker for the backend in development/verification, so rebuilds matter when source changes.
-6. For production deploys, the GitHub Actions backend workflow gates the release on tests and audits, scans the image, produces an SBOM, pushes a commit-addressed image, and deploys its immutable digest.
-7. The deploy workflow synchronizes `backend/docker-compose.yml`; Nginx configuration in `backend/deploy/nginx-api.conf` still requires an intentional privileged host update.
+6. Pull-request CI is intentionally lean: it runs the backend non-stress tests/build and the frontend build. Longer browser, stress, audit, and scanning suites remain available for deliberate local verification.
+7. For production deploys, GitHub Actions verifies the backend, pushes a commit-addressed image, passes only its non-secret digest between jobs, and recreates the EC2 Compose service from that immutable digest with health-based rollback. Nginx remains on `127.0.0.1:3000`; changes to `backend/deploy/nginx-api.conf` still require an intentional privileged host update.
 8. `backend/docker-compose.yml` must pass `CORS_ORIGIN` into the container so production CORS follows `games.penguincookie.ca`.
 9. Production deploys require a trusted `EC2_KNOWN_HOSTS` GitHub secret in addition to the SSH key; never accept a freshly scanned host key inside the deployment job.
 

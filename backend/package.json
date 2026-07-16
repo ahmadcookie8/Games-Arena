@@ -12,6 +12,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "jest --passWithNoTests",
+    "test:ci": "jest --passWithNoTests --runInBand --testNamePattern=\"^(?!.*\\[stress\\])\"",
     "test:unit": "jest --passWithNoTests --testPathPattern=unit",
     "test:socket": "jest --passWithNoTests --testPathPattern=socket",
     "test:api": "jest --passWithNoTests --testPathPattern=api",
