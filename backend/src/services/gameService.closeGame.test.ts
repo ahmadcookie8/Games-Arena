@@ -16,12 +16,6 @@ jest.mock('../models/GameSnapshot', () => ({
   },
 }))
 
-jest.mock('../utils/redis', () => ({
-  redisGet: jest.fn(),
-  redisSet: jest.fn(),
-  redisDel: jest.fn(),
-}))
-
 jest.mock('./socketNotifier', () => ({
   emitGameOver: jest.fn(),
   emitChatMessage: jest.fn(),
@@ -44,11 +38,6 @@ jest.mock('../utils/securityLogger', () => ({
 
 const { Game } = jest.requireMock('../models/Game') as {
   Game: { create: jest.Mock; findById: jest.Mock }
-}
-const { redisDel, redisGet, redisSet } = jest.requireMock('../utils/redis') as {
-  redisDel: jest.Mock
-  redisGet: jest.Mock
-  redisSet: jest.Mock
 }
 const { emitChatMessage, emitGameReplayCreated, emitGameUpdated, emitGamesChanged } = jest.requireMock('./socketNotifier') as {
   emitChatMessage: jest.Mock
@@ -212,7 +201,6 @@ describe('gameService.closeGame', () => {
     expect(game.completedAt).toBeInstanceOf(Date)
     expect(game.lastMoveAt).toBeInstanceOf(Date)
     expect(game.save).toHaveBeenCalled()
-    expect(redisDel).toHaveBeenCalledWith('game:ticTacToe:game-1')
     expect(emitGameUpdated).toHaveBeenCalledWith(game)
     expect(emitGamesChanged).toHaveBeenCalledWith(game)
     expect(userService.updateStatsAfterGame).not.toHaveBeenCalled()
@@ -227,7 +215,6 @@ describe('gameService.closeGame', () => {
 
     expect(result).toBe(game)
     expect(game.status).toBe('abandoned')
-    expect(redisDel).toHaveBeenCalledWith('game:ticTacToe:game-1')
     expect(emitGameUpdated).toHaveBeenCalledWith(game)
     expect(emitGamesChanged).toHaveBeenCalledWith(game)
   })
@@ -236,7 +223,6 @@ describe('gameService.closeGame', () => {
     Game.findById.mockResolvedValue(createGame())
 
     await expect(gameService.closeGame('game-1', 'user-3')).rejects.toBeInstanceOf(NotFoundError)
-    expect(redisDel).not.toHaveBeenCalled()
   })
 
   it.each(['paused', 'completed', 'abandoned'])('rejects %s games without changing them', async (status) => {
@@ -246,7 +232,6 @@ describe('gameService.closeGame', () => {
     await expect(gameService.closeGame('game-1', 'user-1')).rejects.toBeInstanceOf(BadRequestError)
     expect(game.status).toBe(status)
     expect(game.save).not.toHaveBeenCalled()
-    expect(redisDel).not.toHaveBeenCalled()
   })
 
   it('allows the host to abandon a started multiplayer game without recording a result or statistics', async () => {
@@ -259,7 +244,6 @@ describe('gameService.closeGame', () => {
     expect(game.result).toBeUndefined()
     expect(game.statsProcessedAt).toBeUndefined()
     expect(game.save).toHaveBeenCalled()
-    expect(redisDel).toHaveBeenCalledWith('game:ticTacToe:game-1')
     expect(userService.updateStatsAfterGame).not.toHaveBeenCalled()
     expect(userService.invalidateLeaderboardCache).not.toHaveBeenCalled()
     expect(emitGameUpdated).toHaveBeenCalledWith(game)
@@ -300,7 +284,6 @@ describe('gameService.closeGame', () => {
 
     expect(game.status).toBe('active')
     expect(game.save).not.toHaveBeenCalled()
-    expect(redisDel).not.toHaveBeenCalled()
     expect(logSecurityEvent).not.toHaveBeenCalled()
   })
 })
@@ -398,7 +381,6 @@ describe('gameService.replayGame', () => {
     expect(Game.create.mock.calls[0][0].players).toEqual([
       expect.objectContaining({ userId: sourceGame.players[1].userId, username: 'bob', index: 0, isConnected: false }),
     ])
-    expect(redisSet).toHaveBeenCalledWith('game:ticTacToe:game-2', expect.objectContaining({ status: 'active' }), 3600)
     expect(emitGameReplayCreated).toHaveBeenCalledWith(sourceGame, replayGame, 'user-2')
     expect(emitGamesChanged).not.toHaveBeenCalledWith(sourceGame)
     expect(emitGamesChanged).toHaveBeenCalledWith(replayGame)
@@ -456,10 +438,6 @@ describe('gameService single player Tic Tac Toe', () => {
       players: [{ userId: 'user-1', username: 'alice', index: 0 }],
       metadata: { ratedGame: false, mode: 'singlePlayer', difficulty: 'medium' },
     }))
-    expect(redisSet).toHaveBeenCalledWith('game:ticTacToe:game-1', expect.objectContaining({
-      status: 'active',
-      metadata: game.metadata,
-    }), 3600)
   })
 
   it('defaults Tic Tac Toe difficulty to easy when omitted', async () => {
@@ -481,9 +459,6 @@ describe('gameService single player Tic Tac Toe', () => {
 
     expect(game.metadata.difficulty).toBe('hard')
     expect(game.save).toHaveBeenCalled()
-    expect(redisSet).toHaveBeenCalledWith('game:ticTacToe:game-1', expect.objectContaining({
-      metadata: game.metadata,
-    }), 3600)
   })
 
   it('rejects Tic Tac Toe difficulty changes after the first move', async () => {
@@ -586,10 +561,6 @@ describe('gameService single player Snake', () => {
       players: [{ userId: 'user-1', username: 'alice', index: 0 }],
       metadata: { ratedGame: false, mode: 'singlePlayer', boardSize: 'large', wallLooping: true },
     }))
-    expect(redisSet).toHaveBeenCalledWith('game:snake:game-1', expect.objectContaining({
-      status: 'active',
-      metadata: game.metadata,
-    }), 3600)
   })
 
   it('defaults Snake to a medium solid-walls board when settings are omitted', async () => {
@@ -731,10 +702,6 @@ describe('gameService single player Maze Chase', () => {
       isGameOver: false,
     }))
     expect(created.gameState.ghosts).toHaveLength(4)
-    expect(redisSet).toHaveBeenCalledWith('game:mazeChase:game-1', expect.objectContaining({
-      status: 'active',
-      metadata: game.metadata,
-    }), 3600)
   })
 
   it('saves an active Maze Chase checkpoint without completing the game', async () => {

@@ -34,6 +34,19 @@ describe('reconcileVerifiedStats', () => {
     expect(stats.get('b')?.gamesDraw).toBe(1)
   })
 
+  it('excludes Wisecracker waiting-room players from completed match statistics', () => {
+    const stats = reconcileVerifiedStats([{
+      gameType: 'wisecracker',
+      players: [{ userId: 'winner' }, { userId: 'loser' }, { userId: 'waiting' }],
+      gameState: { activePlayerIds: ['winner', 'loser'] },
+      result: { winner: 'winner', isDraw: false, verification: 'server' },
+    }])
+
+    expect(stats.get('winner')).toMatchObject({ gamesPlayed: 1, gamesWon: 1 })
+    expect(stats.get('loser')).toMatchObject({ gamesPlayed: 1, gamesLost: 1 })
+    expect(stats.has('waiting')).toBe(false)
+  })
+
   it('ignores malformed winners and does not create partial statistics', () => {
     const stats = reconcileVerifiedStats([
       {

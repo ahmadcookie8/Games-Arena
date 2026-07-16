@@ -1,8 +1,20 @@
-import { Scrabble, ScrabbleState, ScrabbleTile } from './Scrabble'
+import { makeMoveEventSchema } from '../utils/validators'
+import { Scrabble, ScrabbleAction, ScrabbleState, ScrabbleTile } from './Scrabble'
 
 const players = [
-  { userId: 'user1', username: 'One' },
-  { userId: 'user2', username: 'Two' },
+  { userId: 'user1', username: 'One', isConnected: true },
+  { userId: 'user2', username: 'Two', isConnected: true },
+]
+
+const contractGameId = '507f1f77bcf86cd799439010'
+const contractHostId = '507f1f77bcf86cd799439011'
+const contractGuestId = '507f1f77bcf86cd799439012'
+const legacyBlankId = '?-1712345678901-blank01'
+const legacyNormalId = 'I-1712345678902-normal01'
+const uuidTileId = '1b63f9d1-6e14-4f3d-84ef-76468cb29d1a'
+const contractPlayers = [
+  { userId: contractHostId, username: 'Host', isConnected: true },
+  { userId: contractGuestId, username: 'Guest', isConnected: true },
 ]
 
 function tile(id: string, letter: string, value: number): ScrabbleTile {
@@ -18,7 +30,138 @@ function stateWithPlayers(infiniteLetters = false): ScrabbleState {
   return state
 }
 
+function validatedScrabbleAction(move: unknown): ScrabbleAction {
+  return makeMoveEventSchema.parse({ gameId: contractGameId, move }).move as ScrabbleAction
+}
+
+function contractState(): ScrabbleState {
+  let state = Scrabble.createInitialState(contractHostId)
+  state = Scrabble.addPlayer(state, contractGuestId)
+  state.racks[contractHostId] = [
+    tile(legacyBlankId, '?', 0),
+    tile(legacyNormalId, 'I', 1),
+    tile(uuidTileId, 'Q', 10),
+  ]
+  state.racks[contractGuestId] = [
+    tile('b3fdd5f9-92bb-4efe-8f8e-9122d2f307df', 'E', 1),
+    tile('R-1712345678903-return01', 'R', 1),
+  ]
+  state.bag = [
+    tile('6bf3a13f-e4ba-4fb8-890f-72d38fe47218', 'N', 1),
+    tile('O-1712345678904-bag0001', 'O', 1),
+    tile('f39f2707-d8a1-4392-83fe-ec922e3d5bb2', 'P', 3),
+  ]
+  return state
+}
+
 describe('Scrabble', () => {
+  it('passes legacy blank, legacy normal, and UUID placements through the socket schema into the real engine', () => {
+    const blankState = contractState()
+    const blankMove = validatedScrabbleAction({
+      type: 'placeTiles',
+      placements: [
+        { rackTileId: legacyBlankId, row: 7, col: 7, blankLetter: 'q' },
+        { rackTileId: legacyNormalId, row: 7, col: 8 },
+      ],
+    })
+    const blankResult = Scrabble.applyAction(
+      blankState,
+      blankMove,
+      contractHostId,
+      contractPlayers,
+      0,
+      1
+    )
+
+    expect(blankResult.state.board[7][7]?.tile).toMatchObject({ id: legacyBlankId, letter: 'Q', isBlank: true })
+    expect(blankResult.state.lastScoreEvent?.words[0].word).toBe('qi')
+
+    const uuidState = contractState()
+    const uuidMove = validatedScrabbleAction({
+      type: 'placeTiles',
+      placements: [
+        { rackTileId: uuidTileId, row: 7, col: 7 },
+        { rackTileId: legacyNormalId, row: 7, col: 8 },
+      ],
+    })
+    const uuidResult = Scrabble.applyAction(
+      uuidState,
+      uuidMove,
+      contractHostId,
+      contractPlayers,
+      0,
+      1
+    )
+
+    expect(uuidResult.state.board[7][7]?.tile.id).toBe(uuidTileId)
+    expect(uuidResult.state.lastScoreEvent?.words[0].word).toBe('qi')
+  })
+
+  it('passes blank and UUID exchanges and trades through validation and rejects a consumed response as stale', () => {
+    const exchangeState = contractState()
+    const exchange = validatedScrabbleAction({
+      type: 'exchangeWithBag',
+      rackTileIds: [legacyBlankId, uuidTileId],
+    })
+    const exchanged = Scrabble.applyAction(
+      exchangeState,
+      exchange,
+      contractHostId,
+      contractPlayers,
+      0,
+      1
+    )
+    expect(exchanged.state.racks[contractHostId].map((rackTile) => rackTile.id)).not.toEqual(
+      expect.arrayContaining([legacyBlankId, uuidTileId])
+    )
+
+    const tradeState = contractState()
+    const offered = Scrabble.applyAction(
+      tradeState,
+      validatedScrabbleAction({
+        type: 'offerTrade',
+        targetUserId: contractGuestId,
+        rackTileIds: [legacyBlankId],
+      }),
+      contractHostId,
+      contractPlayers,
+      0,
+      1
+    )
+    const offerId = offered.state.pendingTrade?.offerId
+    expect(offerId).toMatch(/^[0-9a-f-]{36}$/)
+
+    const acceptedAction = validatedScrabbleAction({
+      type: 'respondTrade',
+      offerId,
+      accept: true,
+      rackTileIds: ['b3fdd5f9-92bb-4efe-8f8e-9122d2f307df'],
+    })
+    const accepted = Scrabble.applyAction(
+      offered.state,
+      acceptedAction,
+      contractGuestId,
+      contractPlayers,
+      0,
+      2
+    )
+    expect(accepted.state.racks[contractGuestId].map((rackTile) => rackTile.id)).toContain(legacyBlankId)
+    expect(accepted.state.racks[contractHostId].map((rackTile) => rackTile.id)).toContain(
+      'b3fdd5f9-92bb-4efe-8f8e-9122d2f307df'
+    )
+
+    const acceptedSnapshot = JSON.stringify(accepted.state)
+    expect(() => Scrabble.applyAction(
+      accepted.state,
+      acceptedAction,
+      contractGuestId,
+      contractPlayers,
+      0,
+      3
+    )).toThrow(expect.objectContaining({ code: 'STALE_TRADE_OFFER', statusCode: 409 }))
+    expect(JSON.stringify(accepted.state)).toBe(acceptedSnapshot)
+  })
+
   it('creates a persistent 15x15 game state with racks and weighted finite bag', () => {
     const state = Scrabble.createInitialState('user1')
 
@@ -27,6 +170,9 @@ describe('Scrabble', () => {
     expect(state.racks.user1).toHaveLength(7)
     expect(state.bag.length).toBe(93)
     expect(state.infiniteLetters).toBe(false)
+    expect([...state.racks.user1, ...state.bag].every((rackTile) => (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(rackTile.id)
+    ))).toBe(true)
   })
 
   it('allows up to four players and rejects a fifth', () => {
@@ -209,10 +355,12 @@ describe('Scrabble', () => {
       1
     )
     state = offer.state
+    const offerId = state.pendingTrade?.offerId
+    expect(offerId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 
     const accepted = Scrabble.applyAction(
       state,
-      { type: 'respondTrade', accept: true, rackTileIds: ['e1', 'r1'] },
+      { type: 'respondTrade', offerId, accept: true, rackTileIds: ['e1', 'r1'] },
       'user2',
       players,
       0,
@@ -222,6 +370,192 @@ describe('Scrabble', () => {
     expect(accepted.state.pendingTrade).toBeNull()
     expect(accepted.state.racks.user1.map((rackTile) => rackTile.id)).toContain('e1')
     expect(accepted.state.racks.user2.map((rackTile) => rackTile.id)).toContain('q1')
+  })
+
+  it('rejects exchanges larger than the finite bag without changing the rack', () => {
+    const state = stateWithPlayers()
+    state.bag = [tile('n1', 'N', 1)]
+
+    expect(() => Scrabble.applyAction(
+      state,
+      { type: 'exchangeWithBag', rackTileIds: ['q1', 'i1'] },
+      'user1',
+      players,
+      0,
+      1
+    )).toThrow('Not enough tiles left in the bag')
+    expect(state.racks.user1.map((rackTile) => rackTile.id)).toEqual(['q1', 'i1', 'z1', 'a1', 'b1', 'c1', 'd1'])
+  })
+
+  it('rejects offline trade targets and targets with too few return tiles', () => {
+    const state = stateWithPlayers()
+    const connectedPlayers = [
+      { ...players[0], isConnected: true },
+      { ...players[1], isConnected: false },
+    ]
+
+    expect(() => Scrabble.applyAction(
+      state,
+      { type: 'offerTrade', targetUserId: 'user2', rackTileIds: ['q1'] },
+      'user1',
+      connectedPlayers,
+      0,
+      1
+    )).toThrow('offline player')
+
+    expect(() => Scrabble.applyAction(
+      state,
+      { type: 'offerTrade', targetUserId: 'user2', rackTileIds: ['q1'] },
+      'user1',
+      players.map(({ isConnected: _isConnected, ...player }) => player),
+      0,
+      1
+    )).toThrow('offline player')
+
+    state.racks.user2 = [tile('e1', 'E', 1)]
+    connectedPlayers[1].isConnected = true
+    expect(() => Scrabble.applyAction(
+      state,
+      { type: 'offerTrade', targetUserId: 'user2', rackTileIds: ['q1', 'i1'] },
+      'user1',
+      connectedPlayers,
+      0,
+      1
+    )).toThrow('does not have enough tiles')
+  })
+
+  it('requires the exact offer ID for modern trade responses', () => {
+    const state = Scrabble.applyAction(
+      stateWithPlayers(),
+      { type: 'offerTrade', targetUserId: 'user2', rackTileIds: ['q1'] },
+      'user1',
+      players,
+      0,
+      1
+    ).state
+
+    for (const offerId of [undefined, '69f41c04-a21a-4c10-a8fd-d6c4ced43f14']) {
+      try {
+        Scrabble.applyAction(
+          state,
+          { type: 'respondTrade', offerId, accept: false },
+          'user2',
+          players,
+          0,
+          2
+        )
+        throw new Error('Expected stale trade rejection')
+      } catch (error) {
+        expect(error).toMatchObject({ code: 'STALE_TRADE_OFFER', statusCode: 409 })
+      }
+    }
+  })
+
+  it('reports a stale offer before revealing that a replacement targets someone else', () => {
+    const threePlayers = [
+      ...players,
+      { userId: 'user3', username: 'Three', isConnected: true },
+    ]
+    const state = Scrabble.addPlayer(stateWithPlayers(), 'user3')
+    state.pendingTrade = {
+      offerId: '69f41c04-a21a-4c10-a8fd-d6c4ced43f15',
+      fromUserId: 'user1',
+      targetUserId: 'user3',
+      offeredTiles: [state.racks.user1[0]],
+    }
+
+    expect(() => Scrabble.applyAction(
+      state,
+      {
+        type: 'respondTrade',
+        offerId: '69f41c04-a21a-4c10-a8fd-d6c4ced43f14',
+        accept: false,
+      },
+      'user2',
+      threePlayers,
+      0,
+      2
+    )).toThrow(expect.objectContaining({ code: 'STALE_TRADE_OFFER', statusCode: 409 }))
+  })
+
+  it('allows a missing offer ID only for a legacy pending trade without one', () => {
+    const state = stateWithPlayers()
+    state.pendingTrade = {
+      fromUserId: 'user1',
+      targetUserId: 'user2',
+      offeredTiles: [state.racks.user1[0]],
+    }
+
+    const declined = Scrabble.applyAction(
+      state,
+      { type: 'respondTrade', accept: false },
+      'user2',
+      players,
+      0,
+      2
+    )
+    expect(declined.state.pendingTrade).toBeNull()
+
+    expect(() => Scrabble.applyAction(
+      state,
+      { type: 'respondTrade', offerId: '69f41c04-a21a-4c10-a8fd-d6c4ced43f14', accept: false },
+      'user2',
+      players,
+      0,
+      2
+    )).toThrow('no longer active')
+  })
+
+  it('allows the offerer or host to cancel, but rejects another player', () => {
+    const threePlayers = [
+      { userId: 'user1', username: 'One', isConnected: true },
+      { userId: 'user2', username: 'Two', isConnected: true },
+      { userId: 'user3', username: 'Three', isConnected: true },
+    ]
+    let state = Scrabble.addPlayer(stateWithPlayers(), 'user3')
+    state.racks.user3 = [tile('x1', 'X', 8), tile('y1', 'Y', 4)]
+    state = Scrabble.applyAction(
+      state,
+      { type: 'offerTrade', targetUserId: 'user3', rackTileIds: ['e1'] },
+      'user2',
+      threePlayers,
+      1,
+      1,
+      'user1'
+    ).state
+    const offerId = state.pendingTrade?.offerId
+
+    expect(() => Scrabble.applyAction(
+      state,
+      { type: 'cancelTrade', offerId },
+      'user3',
+      threePlayers,
+      1,
+      2,
+      'user1'
+    )).toThrow('Only the offerer or room host')
+
+    const hostCancelled = Scrabble.applyAction(
+      state,
+      { type: 'cancelTrade', offerId },
+      'user1',
+      threePlayers,
+      1,
+      2,
+      'user1'
+    )
+    expect(hostCancelled.state.pendingTrade).toBeNull()
+
+    const offeredAgain = Scrabble.applyAction(
+      state,
+      { type: 'cancelTrade', offerId },
+      'user2',
+      threePlayers,
+      1,
+      2,
+      'user1'
+    )
+    expect(offeredAgain.state.pendingTrade).toBeNull()
   })
 
   it('ends finite games after bag exhaustion and a full active-player pass cycle', () => {

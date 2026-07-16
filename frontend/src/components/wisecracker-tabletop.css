@@ -305,6 +305,8 @@
 .wc-host-setting input { padding: 0.65rem 0.75rem; font-family: var(--font-mono); font-weight: 750; }
 .wc-cue-editor textarea { min-height: 7rem; padding: 0.8rem; line-height: 1.55; resize: vertical; }
 .wc-answer-form input { padding: 0.7rem 0.8rem; }
+.wc-answer-form label > span { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.wc-answer-form label > span small { color: var(--wc-muted); font-family: var(--font-mono); font-size: 0.64rem; font-weight: 700; }
 .wc-host-setting input:focus,
 .wc-cue-editor textarea:focus,
 .wc-answer-form input:focus { border-color: var(--wc-violet); box-shadow: 0 0 0 3px color-mix(in oklch, var(--wc-violet) 18%, transparent); }
@@ -322,23 +324,35 @@
   font-size: 0.78rem;
   font-weight: 800;
   line-height: 1.2;
-  transition: transform 150ms ease, box-shadow 150ms ease, filter 150ms ease, background-color 150ms ease;
+  transition: transform var(--motion-fast, 120ms) ease, box-shadow var(--motion-fast, 120ms) ease, filter var(--motion-fast, 120ms) ease, background-color var(--motion-fast, 120ms) ease;
 }
 
 .wc-button svg { width: 1rem; height: 1rem; }
-.wc-button:not(:disabled):hover { transform: translateY(-1px); filter: brightness(1.04); }
-.wc-button:not(:disabled):active { transform: translateY(1px); }
+.wc-button:not(:disabled):active { transform: translateY(1px) scale(0.985); }
 .wc-button:disabled { opacity: 0.5; }
-.wc-button--primary { background: linear-gradient(145deg, var(--wc-violet), var(--wc-violet-deep)); box-shadow: 0 7px 18px color-mix(in oklch, var(--wc-violet) 25%, transparent); color: white; }
-.wc-button--quiet { border: 1px solid var(--wc-line); background: var(--wc-stage-raised); color: var(--wc-ink); }
-.wc-button--success { background: linear-gradient(145deg, var(--success), color-mix(in oklch, var(--success) 75%, black)); color: var(--text-on-accent); }
+.wc-button--primary { background: linear-gradient(135deg, var(--action-primary-from), var(--action-primary-to)); box-shadow: var(--shadow-accent); color: var(--text-on-action); }
+.wc-button--quiet { border: 1px solid var(--border-strong); background: var(--bg-elevated); color: var(--text-primary); }
+.wc-button--success { background: var(--action-success); color: var(--text-on-action); }
 .wc-button--wide { width: 100%; }
+
+@media (hover: hover) and (pointer: fine) {
+  .wc-button:not(:disabled):hover { transform: translateY(-1px); }
+  .wc-button--primary:not(:disabled):hover { background: linear-gradient(135deg, var(--action-primary-hover-from), var(--action-primary-hover-to)); }
+  .wc-button--quiet:not(:disabled):hover { background: var(--bg-overlay); }
+  .wc-button--success:not(:disabled):hover { background: var(--action-success-hover); }
+}
 
 .wc-cue-editor {
   padding: 1rem;
   border-radius: 1rem;
   background: color-mix(in oklch, var(--wc-stage-raised) 90%, transparent);
 }
+
+.wc-input-count { margin: 0.45rem 0 0; color: var(--wc-muted); font-family: var(--font-mono); font-size: 0.68rem; text-align: right; }
+.wc-input-count.is-invalid,
+.wc-field-error { color: var(--danger-text); }
+.wc-field-error { margin: 0.35rem 0 0; font-size: 0.72rem; font-weight: 750; }
+.wc-move-error { margin: 0.75rem 1rem 0; border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--wc-line)); border-radius: 0.8rem; background: var(--danger-subtle); padding: 0.7rem 0.8rem; color: var(--danger-text); font-size: 0.75rem; font-weight: 750; }
 
 .wc-preview { display: grid; gap: 0.45rem; }
 

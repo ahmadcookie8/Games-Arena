@@ -2,6 +2,10 @@ import { WisecrackerPhase, WisecrackerRevealedResponse, WisecrackerState } from 
 
 const WISECRACKER_PHASES: readonly WisecrackerPhase[] = ['lobby', 'prompt', 'answering', 'revealing', 'roundResult', 'completed']
 
+export const WISECRACKER_PROMPT_MAX_LENGTH = 240
+export const WISECRACKER_ANSWER_MAX_LENGTH = 160
+export const WISECRACKER_MAX_BLANKS = 10
+
 export type WisecrackerActionMode =
   | 'lobbyHost'
   | 'lobbyGuest'
@@ -123,6 +127,10 @@ export function getWisecrackerRoundProgress(stateValue: Partial<WisecrackerState
 
 export function splitWisecrackerPrompt(prompt: string): string[] {
   return prompt.includes('_') ? prompt.split(/_+/) : [prompt]
+}
+
+export function countWisecrackerBlanks(prompt: string): number {
+  return prompt.match(/_+/g)?.length ?? 0
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

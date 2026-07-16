@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { WisecrackerState } from '../types/game'
 import {
+  WISECRACKER_ANSWER_MAX_LENGTH,
+  WISECRACKER_MAX_BLANKS,
+  WISECRACKER_PROMPT_MAX_LENGTH,
+  countWisecrackerBlanks,
   getWisecrackerPhasePresentation,
   getWisecrackerRoundProgress,
   normalizeWisecrackerState,
@@ -149,5 +153,13 @@ describe('Wisecracker presentation helpers', () => {
       '.',
     ])
     expect(splitWisecrackerPrompt('___ text __')).toEqual(['', ' text ', ''])
+    expect(countWisecrackerBlanks('___ text __')).toBe(2)
+    expect(countWisecrackerBlanks('No blanks here')).toBe(0)
+  })
+
+  it('matches the server input limits', () => {
+    expect(WISECRACKER_PROMPT_MAX_LENGTH).toBe(240)
+    expect(WISECRACKER_ANSWER_MAX_LENGTH).toBe(160)
+    expect(WISECRACKER_MAX_BLANKS).toBe(10)
   })
 })

@@ -2,7 +2,6 @@ import { Game, IGameDocument } from '../models/Game'
 import { GameSnapshot } from '../models/GameSnapshot'
 import mongoose from 'mongoose'
 import { randomBytes, randomUUID } from 'crypto'
-import { redisSet, redisDel } from '../utils/redis'
 import { AppError, BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
 import { GameMode, GameType, SnakeBoardSize, TicTacToeDifficulty } from '../types/game'
 import { TicTacToe } from '../games/TicTacToe'
@@ -12,8 +11,21 @@ import { Uno } from '../games/Uno'
 import { President } from '../games/President'
 import { Wisecracker, WisecrackerAction, WisecrackerState } from '../games/Wisecracker'
 import { Scrabble, ScrabbleAction, ScrabbleState } from '../games/Scrabble'
-import { PropertyManagement, PMAction, PropertyManagementState } from '../games/PropertyManagement'
-import { emitChatMessage, emitGameOver, emitGameReplayCreated, emitGameUpdated, emitGamesChanged, emitMoveMade } from './socketNotifier'
+import {
+  getPropertyManagementInvariantViolations,
+  PropertyManagement,
+  PMAction,
+  PropertyManagementState,
+} from '../games/PropertyManagement'
+import {
+  emitChatMessage,
+  emitGameOver,
+  emitGameReplayCreated,
+  emitGameUpdated,
+  emitGamesChanged,
+  emitMoveMade,
+  emitPlayerPresenceChanged,
+} from './socketNotifier'
 import { userService } from './userService'
 import { logSecurityEvent } from '../utils/securityLogger'
 import { acquireRedisConcurrencySlot, releaseRedisConcurrencySlot } from '../middleware/rateLimit'
@@ -32,10 +44,16 @@ const GAME_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const GAME_CODE_LENGTH = 8
 const GAME_CODE_CREATE_ATTEMPTS = 5
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000
-const GAME_CACHE_TTL_SECONDS = 60 * 60
 const GAME_ID_PATTERN = /^[a-f0-9]{24}$/
 const MAX_PERSISTED_MOVE_HISTORY = 500
 const REPLAY_CLOCK_SKEW_MS = 2_000
+const GAMEPLAY_SAVE_ATTEMPTS = 4
+const PUBLISHED_MULTIPLAYER_GAME_TYPES = new Set<GameType>([
+  'ticTacToe',
+  'wisecracker',
+  'scrabble',
+  'propertyManagement',
+])
 
 function generateGameCode(): string {
   return Array.from(randomBytes(GAME_CODE_LENGTH), (byte) => GAME_CODE_ALPHABET[byte & 31]).join('')
@@ -403,6 +421,9 @@ function validateMazeChaseStateForGame(state: MazeChaseState): void {
 
 class GameService {
   async createGame(userId: string, username: string, gameType: GameType): Promise<IGameDocument> {
+    if (!PUBLISHED_MULTIPLAYER_GAME_TYPES.has(gameType)) {
+      throw new AppError('This game type is not available for live play', 409, 'GAME_TYPE_UNAVAILABLE')
+    }
     // Minimal model mocks used by unit tests do not expose countDocuments. The
     // production branch serializes count + create so concurrent requests cannot
     // both pass the 20-active-game guard.
@@ -451,8 +472,6 @@ class GameService {
       inviteExpiresAt: new Date(Date.now() + INVITE_TTL_MS),
       metadata: { ratedGame: false, mode: 'multiplayer', infiniteLetters: gameType === 'scrabble' ? false : undefined },
     })
-
-    await this.cacheGame(game)
 
     emitGamesChanged(game)
 
@@ -503,8 +522,6 @@ class GameService {
       metadata,
     })
 
-    await this.cacheGame(game)
-
     emitGamesChanged(game)
 
     return game
@@ -548,7 +565,6 @@ class GameService {
 
     game.lastMoveAt = new Date()
     await this.saveGame(game)
-    await this.cacheGame(game)
     emitGameUpdated(game)
     emitGamesChanged(game)
     return game
@@ -571,7 +587,6 @@ class GameService {
     game.lastMoveAt = new Date()
 
     await this.saveGame(game)
-    await this.cacheGame(game)
     emitGameUpdated(game)
     emitGamesChanged(game)
     return game
@@ -585,6 +600,9 @@ class GameService {
     const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
     if (getGameMode(game) !== 'multiplayer') throw new BadRequestError('Chat is only available in multiplayer games')
+    if (!PUBLISHED_MULTIPLAYER_GAME_TYPES.has(game.gameType)) {
+      throw new AppError('This game type is not available for live play', 409, 'GAME_TYPE_UNAVAILABLE')
+    }
 
     const player = game.players.find((p) => p.userId.toString() === userId)
     if (!player) throw new NotFoundError('Game')
@@ -604,12 +622,26 @@ class GameService {
       ...message,
       userId,
     }
-    game.chatMessages.push(message)
-    if (game.chatMessages.length > MAX_CHAT_MESSAGES) {
-      game.chatMessages = game.chatMessages.slice(-MAX_CHAT_MESSAGES) as typeof game.chatMessages
+
+    let updatedGame = game
+    if (typeof (Game as unknown as { findOneAndUpdate?: unknown }).findOneAndUpdate === 'function') {
+      const atomicUpdate = await Game.findOneAndUpdate(
+        { _id: gameId, 'players.userId': userId },
+        { $push: { chatMessages: { $each: [message], $slice: -MAX_CHAT_MESSAGES } } },
+        { new: true, runValidators: true }
+      )
+      if (!atomicUpdate) throw new NotFoundError('Game')
+      updatedGame = atomicUpdate
+    } else {
+      // Compatibility for focused unit tests that provide a minimal model.
+      game.chatMessages.push(message)
+      if (game.chatMessages.length > MAX_CHAT_MESSAGES) {
+        game.chatMessages = game.chatMessages.slice(-MAX_CHAT_MESSAGES) as typeof game.chatMessages
+      }
+      await this.saveGame(game)
     }
-    await this.saveGame(game)
-    emitChatMessage(game, publicMessage)
+
+    emitChatMessage(updatedGame, publicMessage)
     return publicMessage
   }
 
@@ -657,9 +689,26 @@ class GameService {
   }
 
   private async joinGameWithValidatedCode(gameCode: string, userId: string, username: string): Promise<IGameDocument> {
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      try {
+        return await this.joinGameAttempt(gameCode, userId, username)
+      } catch (error) {
+        const isCapacityConflict = error instanceof AppError && error.code === 'GAME_STATE_CONFLICT'
+        if (!isCapacityConflict || attempt === 8) throw error
+        await waitForGameplayRetry(attempt)
+      }
+    }
+
+    throw new AppError('Game state changed; refresh and try again', 409, 'GAME_STATE_CONFLICT')
+  }
+
+  private async joinGameAttempt(gameCode: string, userId: string, username: string): Promise<IGameDocument> {
     const game = await Game.findOne({ gameCode })
     if (!game) throw new NotFoundError('Game')
     if (getGameMode(game) !== 'multiplayer') throw new NotFoundError('Game')
+    if (!PUBLISHED_MULTIPLAYER_GAME_TYPES.has(game.gameType)) {
+      throw new AppError('This game type is not available for live play', 409, 'GAME_TYPE_UNAVAILABLE')
+    }
     if (gameCode.length === 6) {
       if (Date.now() >= config.legacyGameCodeCutoff) throw new NotFoundError('Game')
     } else if (!game.inviteExpiresAt || game.inviteExpiresAt.getTime() <= Date.now()) {
@@ -692,7 +741,6 @@ class GameService {
     }
     await this.saveGame(game)
 
-    await this.cacheGame(game)
     emitGameUpdated(game)
     emitGamesChanged(game)
 
@@ -700,27 +748,41 @@ class GameService {
   }
 
   async makeMove(gameId: string, userId: string, move: unknown): Promise<IGameDocument> {
-    const game = await this.findParticipantGame(gameId, userId)
-    if (!game) throw new NotFoundError('Game')
+    for (let attempt = 1; attempt <= GAMEPLAY_SAVE_ATTEMPTS; attempt += 1) {
+      const game = await this.findParticipantGame(gameId, userId)
+      if (!game) throw new NotFoundError('Game')
 
-    if (game.gameType === 'ticTacToe') {
-      if (typeof move !== 'string') throw new BadRequestError('Invalid Tic Tac Toe move')
-      return this.makeTicTacToeMoveOnGame(game, userId, move)
+      try {
+        if (game.gameType === 'ticTacToe') {
+          if (typeof move !== 'string') throw new BadRequestError('Invalid Tic Tac Toe move')
+          return await this.makeTicTacToeMoveOnGame(game, userId, move)
+        }
+
+        if (game.gameType === 'wisecracker') {
+          return await this.makeWisecrackerMoveOnGame(game, userId, move)
+        }
+
+        if (game.gameType === 'scrabble') {
+          return await this.makeScrabbleMoveOnGame(game, userId, move)
+        }
+
+        if (game.gameType === 'propertyManagement') {
+          return await this.makePropertyManagementMoveOnGame(game, userId, move)
+        }
+
+        throw new AppError(
+          'This game type is not available for live play',
+          409,
+          'GAME_TYPE_UNAVAILABLE'
+        )
+      } catch (error) {
+        const isGameplayConflict = error instanceof AppError && error.code === 'GAME_STATE_CONFLICT'
+        if (!isGameplayConflict || attempt === GAMEPLAY_SAVE_ATTEMPTS) throw error
+        await waitForGameplayRetry(attempt)
+      }
     }
 
-    if (game.gameType === 'wisecracker') {
-      return this.makeWisecrackerMoveOnGame(game, userId, move)
-    }
-
-    if (game.gameType === 'scrabble') {
-      return this.makeScrabbleMoveOnGame(game, userId, move)
-    }
-
-    if (game.gameType === 'propertyManagement') {
-      return this.makePropertyManagementMoveOnGame(game, userId, move)
-    }
-
-    throw new BadRequestError('Only Tic Tac Toe, Wisecracker, Scrabble, and Property Management are available right now')
+    throw new AppError('Game state changed; refresh and try again', 409, 'GAME_STATE_CONFLICT')
   }
 
   async setPlayerConnection(gameId: string, userId: string, isConnected: boolean): Promise<IGameDocument | null> {
@@ -734,13 +796,12 @@ class GameService {
         'players.$[player].isConnected': true,
         'players.$[player].connectedAt': new Date(),
       }
-      update.$inc = { __v: 1 }
     } else {
-      // Only the true -> false transition increments the counter. Competing
-      // disconnect cleanups therefore remain idempotent.
+      // Only the true -> false transition increments the presence counter.
+      // Presence deliberately does not advance the gameplay revision.
       query.players = { $elemMatch: { userId, isConnected: true } }
       update.$set = { 'players.$[player].isConnected': false }
-      update.$inc = { __v: 1, 'players.$[player].disconnectCount': 1 }
+      update.$inc = { 'players.$[player].disconnectCount': 1 }
     }
 
     const game = await Game.findOneAndUpdate(query, update, {
@@ -749,20 +810,15 @@ class GameService {
     })
     if (!game) return null
 
-    // Presence updates are atomic and deliberately independent of game-state
-    // optimistic concurrency. Invalidate instead of writing a potentially
-    // stale full-state cache entry while a move is committing concurrently.
-    await this.invalidateGameCache(game)
-    emitGameUpdated(game)
+    // Presence is a delta, not a full game-state replacement.
+    emitPlayerPresenceChanged(game, userId, isConnected)
     emitGamesChanged(game)
 
     return game
   }
 
   async makeTicTacToeMove(gameId: string, userId: string, move: string): Promise<IGameDocument> {
-    const game = await this.findParticipantGame(gameId, userId)
-    if (!game) throw new NotFoundError('Game')
-    return this.makeTicTacToeMoveOnGame(game, userId, move)
+    return this.makeMove(gameId, userId, move)
   }
 
   private async makeTicTacToeMoveOnGame(game: IGameDocument, userId: string, move: string): Promise<IGameDocument> {
@@ -816,21 +872,17 @@ class GameService {
     }
 
     await this.saveGame(game)
-    await this.cacheGame(game)
-
-    if (game.status === 'completed') {
-      await this.updateStatsForCompletedGame(game)
-    }
-
-    emitMoveMade(game, move)
-    emitGameUpdated(game)
-    emitGamesChanged(game)
+    const deliveredGame = game
+    emitMoveMade(deliveredGame, move)
+    emitGameUpdated(deliveredGame)
+    emitGamesChanged(deliveredGame)
 
     if (gameOver.isGameOver) {
-      emitGameOver(game)
+      emitGameOver(deliveredGame)
+      this.scheduleStatsReconciliation(deliveredGame)
     }
 
-    return game
+    return deliveredGame
   }
 
   async makeSinglePlayerTicTacToeMove(gameId: string, userId: string, move: string): Promise<IGameDocument> {
@@ -882,8 +934,6 @@ class GameService {
 
     game.lastMoveAt = new Date()
     await this.saveGame(game)
-    await this.cacheGame(game)
-
     if (gameOver.isGameOver) {
       await this.invalidateLeaderboardCacheBestEffort(game.gameType)
     }
@@ -969,8 +1019,6 @@ class GameService {
     }
 
     await this.saveGame(game)
-    await this.cacheGame(game)
-
     if (game.status === 'completed') {
       await this.invalidateLeaderboardCacheBestEffort(game.gameType)
       emitGameOver(game)
@@ -1020,8 +1068,6 @@ class GameService {
     }
 
     await this.saveGame(game)
-    await this.cacheGame(game)
-
     if (game.status === 'completed') {
       await this.invalidateLeaderboardCacheBestEffort(game.gameType)
       emitGameOver(game)
@@ -1156,7 +1202,6 @@ class GameService {
       completedGame = game
     }
 
-    await this.invalidateGameCache(completedGame)
     await this.invalidateLeaderboardCacheBestEffort(completedGame.gameType)
     emitGameUpdated(completedGame)
     emitGamesChanged(completedGame)
@@ -1194,6 +1239,7 @@ class GameService {
       const winner = game.players.find((p) => p.userId.toString() === nextState.matchWinnerUserId)
       game.status = 'completed'
       game.completedAt = new Date()
+      game.statsParticipantIds = nextState.activePlayerIds.map((playerId) => new mongoose.Types.ObjectId(playerId))
       game.result = {
         winner: winner?.userId,
         winnerName: winner?.username,
@@ -1204,21 +1250,17 @@ class GameService {
     }
 
     await this.saveGame(game)
-    await this.cacheGame(game)
+    const deliveredGame = game
+    emitMoveMade(deliveredGame, Wisecracker.getMoveDescription(action))
+    emitGameUpdated(deliveredGame)
+    emitGamesChanged(deliveredGame)
 
     if (game.status === 'completed') {
-      await this.updateStatsForCompletedGame(game)
+      emitGameOver(deliveredGame)
+      this.scheduleStatsReconciliation(deliveredGame)
     }
 
-    emitMoveMade(game, Wisecracker.getMoveDescription(action))
-    emitGameUpdated(game)
-    emitGamesChanged(game)
-
-    if (game.status === 'completed') {
-      emitGameOver(game)
-    }
-
-    return game
+    return deliveredGame
   }
 
   private async makePropertyManagementMoveOnGame(game: IGameDocument, userId: string, move: unknown): Promise<IGameDocument> {
@@ -1228,6 +1270,16 @@ class GameService {
     if (playerIndex === -1) throw new BadRequestError('You are not in this game')
 
     const nextState = PropertyManagement.applyAction(game.gameState as unknown as PropertyManagementState, action, userId)
+    const invariantViolations = getPropertyManagementInvariantViolations(nextState)
+    if (invariantViolations.length > 0) {
+      logSecurityEvent('game.property_management_invariant_failed', {
+        gameId: String(game._id),
+        userId,
+        socketEvent: action.type,
+        violationCount: invariantViolations.length,
+      }, 'error')
+      throw new AppError('The game state could not be safely advanced', 409, 'GAME_INVARIANT_VIOLATION')
+    }
     const player = game.players[playerIndex]
 
     game.gameState = nextState as unknown as Record<string, unknown>
@@ -1257,21 +1309,17 @@ class GameService {
     }
 
     await this.saveGame(game)
-    await this.cacheGame(game)
+    const deliveredGame = game
+    emitMoveMade(deliveredGame, PropertyManagement.getMoveDescription(action))
+    emitGameUpdated(deliveredGame)
+    emitGamesChanged(deliveredGame)
 
     if (game.status === 'completed') {
-      await this.updateStatsForCompletedGame(game)
+      emitGameOver(deliveredGame)
+      this.scheduleStatsReconciliation(deliveredGame)
     }
 
-    emitMoveMade(game, PropertyManagement.getMoveDescription(action))
-    emitGameUpdated(game)
-    emitGamesChanged(game)
-
-    if (game.status === 'completed') {
-      emitGameOver(game)
-    }
-
-    return game
+    return deliveredGame
   }
 
   private async makeScrabbleMoveOnGame(game: IGameDocument, userId: string, move: unknown): Promise<IGameDocument> {
@@ -1284,6 +1332,7 @@ class GameService {
     const players = game.players.map((player) => ({
       userId: player.userId.toString(),
       username: player.username,
+      isConnected: player.isConnected,
     }))
     const moveNumber = nextMoveNumber(game)
     const result = Scrabble.applyAction(
@@ -1292,7 +1341,8 @@ class GameService {
       userId,
       players,
       game.currentTurnIndex,
-      moveNumber
+      moveNumber,
+      game.players[0]?.userId.toString()
     )
     const player = game.players[playerIndex]
 
@@ -1307,6 +1357,7 @@ class GameService {
 
     const shouldAdvanceTurn = !result.completed
       && action.type !== 'offerTrade'
+      && action.type !== 'cancelTrade'
       && !(action.type === 'respondTrade' && !action.accept)
 
     if (result.completed) {
@@ -1329,21 +1380,17 @@ class GameService {
     }
 
     await this.saveGame(game)
-    await this.cacheGame(game)
+    const deliveredGame = game
+    emitMoveMade(deliveredGame, Scrabble.getMoveDescription(action))
+    emitGameUpdated(deliveredGame)
+    emitGamesChanged(deliveredGame)
 
     if (game.status === 'completed') {
-      await this.updateStatsForCompletedGame(game)
+      emitGameOver(deliveredGame)
+      this.scheduleStatsReconciliation(deliveredGame)
     }
 
-    emitMoveMade(game, Scrabble.getMoveDescription(action))
-    emitGameUpdated(game)
-    emitGamesChanged(game)
-
-    if (game.status === 'completed') {
-      emitGameOver(game)
-    }
-
-    return game
+    return deliveredGame
   }
 
   private advanceTurnSkippingGivenUp(game: IGameDocument): void {
@@ -1364,6 +1411,9 @@ class GameService {
     const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
     if (getGameMode(game) !== 'multiplayer') throw new BadRequestError('Only multiplayer games can be resigned')
+    if (!PUBLISHED_MULTIPLAYER_GAME_TYPES.has(game.gameType)) {
+      throw new AppError('This game type is not available for live play', 409, 'GAME_TYPE_UNAVAILABLE')
+    }
     if (game.status !== 'active') throw new BadRequestError('Game is not active')
     if (game.players.length !== 2) throw new BadRequestError('Resignation is only available in two-player games')
 
@@ -1385,11 +1435,10 @@ class GameService {
       verification: 'server',
     }
     await this.saveGame(game)
-    await this.invalidateGameCache(game)
-    await this.updateStatsForCompletedGame(game)
     emitGameUpdated(game)
     emitGamesChanged(game)
     emitGameOver(game)
+    this.scheduleStatsReconciliation(game)
 
     return { winner: opponent.username, reason: 'resignation' }
   }
@@ -1414,10 +1463,9 @@ class GameService {
     game.lastMoveAt = new Date()
     game.result = undefined
     game.statsProcessedAt = undefined
+    game.statsParticipantIds = undefined
 
     await this.saveGame(game)
-    await this.invalidateGameCache(game)
-
     if (isStartedMultiplayer) {
       logSecurityEvent('game.host_closed_in_progress', {
         gameId: String(game._id),
@@ -1440,6 +1488,9 @@ class GameService {
     const replayHost = sourceGame.players.find((player) => player.userId.toString() === userId)
     if (!replayHost) throw new NotFoundError('Game')
     if (getGameMode(sourceGame) !== 'multiplayer') throw new BadRequestError('Replay is only available for multiplayer games')
+    if (!PUBLISHED_MULTIPLAYER_GAME_TYPES.has(sourceGame.gameType)) {
+      throw new AppError('This game type is not available for live play', 409, 'GAME_TYPE_UNAVAILABLE')
+    }
     if (sourceGame.status !== 'completed') throw new BadRequestError('Only completed games can be replayed')
     if (sourceGame.gameType !== 'ticTacToe' && sourceGame.gameType !== 'scrabble') {
       throw new BadRequestError('Replay is not available for this game')
@@ -1484,7 +1535,6 @@ class GameService {
       },
     })
 
-    await this.cacheGame(replayGame)
     emitGameReplayCreated(sourceGame, replayGame, userId)
     emitGamesChanged(replayGame)
 
@@ -1555,22 +1605,6 @@ class GameService {
     }
   }
 
-  private async cacheGame(game: IGameDocument): Promise<void> {
-    try {
-      await redisSet(`game:${game.gameType}:${game._id}`, {
-        gameId: game._id,
-        gameType: game.gameType,
-        players: game.players,
-        currentTurnIndex: game.currentTurnIndex,
-        gameState: game.gameState,
-        status: game.status,
-        metadata: game.metadata,
-      }, GAME_CACHE_TTL_SECONDS)
-    } catch (error) {
-      logSecurityEvent('redis.game_cache_write_failed', { gameId: String(game._id), errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
-    }
-  }
-
   async getMoveHistory(gameId: string, userId: string, page: number, limit: number): Promise<{ moves: unknown[]; total: number }> {
     const game = await this.findParticipantGame(gameId, userId)
     if (!game) throw new NotFoundError('Game')
@@ -1611,14 +1645,6 @@ class GameService {
     }
   }
 
-  private async invalidateGameCache(game: IGameDocument): Promise<void> {
-    try {
-      await redisDel(`game:${game.gameType}:${game._id}`)
-    } catch (error) {
-      logSecurityEvent('redis.game_cache_invalidation_failed', { gameId: String(game._id), errorName: error instanceof Error ? error.name : 'unknown' }, 'error')
-    }
-  }
-
   private async invalidateLeaderboardCacheBestEffort(gameType: string): Promise<void> {
     try {
       await userService.invalidateLeaderboardCache(gameType)
@@ -1632,6 +1658,17 @@ class GameService {
     }
   }
 
+  private scheduleStatsReconciliation(game: IGameDocument): void {
+    setImmediate(() => {
+      void this.updateStatsForCompletedGame(game).catch((error) => {
+        logSecurityEvent('game.stats_reconciliation_unhandled', {
+          gameId: String(game._id),
+          errorName: error instanceof Error ? error.name : 'unknown',
+        }, 'error')
+      })
+    })
+  }
+
   private async updateStatsForCompletedGame(game: IGameDocument): Promise<boolean> {
     if (getGameMode(game) === 'singlePlayer') {
       return true
@@ -1641,21 +1678,21 @@ class GameService {
       return true
     }
 
+    const statsPlayerIds = getStatsParticipantIds(game)
+
     try {
       // User statistics are derived from verified game records rather than
       // incremented, so retrying this step is idempotent. Run it before marking
       // the game processed: a crash can then be safely reconciled/retried.
       if (game.result.isDraw) {
         await userService.updateStatsAfterGame({
-          drawPlayerIds: game.players.map((player) => player.userId.toString()),
+          drawPlayerIds: statsPlayerIds,
         })
       } else if (game.result.winner) {
         const winnerId = game.result.winner.toString()
         await userService.updateStatsAfterGame({
           winnerId,
-          loserIds: game.players
-            .map((player) => player.userId.toString())
-            .filter((playerId) => playerId !== winnerId),
+          loserIds: statsPlayerIds.filter((playerId) => playerId !== winnerId),
         })
       }
     } catch (error) {
@@ -1702,6 +1739,27 @@ function appendGameMove(
   if (game.moveHistory.length > MAX_PERSISTED_MOVE_HISTORY) {
     game.moveHistory = game.moveHistory.slice(-MAX_PERSISTED_MOVE_HISTORY) as typeof game.moveHistory
   }
+}
+
+function waitForGameplayRetry(attempt: number): Promise<void> {
+  const delayMs = Math.min(25, (attempt * 4) + Math.floor(Math.random() * 5))
+  return new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+
+function getStatsParticipantIds(game: IGameDocument): string[] {
+  const roomPlayerIds = game.players.map((player) => player.userId.toString())
+  const roomPlayers = new Set(roomPlayerIds)
+  const frozenIds = Array.isArray(game.statsParticipantIds)
+    ? game.statsParticipantIds.map((playerId) => playerId.toString())
+    : []
+  const wisecrackerIds = game.gameType === 'wisecracker'
+    && Array.isArray((game.gameState as { activePlayerIds?: unknown }).activePlayerIds)
+    ? (game.gameState as { activePlayerIds: unknown[] }).activePlayerIds.map(String)
+    : []
+  const eligibleIds = (frozenIds.length > 0 ? frozenIds : wisecrackerIds)
+    .filter((playerId) => roomPlayers.has(playerId))
+
+  return eligibleIds.length > 0 ? [...new Set(eligibleIds)] : roomPlayerIds
 }
 
 export const gameService = new GameService()
@@ -1764,8 +1822,14 @@ function parseScrabbleAction(move: unknown): ScrabbleAction {
     case 'respondTrade':
       return {
         type: 'respondTrade',
+        offerId: action.offerId === undefined ? undefined : String(action.offerId),
         accept: Boolean(action.accept),
         rackTileIds: Array.isArray(action.rackTileIds) ? action.rackTileIds.map(String) : undefined,
+      }
+    case 'cancelTrade':
+      return {
+        type: 'cancelTrade',
+        offerId: action.offerId === undefined ? undefined : String(action.offerId),
       }
     case 'pass':
       return { type: 'pass' }

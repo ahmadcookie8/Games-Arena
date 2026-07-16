@@ -97,6 +97,9 @@ describe('security migration safeguards', () => {
       statsProcessedMarkersToWrite: 2,
       usersToReconcile: 3,
       usersWhoseStatsChange: 3,
+      wisecrackerGamesNeedingResponseIdRepair: 0,
+      wisecrackerResponseIdsToWrite: 0,
+      wisecrackerUnresolvedWinnerReferences: 0,
     })
 
     expect(Game.bulkWrite).not.toHaveBeenCalled()
@@ -181,5 +184,114 @@ describe('security migration safeguards', () => {
       'leaderboard:v2:singlePlayer:mazeChase',
     ]))
     expect(closeRedisClient).toHaveBeenCalledTimes(1)
+  })
+
+  it('backfills missing Wisecracker response IDs without replacing valid IDs', async () => {
+    const firstUserId = '507f1f77bcf86cd799439011'
+    const secondUserId = '507f1f77bcf86cd799439012'
+    const existingResponseId = 'a'.repeat(32)
+    mockLeanFind(Game as unknown as { find: jest.Mock }, [{
+      _id: 'wisecracker-1',
+      status: 'active',
+      gameType: 'wisecracker',
+      gameState: {
+        submittedAnswers: {
+          [firstUserId]: ['first'],
+          [secondUserId]: ['second'],
+        },
+        responseIds: { [firstUserId]: existingResponseId },
+        roundWinnerUserId: secondUserId,
+      },
+    }])
+    mockLeanFind(User as unknown as { find: jest.Mock }, [])
+
+    const report = await runSecurityMigration(['--apply', '--backup-confirmed'])
+
+    expect(report).toMatchObject({
+      completedGames: 0,
+      wisecrackerGamesNeedingResponseIdRepair: 1,
+      wisecrackerResponseIdsToWrite: 1,
+      wisecrackerUnresolvedWinnerReferences: 0,
+    })
+    expect(Game.bulkWrite).toHaveBeenCalledWith([{
+      updateOne: {
+        filter: { _id: 'wisecracker-1' },
+        update: {
+          $set: {
+            'gameState.responseIds': {
+              [firstUserId]: existingResponseId,
+              [secondUserId]: expect.stringMatching(/^[a-f0-9]{32}$/),
+            },
+          },
+        },
+      },
+    }])
+    expect(User.bulkWrite).not.toHaveBeenCalled()
+  })
+
+  it('repairs duplicate Wisecracker response IDs while preserving the first valid mapping', async () => {
+    const firstUserId = '507f1f77bcf86cd799439011'
+    const secondUserId = '507f1f77bcf86cd799439012'
+    const duplicateResponseId = 'b'.repeat(32)
+    mockLeanFind(Game as unknown as { find: jest.Mock }, [{
+      _id: 'wisecracker-duplicate',
+      status: 'active',
+      gameType: 'wisecracker',
+      gameState: {
+        submittedAnswers: {
+          [firstUserId]: ['first'],
+          [secondUserId]: ['second'],
+        },
+        responseIds: {
+          [firstUserId]: duplicateResponseId,
+          [secondUserId]: duplicateResponseId,
+        },
+      },
+    }])
+    mockLeanFind(User as unknown as { find: jest.Mock }, [])
+
+    const report = await runSecurityMigration(['--apply', '--backup-confirmed'])
+
+    expect(report.wisecrackerResponseIdsToWrite).toBe(1)
+    expect(Game.bulkWrite).toHaveBeenCalledWith([{
+      updateOne: {
+        filter: { _id: 'wisecracker-duplicate' },
+        update: {
+          $set: {
+            'gameState.responseIds': {
+              [firstUserId]: duplicateResponseId,
+              [secondUserId]: expect.stringMatching(/^[a-f0-9]{32}$/),
+            },
+          },
+        },
+      },
+    }])
+    const operation = (Game.bulkWrite as jest.Mock).mock.calls[0][0][0]
+    expect(operation.updateOne.update.$set['gameState.responseIds'][secondUserId]).not.toBe(duplicateResponseId)
+  })
+
+  it('reports a historical Wisecracker winner that cannot be tied to a submitted response', async () => {
+    const submittedUserId = '507f1f77bcf86cd799439011'
+    const unresolvedWinnerId = '507f1f77bcf86cd799439012'
+    mockLeanFind(Game as unknown as { find: jest.Mock }, [{
+      _id: 'wisecracker-unresolved',
+      status: 'active',
+      gameType: 'wisecracker',
+      gameState: {
+        submittedAnswers: { [submittedUserId]: ['recoverable answer'] },
+        responseIds: {},
+        roundWinnerUserId: unresolvedWinnerId,
+      },
+    }])
+    mockLeanFind(User as unknown as { find: jest.Mock }, [])
+
+    const report = await runSecurityMigration([])
+
+    expect(report).toMatchObject({
+      wisecrackerGamesNeedingResponseIdRepair: 1,
+      wisecrackerResponseIdsToWrite: 1,
+      wisecrackerUnresolvedWinnerReferences: 1,
+    })
+    expect(Game.bulkWrite).not.toHaveBeenCalled()
   })
 })

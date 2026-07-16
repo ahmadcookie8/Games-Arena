@@ -6,10 +6,50 @@ import {
   singlePlayerReplaySchema,
 } from './validators'
 import { MAX_REPLAY_INPUTS, MAX_REPLAY_TICKS } from '@games-arena/game-engine'
+import { multiplayerActions } from '../../../frontend/src/lib/multiplayerActions'
 
 const gameId = '0123456789abcdef01234567'
 
 describe('security-sensitive socket validators', () => {
+  const tileId = 'A-1700000000000-abc123'
+  const offerId = 'da4ba04b-336d-45f5-a764-b7456c82d7bd'
+
+  it.each([
+    ['ticTacToe.place', multiplayerActions.ticTacToe.place('4')],
+    ['wisecracker.startMatch', multiplayerActions.wisecracker.startMatch(3)],
+    ['wisecracker.refreshPrompt', multiplayerActions.wisecracker.refreshPrompt()],
+    ['wisecracker.setPrompt', multiplayerActions.wisecracker.setPrompt('A _ needs _.')],
+    ['wisecracker.submitAnswers', multiplayerActions.wisecracker.submitAnswers(['first', 'second'])],
+    ['wisecracker.revealNextAnswer', multiplayerActions.wisecracker.revealNextAnswer()],
+    ['wisecracker.selectRoundWinner', multiplayerActions.wisecracker.selectRoundWinner('a'.repeat(32))],
+    ['wisecracker.startNextRound', multiplayerActions.wisecracker.startNextRound()],
+    ['scrabble.placeTiles', multiplayerActions.scrabble.placeTiles([{ rackTileId: tileId, row: 7, col: 7 }])],
+    ['scrabble.exchangeWithBag', multiplayerActions.scrabble.exchangeWithBag([tileId])],
+    ['scrabble.offerTrade', multiplayerActions.scrabble.offerTrade(gameId, [tileId])],
+    ['scrabble.acceptTrade', multiplayerActions.scrabble.acceptTrade(offerId, [tileId])],
+    ['scrabble.declineTrade', multiplayerActions.scrabble.declineTrade(offerId)],
+    ['scrabble.cancelTrade', multiplayerActions.scrabble.cancelTrade(offerId)],
+    ['scrabble.pass', multiplayerActions.scrabble.pass()],
+    ['scrabble.giveUp', multiplayerActions.scrabble.giveUp()],
+    ['propertyManagement.startGame', multiplayerActions.propertyManagement.startGame()],
+    ['propertyManagement.rollDice', multiplayerActions.propertyManagement.rollDice()],
+    ['propertyManagement.buyProperty', multiplayerActions.propertyManagement.buyProperty()],
+    ['propertyManagement.declineProperty', multiplayerActions.propertyManagement.declineProperty()],
+    ['propertyManagement.auctionBid', multiplayerActions.propertyManagement.auctionBid(125)],
+    ['propertyManagement.auctionPass', multiplayerActions.propertyManagement.auctionPass()],
+    ['propertyManagement.payJailFine', multiplayerActions.propertyManagement.payJailFine()],
+    ['propertyManagement.useGetOutOfJailCard', multiplayerActions.propertyManagement.useGetOutOfJailCard()],
+    ['propertyManagement.buildHouse', multiplayerActions.propertyManagement.buildHouse(1)],
+    ['propertyManagement.sellHouse', multiplayerActions.propertyManagement.sellHouse(1)],
+    ['propertyManagement.mortgageProperty', multiplayerActions.propertyManagement.mortgageProperty(1)],
+    ['propertyManagement.unmortgageProperty', multiplayerActions.propertyManagement.unmortgageProperty(1)],
+    ['propertyManagement.declareBankruptcy', multiplayerActions.propertyManagement.declareBankruptcy()],
+    ['propertyManagement.endTurn', multiplayerActions.propertyManagement.endTurn()],
+    ['propertyManagement.acknowledgeCard', multiplayerActions.propertyManagement.acknowledgeCard()],
+  ])('accepts the rendered frontend action contract for %s', (_name, move) => {
+    expect(makeMoveEventSchema.safeParse({ gameId, move }).success).toBe(true)
+  })
+
   it.each([
     null,
     [],
@@ -36,7 +76,54 @@ describe('security-sensitive socket validators', () => {
   it('bounds Wisecracker prompts and answers', () => {
     expect(makeMoveEventSchema.safeParse({ gameId, move: { type: 'setPrompt', prompt: 'x'.repeat(240) } }).success).toBe(true)
     expect(makeMoveEventSchema.safeParse({ gameId, move: { type: 'setPrompt', prompt: 'x'.repeat(241) } }).success).toBe(false)
+    expect(makeMoveEventSchema.safeParse({ gameId, move: { type: 'submitAnswers', answers: ['x'.repeat(160)] } }).success).toBe(true)
     expect(makeMoveEventSchema.safeParse({ gameId, move: { type: 'submitAnswers', answers: ['x'.repeat(161)] } }).success).toBe(false)
+  })
+
+  it('accepts UUID and legacy Scrabble tile IDs, including blank tiles', () => {
+    const uuidTileId = 'b3fdd5f9-92bb-4efe-8f8e-9122d2f307df'
+    const legacyTileId = 'A-1700000000000-abc123'
+    const legacyBlankTileId = '?-1700000000001-def456'
+
+    expect(makeMoveEventSchema.safeParse({
+      gameId,
+      move: { type: 'placeTiles', placements: [{ rackTileId: legacyBlankTileId, row: 7, col: 7, blankLetter: 'Q' }] },
+    }).success).toBe(true)
+    expect(makeMoveEventSchema.safeParse({
+      gameId,
+      move: { type: 'exchangeWithBag', rackTileIds: [uuidTileId, legacyTileId, legacyBlankTileId] },
+    }).success).toBe(true)
+    expect(makeMoveEventSchema.safeParse({
+      gameId,
+      move: { type: 'offerTrade', targetUserId: gameId, rackTileIds: [legacyBlankTileId] },
+    }).success).toBe(true)
+  })
+
+  it('validates Scrabble trade references without accepting arbitrary identifiers', () => {
+    const tileId = 'A-1700000000000-abc123'
+    const offerId = 'da4ba04b-336d-45f5-a764-b7456c82d7bd'
+    const legacyOfferId = '1700000000000-abc123'
+
+    expect(makeMoveEventSchema.safeParse({
+      gameId,
+      move: { type: 'respondTrade', offerId, accept: true, rackTileIds: [tileId] },
+    }).success).toBe(true)
+    expect(makeMoveEventSchema.safeParse({
+      gameId,
+      move: { type: 'cancelTrade', offerId: legacyOfferId },
+    }).success).toBe(true)
+    expect(makeMoveEventSchema.safeParse({
+      gameId,
+      move: { type: 'respondTrade', accept: false },
+    }).success).toBe(true)
+    expect(makeMoveEventSchema.safeParse({
+      gameId,
+      move: { type: 'exchangeWithBag', rackTileIds: ['q1'] },
+    }).success).toBe(false)
+    expect(makeMoveEventSchema.safeParse({
+      gameId,
+      move: { type: 'cancelTrade', offerId: { $ne: null } },
+    }).success).toBe(false)
   })
 
   it('bounds and trims chat without coercing values', () => {

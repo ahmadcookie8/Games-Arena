@@ -7,6 +7,7 @@ type SecurityLevel = 'info' | 'warn' | 'error'
 const FORBIDDEN_CONTEXT_KEY = /(authorization|cookie|token|secret|password|chat|message|text|answer|prompt)/i
 const IDENTITY_CONTEXT_KEY = /(^|_)(ip|email|identifier)$/i
 const MAX_CONTEXT_STRING_LENGTH = 200
+const RESERVED_LOG_FIELDS = new Set(['event', 'level', 'message', 'timestamp'])
 
 const logger = winston.createLogger({
   level: config.logLevel,
@@ -25,7 +26,7 @@ function hashIdentity(value: string): string {
 function sanitizeContext(context: Record<string, unknown>): Record<string, unknown> {
   const entries: Array<[string, unknown]> = []
   for (const [key, value] of Object.entries(context)) {
-    if (FORBIDDEN_CONTEXT_KEY.test(key) || value === undefined) continue
+    if (RESERVED_LOG_FIELDS.has(key) || FORBIDDEN_CONTEXT_KEY.test(key) || value === undefined) continue
     if (typeof value === 'string') {
       const sanitized = IDENTITY_CONTEXT_KEY.test(key)
         ? hashIdentity(value)

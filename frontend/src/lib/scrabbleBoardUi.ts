@@ -1,4 +1,4 @@
-import { GameStatus, ScrabbleScoreEvent } from '../types/game'
+import { GameStatus, Player, ScrabbleScoreEvent } from '../types/game'
 
 export const SCRABBLE_BOARD_DIMENSION = 15
 export const SCRABBLE_BOARD_BASE_SIZE = 660
@@ -91,6 +91,31 @@ export function getScrabbleLastPlayCenter(event: ScrabbleScoreEvent | null): Scr
     row: Math.round((Math.min(...rows) + Math.max(...rows)) / 2),
     col: Math.round((Math.min(...cols) + Math.max(...cols)) / 2),
   }
+}
+
+export function canExchangeScrabbleTiles(
+  selectedTileCount: number,
+  bagCount: number,
+  infiniteLetters: boolean,
+): boolean {
+  return selectedTileCount > 0 && (infiniteLetters || selectedTileCount <= Math.max(0, bagCount))
+}
+
+export function getEligibleScrabbleTradePlayers(
+  players: Player[],
+  currentUserId: string,
+  givenUpUserIds: string[],
+  rackCounts: Record<string, number>,
+  offeredTileCount: number,
+): Player[] {
+  const requiredRackSize = Math.max(1, offeredTileCount)
+  const givenUp = new Set(givenUpUserIds)
+  return players.filter((player) => (
+    player.userId !== currentUserId
+    && player.isConnected === true
+    && !givenUp.has(player.userId)
+    && (rackCounts[player.userId] ?? 0) >= requiredRackSize
+  ))
 }
 
 export function resolveScrabbleActionMode({

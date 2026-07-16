@@ -63,6 +63,10 @@ function id(value: string): { toString(): string } {
   return { toString: () => value }
 }
 
+function flushScheduledStats(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve))
+}
+
 function game(overrides: Record<string, unknown> = {}) {
   return {
     _id: id(gameId),
@@ -111,6 +115,7 @@ describe('gameService authorization and concurrency hardening', () => {
     Game.findOneAndUpdate.mockResolvedValue(activeGame)
 
     await expect(gameService.resignGame(gameId, aliceId)).resolves.toEqual({ winner: 'bob', reason: 'resignation' })
+    await flushScheduledStats()
     await expect(gameService.resignGame(gameId, aliceId)).rejects.toBeInstanceOf(BadRequestError)
 
     expect(userService.updateStatsAfterGame).toHaveBeenCalledTimes(1)
@@ -124,6 +129,7 @@ describe('gameService authorization and concurrency hardening', () => {
     userService.updateStatsAfterGame.mockRejectedValueOnce(new Error('temporary stats failure'))
 
     await expect(gameService.resignGame(gameId, aliceId)).resolves.toEqual({ winner: 'bob', reason: 'resignation' })
+    await flushScheduledStats()
 
     expect(activeGame.status).toBe('completed')
     expect(activeGame.statsProcessedAt).toBeUndefined()
@@ -167,16 +173,19 @@ describe('gameService authorization and concurrency hardening', () => {
   })
 
   it('turns optimistic join conflicts into an HTTP 409 error', async () => {
-    const waitingGame = game({
-      players: [{ userId: id(aliceId), username: 'alice', index: 0 }],
-      inviteExpiresAt: new Date(Date.now() + 60_000),
-    })
     const conflict = Object.assign(new Error('stale'), { name: 'VersionError' })
-    waitingGame.save = jest.fn().mockRejectedValue(conflict)
-    Game.findOne.mockResolvedValue(waitingGame)
+    Game.findOne.mockImplementation(async () => {
+      const freshGame = game({
+        players: [{ userId: id(aliceId), username: 'alice', index: 0 }],
+        inviteExpiresAt: new Date(Date.now() + 60_000),
+      })
+      freshGame.save = jest.fn().mockRejectedValue(conflict)
+      return freshGame
+    })
 
     const result = gameService.joinGame('ABCDEFGH', bobId, 'bob')
     await expect(result).rejects.toMatchObject<Partial<AppError>>({ statusCode: 409, code: 'GAME_STATE_CONFLICT' })
+    expect(Game.findOne).toHaveBeenCalledTimes(8)
   })
 
   it('caps persisted move history while keeping move numbers monotonic', async () => {

@@ -9,13 +9,14 @@ import {
   type MazeChaseState,
   type Point as MazePoint,
 } from '@games-arena/game-engine'
-import Header from '../components/Header'
-import Modal, { ModalVariant } from '../components/Modal'
+import { GameRouteLoading, GameRouteUnavailable } from '../components/GameRouteState'
+import GameShell, { GameShellLayout } from '../components/GameShell'
+import Modal, { type ModalAction, type ModalVariant } from '../components/Modal'
 import MoveHistory from '../components/MoveHistory'
-import PageBackdrop from '../components/PageBackdrop'
 import PlayerCard from '../components/PlayerCard'
 import { useGameState } from '../hooks/useGameState'
 import api from '../lib/api'
+import { getGameMode } from '../lib/gameCatalog'
 import {
   buildReplayPayload,
   createReplayRecorder,
@@ -60,14 +61,8 @@ interface ModalState {
   title: string
   message: string
   variant: ModalVariant
-  primaryAction?: {
-    label: string
-    onClick: () => void
-  }
-  secondaryAction?: {
-    label: string
-    onClick: () => void
-  }
+  primaryAction?: ModalAction
+  secondaryAction?: ModalAction
 }
 
 interface ReplayCompletionResponse {
@@ -268,12 +263,13 @@ export function normalizeLegacyMazeState(state: MazeChaseState, now = Date.now()
 export default function MazeChaseGame() {
   const { gameId } = useParams<{ gameId: string }>()
   const navigate = useNavigate()
-  const { game, loading, setGame } = useGameState(gameId)
+  const { game, loading, error, refetch, setGame } = useGameState(gameId)
   const [mazeState, setMazeState] = useState<MazeChaseState | null>(null)
   const [modal, setModal] = useState<ModalState | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [isStarting, setIsStarting] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
+  const [isClosing, setIsClosing] = useState(false)
   const [lastFacingDirection, setLastFacingDirection] = useState<Direction>('right')
   const [chompClosed, setChompClosed] = useState(false)
   const [wrapActorIds, setWrapActorIds] = useState<Set<string>>(new Set())
@@ -284,6 +280,8 @@ export default function MazeChaseGame() {
   const lastCheckpointAtRef = useRef(0)
   const completedRef = useRef(false)
   const sessionGameIdRef = useRef<string | null>(null)
+  const boardRef = useRef<HTMLDivElement>(null)
+  const closingRef = useRef(false)
   const startCheckpointConfirmedRef = useRef(false)
   const startPromiseRef = useRef<Promise<boolean> | null>(null)
   const replayRecorderRef = useRef(createReplayRecorder())
@@ -291,6 +289,10 @@ export default function MazeChaseGame() {
   const [replayStatus, setReplayStatus] = useState<ReplayRunStatus>('unranked')
   const [unrankedReason, setUnrankedReason] = useState<ReplayUnrankedReason>('legacy')
   const prefersReducedMotion = usePrefersReducedMotion()
+
+  useEffect(() => {
+    setMazeState(null)
+  }, [gameId])
   const mazeDirection = mazeState?.player.direction
   const mazeTickMs = mazeState?.tickMs
   const engineSeed = game?.replay && REPLAY_SEED_PATTERN.test(game.replay.seed)
@@ -298,7 +300,7 @@ export default function MazeChaseGame() {
     : LEGACY_FALLBACK_SEED
 
   useEffect(() => {
-    if (!game) return
+    if (!game || game.gameType !== 'mazeChase' || getGameMode(game) !== 'singlePlayer') return
     const rawState = game.gameState as unknown as MazeChaseState
     const state = normalizeLegacyMazeState(rawState)
     setMazeState(state)
@@ -342,7 +344,7 @@ export default function MazeChaseGame() {
   }, [mazeState])
 
   useEffect(() => {
-    if (!isPlaying || !mazeDirection || !isDirection(mazeDirection)) {
+    if (prefersReducedMotion || !isPlaying || !mazeDirection || !isDirection(mazeDirection)) {
       setChompClosed(false)
       return
     }
@@ -352,7 +354,7 @@ export default function MazeChaseGame() {
     }, Math.max(70, Math.floor((mazeTickMs ?? 140) / 2)))
 
     return () => window.clearInterval(interval)
-  }, [isPlaying, mazeDirection, mazeTickMs])
+  }, [isPlaying, mazeDirection, mazeTickMs, prefersReducedMotion])
 
   useEffect(() => {
     if (countdownRemaining === null) return
@@ -518,38 +520,49 @@ export default function MazeChaseGame() {
   const handleDirectionPress = useCallback((event: React.PointerEvent<HTMLButtonElement>, direction: Direction) => {
     event.preventDefault()
     setPendingDirection(direction)
+    boardRef.current?.focus({ preventScroll: true })
+  }, [setPendingDirection])
+
+  const handleDirectionClick = useCallback((event: React.MouseEvent<HTMLButtonElement>, direction: Direction) => {
+    if (event.detail !== 0) return
+    setPendingDirection(direction)
+    boardRef.current?.focus({ preventScroll: true })
   }, [setPendingDirection])
 
   const preventTouchContextMenu = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault()
   }, [])
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      const keyToDirection: Partial<Record<string, Direction>> = {
-        ArrowUp: 'up',
-        w: 'up',
-        W: 'up',
-        ArrowDown: 'down',
-        s: 'down',
-        S: 'down',
-        ArrowLeft: 'left',
-        a: 'left',
-        A: 'left',
-        ArrowRight: 'right',
-        d: 'right',
-        D: 'right',
-      }
-      const direction = keyToDirection[event.key]
-      if (!direction) return
-
+  function handleBoardKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
-      setPendingDirection(direction)
+      const current = latestStateRef.current
+      if (!current || current.isGameOver || game?.status !== 'active' || countdownRemaining !== null) return
+      if (!current.hasStarted) void startGame()
+      else setIsPlaying((value) => !value)
+      return
     }
 
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [setPendingDirection])
+    const keyToDirection: Partial<Record<string, Direction>> = {
+      ArrowUp: 'up',
+      w: 'up',
+      W: 'up',
+      ArrowDown: 'down',
+      s: 'down',
+      S: 'down',
+      ArrowLeft: 'left',
+      a: 'left',
+      A: 'left',
+      ArrowRight: 'right',
+      d: 'right',
+      D: 'right',
+    }
+    const direction = keyToDirection[event.key]
+    if (!direction) return
+
+    event.preventDefault()
+    setPendingDirection(direction)
+  }
 
   useEffect(() => {
     if (!latestStateRef.current || !isPlaying || game?.status !== 'active') return
@@ -627,8 +640,10 @@ export default function MazeChaseGame() {
   }, [game])
 
   async function confirmCloseGame() {
-    if (!game) return
+    if (!game || closingRef.current) return
 
+    closingRef.current = true
+    setIsClosing(true)
     try {
       const state = latestStateRef.current
       if (state && game.status === 'active') {
@@ -643,6 +658,9 @@ export default function MazeChaseGame() {
         message: getErrorMessage(err),
         variant: 'danger',
       })
+    } finally {
+      closingRef.current = false
+      setIsClosing(false)
     }
   }
 
@@ -672,6 +690,7 @@ export default function MazeChaseGame() {
       variant: 'warning',
       primaryAction: {
         label: 'Close game',
+        variant: 'danger',
         onClick: () => {
           void confirmCloseGame()
         },
@@ -686,8 +705,27 @@ export default function MazeChaseGame() {
   const pelletCells = useMemo(() => new Set((mazeState?.pellets || []).map(getCellKey)), [mazeState])
   const powerPelletCells = useMemo(() => new Set((mazeState?.powerPellets || []).map(getCellKey)), [mazeState])
 
-  if (loading || !mazeState) return <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">Loading game...</div>
-  if (!game) return <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">Game not found</div>
+  if (loading) return <GameRouteLoading label="Loading Maze Chase arena" />
+  if (!game) {
+    return (
+      <GameRouteUnavailable
+        title={error === 'Game not found' ? 'Maze Chase run not found' : 'This Maze Chase run is unavailable'}
+        description={error}
+        onRetry={refetch}
+        onBack={() => navigate('/?tab=singlePlayer')}
+      />
+    )
+  }
+  if (game.gameType !== 'mazeChase' || getGameMode(game) !== 'singlePlayer') {
+    return (
+      <GameRouteUnavailable
+        title="This is not a Maze Chase run"
+        description="Return to Single Player and open the matching arena from your active games."
+        onBack={() => navigate('/?tab=singlePlayer')}
+      />
+    )
+  }
+  if (!mazeState) return <GameRouteLoading label="Preparing Maze Chase board" />
 
   const isActive = game.status === 'active'
   const isCompleted = game.status === 'completed'
@@ -705,49 +743,36 @@ export default function MazeChaseGame() {
       ? 'border-warning/30 bg-warning-subtle text-warning-text'
       : 'border-accent/30 bg-accent-subtle text-accent'
 
-  return (
-    <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
-      <PageBackdrop intensity="quiet" />
-      <Header />
-      <main className="relative z-10 mx-auto max-w-7xl px-4 py-6 sm:px-6">
-        <div className="mb-6 flex flex-col gap-4 rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-5">
-          <button
-            onClick={() => navigate('/?tab=singlePlayer')}
-            className="w-fit cursor-pointer rounded-lg px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary"
-          >
-            Back
-          </button>
-          <div className="min-w-0 sm:text-center">
-            <h1 className="text-gradient truncate text-xl font-semibold">Maze Chase</h1>
-            <p className="text-sm text-text-muted">Level {mazeState.level} - {mazeState.lives} lives</p>
-          </div>
-          <div className="flex items-center gap-3">
-            {canStartNewRun && (
-              <button
-                type="button"
-                onClick={() => void retryGame()}
-                disabled={isRetrying}
-                className="cursor-pointer rounded-lg bg-accent px-3 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isRetrying ? 'Starting...' : 'Retry'}
-              </button>
-            )}
-            {isActive && (
-              <button
-                type="button"
-                onClick={promptCloseGame}
-                className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-2 text-sm font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
-              >
-                Close game
-              </button>
-            )}
-            <div className={`w-fit rounded-full px-3 py-1 text-sm font-medium ${isCompleted || mazeState.isGameOver ? 'bg-success-subtle text-success-text' : 'bg-accent-subtle text-accent'}`}>
-              Score {mazeState.score}
-            </div>
-          </div>
-        </div>
+  const routeStatus = mazeState.isGameOver || isCompleted
+    ? `Run complete · Score ${mazeState.score}`
+    : isCountingDown
+      ? `Starting in ${countdownRemaining}`
+      : !mazeState.hasStarted
+        ? 'Ready to start'
+        : isPlaying
+          ? `Playing · Score ${mazeState.score}`
+          : `Paused · Score ${mazeState.score}`
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+  return (
+    <>
+      <GameShell
+        eyebrow={`Level ${mazeState.level} · ${mazeState.lives} ${mazeState.lives === 1 ? 'life' : 'lives'}`}
+        title="Maze Chase"
+        statusLabel={routeStatus}
+        statusTone={mazeState.isGameOver || isCompleted ? 'success' : !isPlaying && mazeState.hasStarted ? 'warning' : 'default'}
+        onBack={() => navigate('/?tab=singlePlayer')}
+        onClose={isActive ? promptCloseGame : undefined}
+        primaryAction={canStartNewRun ? {
+          label: isRetrying ? 'Starting…' : 'Retry',
+          onClick: () => void retryGame(),
+          disabled: isRetrying,
+        } : undefined}
+        width="standard"
+      >
+        <GameShellLayout
+          inspectorTitle="Maze details"
+          inspectorDescription="Review the player and this run's move history."
+          playfield={(
           <section className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl sm:p-5">
             <div className="mb-5 rounded-xl border border-border bg-page p-3">
               <div className="grid grid-cols-3 gap-3 text-center text-sm">
@@ -785,7 +810,7 @@ export default function MazeChaseGame() {
                   type="button"
                   onClick={() => void retryGame()}
                   disabled={isRetrying}
-                  className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+                  className="ui-action-primary interactive-lift min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold shadow-accent disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isRetrying ? 'Starting...' : 'Retry'}
                 </button>}
@@ -793,9 +818,14 @@ export default function MazeChaseGame() {
             )}
             <div className="mx-auto w-full max-w-[min(92vw,72vh,42rem)]">
               <div
-                className="relative aspect-square overflow-hidden rounded-xl border border-border bg-sunken shadow-sm outline-none"
+                ref={boardRef}
+                className="relative aspect-square overflow-hidden rounded-xl border border-border bg-sunken shadow-sm outline-none focus-visible:ring-3 focus-visible:ring-border-focus focus-visible:ring-offset-4 focus-visible:ring-offset-page"
                 tabIndex={0}
-                aria-label="Maze Chase board"
+                role="button"
+                aria-pressed={isPlaying}
+                aria-disabled={!isActive || mazeState.isGameOver || isCountingDown || undefined}
+                onKeyDown={handleBoardKeyDown}
+                aria-label={`Maze Chase board. Player at row ${mazeState.player.position.y + 1}, column ${mazeState.player.position.x + 1}. ${mazeState.ghosts.filter((ghost) => ghost.mode !== 'hidden').length} ghosts active. Use WASD or arrow keys to steer.`}
               >
                 <div
                   className="absolute inset-1 grid overflow-hidden rounded-lg"
@@ -816,6 +846,7 @@ export default function MazeChaseGame() {
                     return (
                       <div
                         key={key}
+                        aria-hidden="true"
                         className="relative min-h-0 min-w-0 overflow-hidden bg-[oklch(10%_0.03_265)]"
                       >
                         {isWallCell && <img src={WALL_TILES[getWallTileKey(mazeState.maze, x, y)]} alt="" className="absolute inset-0 block h-full w-full object-fill" draggable={false} />}
@@ -847,7 +878,7 @@ export default function MazeChaseGame() {
                   />
                 </div>
                 {isCountingDown && (
-                  <div className="pointer-events-none absolute inset-1 z-40 flex items-center justify-center rounded-lg bg-black/35 backdrop-blur-[1px]">
+                  <div className="pointer-events-none absolute inset-1 z-40 flex items-center justify-center rounded-lg bg-black/35 backdrop-blur-[1px]" role="status" aria-live="assertive" aria-label={`Maze starts in ${countdownRemaining}`}>
                     <div className="flex h-24 w-24 items-center justify-center rounded-full border border-white/30 bg-surface/85 text-5xl font-bold text-text-primary shadow-lg">
                       {countdownRemaining}
                     </div>
@@ -861,12 +892,14 @@ export default function MazeChaseGame() {
                     if (isCountingDown) return
                     if (!mazeState.hasStarted) {
                       void startGame()
+                      window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                       return
                     }
                     setIsPlaying((value) => !value)
+                    window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                   }}
                   disabled={!isActive || mazeState.isGameOver || isCountingDown || isStarting}
-                  className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+                  className="ui-action-primary interactive-lift min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold shadow-accent disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isStarting ? 'Starting...' : !mazeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
@@ -874,33 +907,36 @@ export default function MazeChaseGame() {
               </div>
               <div className="mx-auto mt-4 grid w-44 select-none grid-cols-3 gap-2 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent] sm:hidden" aria-label="Touch controls">
                 <span />
-                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'up')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Up</button>
+                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'up')} onClick={(event) => handleDirectionClick(event, 'up')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Up</button>
                 <span />
-                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'left')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Left</button>
+                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'left')} onClick={(event) => handleDirectionClick(event, 'left')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Left</button>
                 <button
                   type="button"
                   onClick={() => {
                     if (isCountingDown) return
                     if (!mazeState.hasStarted) {
                       void startGame()
+                      window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                       return
                     }
                     setIsPlaying((value) => !value)
+                    window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                   }}
                   disabled={!isActive || mazeState.isGameOver || isCountingDown || isStarting}
-                  className="min-h-12 rounded-lg bg-accent text-xs font-bold text-text-on-accent disabled:opacity-60"
+                  className="ui-action-primary min-h-12 rounded-xl text-xs font-bold shadow-accent disabled:opacity-60"
                 >
                   {isStarting ? 'Starting' : !mazeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
-                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'right')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Right</button>
+                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'right')} onClick={(event) => handleDirectionClick(event, 'right')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Right</button>
                 <span />
-                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'down')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Down</button>
+                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'down')} onClick={(event) => handleDirectionClick(event, 'down')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Down</button>
                 <span />
               </div>
             </div>
           </section>
-
-          <aside className="min-w-0 space-y-4">
+          )}
+          desktopInspector={(
+          <div className="min-w-0 space-y-4">
             <div className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl">
               <h3 className="mb-3 text-base font-semibold text-text-primary">Player</h3>
               <div className="space-y-2">
@@ -910,20 +946,25 @@ export default function MazeChaseGame() {
               </div>
             </div>
             <MoveHistory moves={game.moveHistory} />
-          </aside>
-        </div>
-      </main>
+          </div>
+          )}
+        />
+      </GameShell>
 
       <Modal
         isOpen={Boolean(modal)}
         title={modal?.title || ''}
         variant={modal?.variant}
-        primaryAction={modal?.primaryAction}
+        primaryAction={modal?.primaryAction ? {
+          ...modal.primaryAction,
+          loading: isClosing && modal.primaryAction.variant === 'danger',
+          loadingText: 'Closing game…',
+        } : undefined}
         secondaryAction={modal?.secondaryAction}
-        onClose={() => setModal(null)}
+        onClose={() => { if (!isClosing) setModal(null) }}
       >
         {modal?.message}
       </Modal>
-    </div>
+    </>
   )
 }

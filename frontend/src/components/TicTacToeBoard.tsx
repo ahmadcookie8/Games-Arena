@@ -1,4 +1,5 @@
 import { Circle, X } from 'lucide-react'
+import { multiplayerActions, type TicTacToeMove } from '../lib/multiplayerActions'
 import { normalizeTicTacToeBoard, TicTacToeSymbol } from '../lib/ticTacToeUi'
 import './tic-tac-toe-tabletop.css'
 
@@ -10,13 +11,15 @@ interface TicTacToeState {
 export interface TicTacToeBoardProps {
   gameState: Record<string, unknown>
   isMyTurn: boolean
-  onMove: (move: string) => void
+  onMove: (move: TicTacToeMove) => void
   latestMoveIndex?: number | null
   winningCells?: readonly number[]
   isBusy?: boolean
   isComplete?: boolean
   disabledReason?: string
 }
+
+const TIC_TAC_TOE_CELLS: TicTacToeMove[] = ['0', '1', '2', '3', '4', '5', '6', '7', '8']
 
 export default function TicTacToeBoard({
   gameState,
@@ -53,7 +56,7 @@ export default function TicTacToeBoard({
           <button
             key={index}
             type="button"
-            onClick={() => onMove(String(index))}
+            onClick={() => onMove(multiplayerActions.ticTacToe.place(TIC_TAC_TOE_CELLS[index]))}
             disabled={disabled}
             aria-label={`Row ${row}, column ${column}, ${cell || 'empty'}${isLatest ? ', latest move' : ''}${isWinning ? ', winning square' : ''}`}
             title={disabled ? unavailableReason : `Play ${currentSymbol} at row ${row}, column ${column}`}

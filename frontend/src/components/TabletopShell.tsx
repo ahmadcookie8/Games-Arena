@@ -1,6 +1,13 @@
-import { useEffect, useRef } from 'react'
-import { LucideIcon, X } from 'lucide-react'
-import { getTabletopTabIndex, shouldWrapSheetFocus } from '../lib/tabletopUi'
+import { useRef } from 'react'
+import { ArrowLeft, type LucideIcon } from 'lucide-react'
+import { getTabletopTabIndex } from '../lib/tabletopUi'
+import {
+  BottomSheet,
+  BottomSheetContent,
+  BottomSheetDescription,
+  BottomSheetHeader,
+  BottomSheetTitle,
+} from './ui'
 import './tabletop-shell.css'
 
 export interface TabletopAction {
@@ -18,6 +25,7 @@ interface TabletopRouteMastheadProps {
   onBack: () => void
   onClose?: () => void
   primaryAction?: TabletopAction
+  announceStatus?: boolean
 }
 
 export function TabletopRouteMasthead({
@@ -29,10 +37,14 @@ export function TabletopRouteMasthead({
   onBack,
   onClose,
   primaryAction,
+  announceStatus = false,
 }: TabletopRouteMastheadProps) {
   return (
     <header className="tabletop-route-masthead">
-      <button type="button" onClick={onBack} className="tabletop-route-masthead__back">Back</button>
+      <button type="button" onClick={onBack} className="tabletop-route-masthead__back">
+        <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+        <span>Back</span>
+      </button>
       <div className="min-w-0">
         <p className="tabletop-eyebrow">{eyebrow}</p>
         <h1 className="tabletop-route-masthead__title">{title}</h1>
@@ -43,7 +55,7 @@ export function TabletopRouteMasthead({
         )}
       </div>
       <div className="tabletop-route-masthead__actions">
-        <span className={`tabletop-route-status tabletop-route-status--${statusTone}`} aria-live="polite">
+        <span className={`tabletop-route-status tabletop-route-status--${statusTone}`} aria-live={announceStatus ? 'polite' : undefined}>
           {statusLabel}
         </span>
         {primaryAction && (
@@ -141,6 +153,45 @@ export function TabletopTabs<T extends string>({
   )
 }
 
+interface TabletopDockButtonsProps<T extends string> {
+  tabs: TabletopTab<T>[]
+  activeTab: T
+  onSelect: (tab: T) => void
+  ariaLabel: string
+  isOpen: boolean
+}
+
+export function TabletopDockButtons<T extends string>({
+  tabs,
+  activeTab,
+  onSelect,
+  ariaLabel,
+  isOpen,
+}: TabletopDockButtonsProps<T>) {
+  return (
+    <div className="tabletop-tabs tabletop-tabs--dock" role="group" aria-label={ariaLabel}>
+      {tabs.map((tab) => {
+        const Icon = tab.icon
+        const selected = activeTab === tab.id
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded={isOpen && selected}
+            onClick={() => onSelect(tab.id)}
+            className={selected ? 'is-active' : ''}
+          >
+            {Icon && <Icon className="h-4 w-4" aria-hidden="true" />}
+            <span>{tab.label}</span>
+            {tab.badge !== undefined && tab.badge !== 0 && <span className="tabletop-tab-badge">{tab.badge}</span>}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 interface TabletopBottomSheetProps {
   isOpen: boolean
   title: string
@@ -149,93 +200,16 @@ interface TabletopBottomSheetProps {
   idBase?: string
 }
 
-const FOCUSABLE_SELECTOR = [
-  'a[href]',
-  'button:not([disabled])',
-  'input:not([disabled])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
-  '[tabindex]:not([tabindex="-1"])',
-].join(',')
-
 export function TabletopBottomSheet({ isOpen, title, onClose, children, idBase = 'tabletop-sheet' }: TabletopBottomSheetProps) {
-  const panelRef = useRef<HTMLElement>(null)
-  const previousFocusRef = useRef<HTMLElement | null>(null)
-  const onCloseRef = useRef(onClose)
-
-  useEffect(() => {
-    onCloseRef.current = onClose
-  }, [onClose])
-
-  useEffect(() => {
-    if (!isOpen) return
-    const desktopQuery = window.matchMedia('(min-width: 1120px)')
-    if (desktopQuery.matches) {
-      onCloseRef.current()
-      return
-    }
-    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    panelRef.current?.focus()
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        onCloseRef.current()
-        return
-      }
-      if (event.key !== 'Tab' || !panelRef.current) return
-      const focusable = Array.from(panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-      const activeIndex = focusable.findIndex((element) => element === document.activeElement)
-      const wrapIndex = shouldWrapSheetFocus(activeIndex, focusable.length, event.shiftKey)
-      if (wrapIndex === -1) {
-        event.preventDefault()
-        panelRef.current.focus()
-        return
-      }
-      if (wrapIndex !== null) {
-        event.preventDefault()
-        focusable[wrapIndex]?.focus()
-      }
-    }
-
-    function handleDesktopChange(event: MediaQueryListEvent) {
-      if (event.matches) onCloseRef.current()
-    }
-
-    document.addEventListener('keydown', handleKeyDown)
-    desktopQuery.addEventListener('change', handleDesktopChange)
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-      desktopQuery.removeEventListener('change', handleDesktopChange)
-      document.body.style.overflow = previousOverflow
-      previousFocusRef.current?.focus()
-    }
-  }, [isOpen])
-
-  if (!isOpen) return null
-
   return (
-    <div className="tabletop-bottom-sheet" role="presentation">
-      <button type="button" className="tabletop-bottom-sheet__backdrop" aria-label="Close game information" onClick={onClose} tabIndex={-1} />
-      <section
-        ref={panelRef}
-        className="tabletop-bottom-sheet__panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={`${idBase}-title`}
-        tabIndex={-1}
-      >
-        <div className="tabletop-bottom-sheet__handle" aria-hidden="true" />
-        <header className="tabletop-bottom-sheet__header">
-          <h2 id={`${idBase}-title`}>{title}</h2>
-          <button type="button" onClick={onClose} aria-label="Close" className="tabletop-sheet-close">
-            <X className="h-5 w-5" aria-hidden="true" />
-          </button>
-        </header>
-        <div className="tabletop-bottom-sheet__content">{children}</div>
-      </section>
-    </div>
+    <BottomSheet open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
+      <BottomSheetContent className="sm:max-w-3xl">
+        <BottomSheetHeader>
+          <BottomSheetTitle id={`${idBase}-title`}>{title}</BottomSheetTitle>
+          <BottomSheetDescription className="sr-only">Game information and controls.</BottomSheetDescription>
+        </BottomSheetHeader>
+        <div>{children}</div>
+      </BottomSheetContent>
+    </BottomSheet>
   )
 }

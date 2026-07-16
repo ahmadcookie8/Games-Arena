@@ -41,36 +41,21 @@ import {
   getPropertyBoardSide,
   resolvePropertyActionMode,
   stepPropertyBoardZoom,
+  validatePropertyAuctionBid,
 } from '../lib/propertyManagementBoard'
+import { multiplayerActions, type PropertyManagementMove } from '../lib/multiplayerActions'
 import GameChat from './GameChat'
 import Modal from './Modal'
-import { TabletopBottomSheet, TabletopTab, TabletopTabs } from './TabletopShell'
+import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs, type TabletopTab } from './TabletopShell'
 import './property-management.css'
-
-type PropertyManagementMove =
-  | { type: 'startGame' }
-  | { type: 'rollDice' }
-  | { type: 'buyProperty' }
-  | { type: 'declineProperty' }
-  | { type: 'auctionBid'; amount: number }
-  | { type: 'auctionPass' }
-  | { type: 'payJailFine' }
-  | { type: 'useGetOutOfJailCard' }
-  | { type: 'buildHouse'; squareIndex: number }
-  | { type: 'sellHouse'; squareIndex: number }
-  | { type: 'mortgageProperty'; squareIndex: number }
-  | { type: 'unmortgageProperty'; squareIndex: number }
-  | { type: 'declareBankruptcy' }
-  | { type: 'endTurn' }
-  | { type: 'acknowledgeCard' }
 
 type InspectorTab = 'tile' | 'portfolio' | 'players' | 'chat'
 
 interface Props {
   game: Game
   user: User | null
-  onMove: (move: PropertyManagementMove) => Promise<{ success: boolean; error?: string }>
-  onSendChat: (text: string) => Promise<{ success: boolean; error?: string }>
+  onMove: (move: PropertyManagementMove) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
+  onSendChat: (text: string) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
 }
 
 const EMPTY_PLAYER_ORDER: string[] = []
@@ -228,15 +213,20 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
     playerOrder.map((id) => state.playerStates[id]).filter(Boolean)
   ), [playerOrder, state.playerStates])
 
-  async function act(move: PropertyManagementMove) {
-    if (loading) return
+  async function act(move: PropertyManagementMove): Promise<boolean> {
+    if (loading) return false
     setError(null)
     setLoading(true)
     try {
       const result = await onMove(move)
-      if (!result.success) setError(result.error ?? 'Action failed')
+      if (!result.success) {
+        if (!result.handledGlobally) setError(result.error ?? 'Action failed')
+        return false
+      }
+      return true
     } catch {
       setError('Network error')
+      return false
     } finally {
       setLoading(false)
     }
@@ -244,13 +234,19 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
 
   function confirmBankruptcy() {
     setShowBankruptcyModal(false)
-    void act({ type: 'declareBankruptcy' })
+    void act(multiplayerActions.propertyManagement.declareBankruptcy())
   }
 
   function selectSquare(squareIndex: number) {
     setSelectedSquareIndex(squareIndex)
     setActiveTab('tile')
     if (window.matchMedia('(max-width: 1119px)').matches) setSheetOpen(true)
+  }
+
+  function focusSquare(squareIndex: number) {
+    setSelectedSquareIndex(squareIndex)
+    setActiveTab('tile')
+    setFocusRequest((current) => current + 1)
   }
 
   function openInspector(tab: InspectorTab) {
@@ -282,7 +278,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
           {isHost ? (
             <PrimaryButton
               disabled={playerOrder.length < 2 || loading}
-              onClick={() => void act({ type: 'startGame' })}
+              onClick={() => void act(multiplayerActions.propertyManagement.startGame())}
             >
               {playerOrder.length < 2 ? 'Waiting for another player' : 'Start the game'}
             </PrimaryButton>
@@ -321,7 +317,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-text-muted">Card drawn</p>
                 <p className="mt-2 text-sm leading-6 text-text-primary">{pending.cardText}</p>
               </div>
-              <PrimaryButton onClick={() => void act({ type: 'acknowledgeCard' })} disabled={loading}>Continue</PrimaryButton>
+              <PrimaryButton onClick={() => void act(multiplayerActions.propertyManagement.acknowledgeCard())} disabled={loading}>Continue</PrimaryButton>
             </>
           )}
 
@@ -334,14 +330,14 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
                   <div className="pm-inline-notice pm-inline-notice--warning">
                     In jail · attempt {(myPlayer.jailRollCount ?? 0) + 1} of 3
                   </div>
-                  <SecondaryButton onClick={() => void act({ type: 'payJailFine' })} disabled={(myPlayer.money ?? 0) < 50 || loading}>Pay $50 fine</SecondaryButton>
+                  <SecondaryButton onClick={() => void act(multiplayerActions.propertyManagement.payJailFine())} disabled={(myPlayer.money ?? 0) < 50 || loading}>Pay $50 fine</SecondaryButton>
                   {(myPlayer.getOutOfJailFreeCards ?? 0) > 0 && (
-                    <SecondaryButton onClick={() => void act({ type: 'useGetOutOfJailCard' })} disabled={loading}>Use jail card</SecondaryButton>
+                    <SecondaryButton onClick={() => void act(multiplayerActions.propertyManagement.useGetOutOfJailCard())} disabled={loading}>Use jail card</SecondaryButton>
                   )}
                 </div>
               )}
-              {mode === 'preRoll' && <PrimaryButton onClick={() => void act({ type: 'rollDice' })} disabled={loading}>Roll the dice</PrimaryButton>}
-              {mode === 'postRoll' && <PrimaryButton onClick={() => void act({ type: 'endTurn' })} disabled={loading}>End turn</PrimaryButton>}
+              {mode === 'preRoll' && <PrimaryButton onClick={() => void act(multiplayerActions.propertyManagement.rollDice())} disabled={loading}>Roll the dice</PrimaryButton>}
+              {mode === 'postRoll' && <PrimaryButton onClick={() => void act(multiplayerActions.propertyManagement.endTurn())} disabled={loading}>End turn</PrimaryButton>}
               <button
                 disabled={loading}
                 onClick={() => setShowBankruptcyModal(true)}
@@ -367,11 +363,11 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
         <PropertySummary square={square} />
         <PrimaryButton
           disabled={!canAfford || loading}
-          onClick={() => void act({ type: 'buyProperty' })}
+          onClick={() => void act(multiplayerActions.propertyManagement.buyProperty())}
         >
           {canAfford ? `Buy for ${formatMoney(square?.price ?? 0)}` : `Need ${formatMoney(square?.price ?? 0)}`}
         </PrimaryButton>
-        <SecondaryButton onClick={() => void act({ type: 'declineProperty' })} disabled={loading}>Send to auction</SecondaryButton>
+        <SecondaryButton onClick={() => void act(multiplayerActions.propertyManagement.declineProperty())} disabled={loading}>Send to auction</SecondaryButton>
       </div>
     )
   }
@@ -379,6 +375,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
   function AuctionBlock({ auction }: { auction: PMAuctionState }) {
     const highBidder = auction.highBidderUserId ? state.playerStates[auction.highBidderUserId]?.username : null
     const isBidder = auction.activeUserIds[auction.currentBidderIndex] === myId
+    const bidValidation = validatePropertyAuctionBid(auctionBidAmount, auction.currentBid, myPlayer?.money ?? 0)
 
     return (
       <div className="space-y-3">
@@ -392,19 +389,27 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
             <input
               id="property-auction-bid"
               type="number"
+              step={1}
+              inputMode="numeric"
               min={auction.currentBid + 1}
               max={myPlayer?.money ?? 0}
               value={auctionBidAmount}
               onChange={(event) => setAuctionBidAmount(event.target.value)}
               placeholder={`Minimum ${formatMoney(auction.currentBid + 1)}`}
               className="pm-input"
+              aria-describedby="property-auction-bid-help"
             />
+            <p id="property-auction-bid-help" className={`text-xs ${auctionBidAmount && !bidValidation.valid ? 'text-danger-text' : 'text-text-muted'}`}>
+              {auctionBidAmount && !bidValidation.valid ? bidValidation.error : `Available cash: ${formatMoney(myPlayer?.money ?? 0)}`}
+            </p>
             <div className="grid grid-cols-2 gap-2">
               <button
-                disabled={!auctionBidAmount || Number(auctionBidAmount) <= auction.currentBid || loading}
+                disabled={!bidValidation.valid || loading}
                 onClick={() => {
-                  void act({ type: 'auctionBid', amount: Number(auctionBidAmount) })
-                  setAuctionBidAmount('')
+                  if (!bidValidation.valid) return
+                  void act(multiplayerActions.propertyManagement.auctionBid(bidValidation.amount)).then((success) => {
+                    if (success) setAuctionBidAmount('')
+                  })
                 }}
                 className="pm-primary-button mt-0"
               >
@@ -412,7 +417,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
               </button>
               <button
                 disabled={loading}
-                onClick={() => void act({ type: 'auctionPass' })}
+                onClick={() => void act(multiplayerActions.propertyManagement.auctionPass())}
                 className="pm-secondary-button mt-0"
               >
                 Pass
@@ -506,22 +511,22 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
                   {canManage && (
                     <div className="flex flex-wrap gap-2 border-t border-border/50 px-3 py-3">
                       {canBuildHouse(state, myId, square.index) && (
-                        <SmallButton onClick={() => void act({ type: 'buildHouse', squareIndex: square.index })} disabled={loading}>
+                        <SmallButton onClick={() => void act(multiplayerActions.propertyManagement.buildHouse(square.index))} disabled={loading}>
                           {getBuildActionLabel(ownership.houses)} · {formatMoney(square.houseCost ?? 0)}
                         </SmallButton>
                       )}
                       {canSellHouse(state, myId, square.index) && (
-                        <SmallButton onClick={() => void act({ type: 'sellHouse', squareIndex: square.index })} disabled={loading}>
+                        <SmallButton onClick={() => void act(multiplayerActions.propertyManagement.sellHouse(square.index))} disabled={loading}>
                           Sell · +{formatMoney(Math.floor((square.houseCost ?? 0) / 2))}
                         </SmallButton>
                       )}
                       {canMortgage(state, myId, square.index) && (
-                        <SmallButton onClick={() => void act({ type: 'mortgageProperty', squareIndex: square.index })} disabled={loading}>
+                        <SmallButton onClick={() => void act(multiplayerActions.propertyManagement.mortgageProperty(square.index))} disabled={loading}>
                           Mortgage · +{formatMoney(square.mortgageValue ?? 0)}
                         </SmallButton>
                       )}
                       {ownership.mortgaged && (
-                        <SmallButton onClick={() => void act({ type: 'unmortgageProperty', squareIndex: square.index })} disabled={loading || (myPlayer?.money ?? 0) < unmortgageCost}>
+                        <SmallButton onClick={() => void act(multiplayerActions.propertyManagement.unmortgageProperty(square.index))} disabled={loading || (myPlayer?.money ?? 0) < unmortgageCost}>
                           Unmortgage · {formatMoney(unmortgageCost)}
                         </SmallButton>
                       )}
@@ -552,7 +557,12 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
                   <span className="break-words text-sm font-bold text-text-primary">{player.username}</span>
                   {player.userId === myId && <span className="pm-mini-label">You</span>}
                   {player.userId === state.hostUserId && <span className="pm-mini-label">Host</span>}
-                  {!connected && <span className="h-2 w-2 rounded-full bg-danger" title="Offline" />}
+                  {!connected && (
+                    <span className="pm-mini-label inline-flex items-center gap-1 text-danger-text">
+                      <span className="h-2 w-2 rounded-full bg-danger" aria-hidden="true" />
+                      Offline
+                    </span>
+                  )}
                 </div>
                 {!compact && (
                   <p className="mt-0.5 text-xs leading-5 text-text-muted">
@@ -631,6 +641,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
           myPosition={myPlayer?.position ?? null}
           focusRequest={focusRequest}
           onSelectSquare={selectSquare}
+          onFocusSquare={focusSquare}
         />
 
         <aside className="pm-desktop-rail" aria-label="Game controls and information">
@@ -644,7 +655,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
 
       <div className="pm-mobile-dock">
         <ActionPanel compact />
-        <TabletopTabs tabs={INSPECTOR_TABS} activeTab={activeTab} onSelect={openInspector} ariaLabel="Game information" idBase="pm-mobile-dock" controlsIdBase="pm-sheet-tabs" variant="dock" />
+        <TabletopDockButtons tabs={INSPECTOR_TABS} activeTab={activeTab} onSelect={openInspector} ariaLabel="Open game information" isOpen={sheetOpen} />
       </div>
 
       <TabletopBottomSheet
@@ -669,6 +680,7 @@ function GameMap({
   myPosition,
   focusRequest,
   onSelectSquare,
+  onFocusSquare,
 }: {
   state: PropertyManagementState
   playerOrder: string[]
@@ -676,6 +688,7 @@ function GameMap({
   myPosition: number | null
   focusRequest: number
   onSelectSquare: (squareIndex: number) => void
+  onFocusSquare: (squareIndex: number) => void
 }) {
   const [zoom, setZoom] = useState(() => window.matchMedia('(max-width: 519px)').matches ? 0.75 : 1)
   const cameraRef = useRef<HTMLDivElement>(null)
@@ -736,6 +749,21 @@ function GameMap({
     changeZoom(fitPropertyBoardZoom(camera.clientWidth, camera.clientHeight, 12))
   }
 
+  function handleTileKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, squareIndex: number) {
+    let nextIndex: number | null = null
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (squareIndex + 1) % BOARD_SQUARES.length
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (squareIndex - 1 + BOARD_SQUARES.length) % BOARD_SQUARES.length
+    if (event.key === 'Home') nextIndex = 0
+    if (event.key === 'End') nextIndex = BOARD_SQUARES.length - 1
+    if (nextIndex === null) return
+
+    event.preventDefault()
+    onFocusSquare(nextIndex)
+    window.requestAnimationFrame(() => {
+      cameraRef.current?.querySelector<HTMLButtonElement>(`[data-square-index="${nextIndex}"]`)?.focus({ preventScroll: true })
+    })
+  }
+
   return (
     <section className="pm-board-surface" aria-label="Property Management board">
       <div className="pm-camera-toolbar">
@@ -781,6 +809,7 @@ function GameMap({
                   playerOrder={playerOrder}
                   selected={selectedSquareIndex === square.index}
                   onSelect={() => onSelectSquare(square.index)}
+                  onKeyDown={(event) => handleTileKeyDown(event, square.index)}
                   style={{ gridRow: row, gridColumn: col }}
                 />
               )
@@ -809,6 +838,7 @@ function MapTile({
   playerOrder,
   selected,
   onSelect,
+  onKeyDown,
   style,
 }: {
   square: PMSquareDef
@@ -816,6 +846,7 @@ function MapTile({
   playerOrder: string[]
   selected: boolean
   onSelect: () => void
+  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void
   style: React.CSSProperties
 }) {
   const ownership = state.properties[String(square.index)]
@@ -823,20 +854,39 @@ function MapTile({
   const side = getPropertyBoardSide(square.index)
   const stripClass = square.colorGroup ? GROUP_STRIP_CLASSES[square.colorGroup] ?? 'bg-slate-500' : ''
   const buildLabel = ownership?.houses ? (ownership.houses >= 5 ? 'Hotel' : `${ownership.houses}H`) : null
+  const ownerName = ownership?.ownerId ? state.playerStates[ownership.ownerId]?.username : null
+  const occupants = playerOrder.flatMap((id) => {
+    const player = state.playerStates[id]
+    return player && !player.isBankrupt && player.position === square.index
+      ? [player.username]
+      : []
+  })
+  const accessibleLabel = [
+    square.name,
+    square.price != null ? formatMoney(square.price) : null,
+    ownerName ? `owned by ${ownerName}` : square.price != null ? 'unowned' : null,
+    ownership?.mortgaged ? 'mortgaged' : null,
+    ownership?.houses ? ownership.houses >= 5 ? 'hotel' : `${ownership.houses} houses` : null,
+    occupants.length ? `players here: ${occupants.join(', ')}` : 'no players here',
+    selected ? 'selected' : null,
+  ].filter(Boolean).join(', ')
 
   return (
     <button
       type="button"
       data-square-index={square.index}
-      aria-label={`${square.name}${square.price != null ? `, ${formatMoney(square.price)}` : ''}${ownership?.mortgaged ? ', mortgaged' : ''}`}
+      tabIndex={selected ? 0 : -1}
+      aria-pressed={selected}
+      aria-label={accessibleLabel}
       title={square.name}
       onClick={onSelect}
+      onKeyDown={onKeyDown}
       className={`pm-board-tile pm-board-tile--${side} ${selected ? 'pm-board-tile--selected' : ''} ${ownership?.mortgaged ? 'pm-board-tile--mortgaged' : ''}`}
       style={style}
     >
       {square.colorGroup && <span className={`pm-property-band ${stripClass}`} aria-hidden="true" />}
       {ownerIndex >= 0 && (
-        <span className="pm-owner-marker" style={{ backgroundColor: PLAYER_COLORS[ownerIndex % PLAYER_COLORS.length] }} title={`Owned by ${state.playerStates[ownership?.ownerId ?? '']?.username ?? 'player'}`} />
+        <span className="pm-owner-marker" style={{ backgroundColor: PLAYER_COLORS[ownerIndex % PLAYER_COLORS.length] }} title={`Owned by ${state.playerStates[ownership?.ownerId ?? '']?.username ?? 'player'}`} aria-hidden="true" />
       )}
       {ownership?.mortgaged && <span className="pm-mortgage-stamp">M</span>}
       {buildLabel && <span className="pm-building-marker">{buildLabel}</span>}

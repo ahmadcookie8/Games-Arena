@@ -1,10 +1,25 @@
-import { ReactNode, useEffect, useRef } from 'react'
+import { AlertTriangle, CircleCheck, Info, ShieldAlert } from 'lucide-react'
+import { type ReactNode, useRef } from 'react'
+import {
+  Button,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from './ui'
+import type { ButtonProps } from './ui'
 
 export type ModalVariant = 'info' | 'warning' | 'danger' | 'success'
 
-interface ModalAction {
+export interface ModalAction {
   label: string
   onClick: () => void
+  variant?: ButtonProps['variant']
+  loading?: boolean
+  loadingText?: ReactNode
+  disabled?: boolean
 }
 
 interface ModalProps {
@@ -17,12 +32,19 @@ interface ModalProps {
   onClose: () => void
 }
 
-const variantClasses: Record<ModalVariant, string> = {
-  info: 'bg-info-subtle text-info',
-  warning: 'bg-warning-subtle text-warning-text',
-  danger: 'bg-danger-subtle text-danger-text',
-  success: 'bg-success-subtle text-success-text',
+const variantStyles: Record<ModalVariant, string> = {
+  info: 'border-info/30 bg-info-subtle text-info-text',
+  warning: 'border-warning/30 bg-warning-subtle text-warning-text',
+  danger: 'border-danger/30 bg-danger-subtle text-danger-text',
+  success: 'border-success/30 bg-success-subtle text-success-text',
 }
+
+const variantIcons = {
+  info: Info,
+  warning: AlertTriangle,
+  danger: ShieldAlert,
+  success: CircleCheck,
+} satisfies Record<ModalVariant, typeof Info>
 
 export default function Modal({
   isOpen,
@@ -33,87 +55,71 @@ export default function Modal({
   secondaryAction,
   onClose,
 }: ModalProps) {
-  const panelRef = useRef<HTMLDivElement>(null)
-  const previousFocusRef = useRef<Element | null>(null)
-
-  useEffect(() => {
-    if (!isOpen) return
-
-    previousFocusRef.current = document.activeElement
-    panelRef.current?.focus()
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') onClose()
-    }
-
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-      if (previousFocusRef.current instanceof HTMLElement) {
-        previousFocusRef.current.focus()
-      }
-    }
-  }, [isOpen, onClose])
-
-  if (!isOpen) return null
-
   const primary = primaryAction ?? { label: 'Close', onClick: onClose }
+  const VariantIcon = variantIcons[variant]
+  const childrenAreDescription = typeof children === 'string' || typeof children === 'number'
+  const restoreFocusRef = useRef<HTMLElement | null>(null)
+  const wasOpenRef = useRef(false)
+
+  if (isOpen && !wasOpenRef.current && typeof document !== 'undefined') {
+    restoreFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
+  }
+  wasOpenRef.current = isOpen
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-6" role="presentation">
-      <button
-        type="button"
-        aria-label="Close modal"
-        className="absolute inset-0 cursor-pointer bg-black/55 backdrop-blur-sm"
-        onClick={onClose}
-      />
-      <div
-        ref={panelRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="modal-title"
-        tabIndex={-1}
-        className="relative w-full max-w-md animate-scale-in rounded-2xl border border-border/90 bg-surface/95 p-4 shadow-lg outline-none backdrop-blur-xl sm:p-5"
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent
+        onCloseAutoFocus={(event) => {
+          const restoreTarget = restoreFocusRef.current
+          if (!restoreTarget?.isConnected) return
+          event.preventDefault()
+          restoreTarget.focus()
+          restoreFocusRef.current = null
+        }}
       >
-        <div className="mb-4 flex items-start gap-3">
-          <div className={`mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl ${variantClasses[variant]}`}>
-            <span className="text-base font-bold" aria-hidden="true">!</span>
+        <DialogHeader className="grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 pr-10">
+          <div className={`row-span-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border ${variantStyles[variant]}`}>
+            <VariantIcon aria-hidden="true" className="h-5 w-5" />
           </div>
-          <div className="min-w-0 flex-1">
-            <h2 id="modal-title" className="text-lg font-semibold text-text-primary">{title}</h2>
-            <div className="mt-1 text-sm leading-6 text-text-secondary">{children}</div>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-9 w-9 flex-shrink-0 cursor-pointer items-center justify-center rounded-lg text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
+          <DialogTitle>{title}</DialogTitle>
+          {childrenAreDescription ? (
+            <DialogDescription asChild>
+              <div className="mt-1 text-sm leading-6 text-text-secondary">{children}</div>
+            </DialogDescription>
+          ) : (
+            <DialogDescription className="sr-only">Complete the controls in this dialog or close it to return to the game.</DialogDescription>
+          )}
+        </DialogHeader>
 
-        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        {!childrenAreDescription && <div className="text-sm leading-6 text-text-secondary">{children}</div>}
+
+        <DialogFooter>
           {secondaryAction && (
-            <button
+            <Button
               type="button"
+              variant={secondaryAction.variant ?? 'secondary'}
+              loading={secondaryAction.loading}
+              loadingText={secondaryAction.loadingText}
+              disabled={secondaryAction.disabled}
               onClick={secondaryAction.onClick}
-              className="min-h-11 cursor-pointer rounded-lg border border-border bg-elevated px-4 py-2 text-sm font-medium text-text-primary transition-colors duration-150 hover:bg-overlay"
             >
               {secondaryAction.label}
-            </button>
+            </Button>
           )}
-          <button
+          <Button
             type="button"
+            variant={primary.variant ?? (variant === 'danger' ? 'danger' : variant === 'success' ? 'success' : 'primary')}
+            loading={primary.loading}
+            loadingText={primary.loadingText}
+            disabled={primary.disabled}
             onClick={primary.onClick}
-            className="min-h-11 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover"
           >
             {primary.label}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

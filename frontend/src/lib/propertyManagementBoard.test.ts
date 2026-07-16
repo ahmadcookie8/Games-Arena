@@ -8,6 +8,7 @@ import {
   getPropertyBoardSide,
   resolvePropertyActionMode,
   stepPropertyBoardZoom,
+  validatePropertyAuctionBid,
   wrapPropertySquareIndex,
 } from './propertyManagementBoard'
 
@@ -62,5 +63,13 @@ describe('Property Management action presentation', () => {
     expect(resolvePropertyActionMode('playing', 'buyOrAuction', true)).toBe('buyOrAuction')
     expect(resolvePropertyActionMode('playing', 'auction', false)).toBe('auction')
     expect(resolvePropertyActionMode('playing', 'card', true)).toBe('card')
+  })
+
+  it('validates auction bids as affordable safe whole-dollar amounts', () => {
+    expect(validatePropertyAuctionBid('', 100, 500)).toEqual({ valid: false, amount: null, error: 'Enter a bid amount.' })
+    expect(validatePropertyAuctionBid('100.5', 100, 500).valid).toBe(false)
+    expect(validatePropertyAuctionBid('100', 100, 500).valid).toBe(false)
+    expect(validatePropertyAuctionBid('501', 100, 500).valid).toBe(false)
+    expect(validatePropertyAuctionBid('101', 100, 500)).toEqual({ valid: true, amount: 101, error: null })
   })
 })
