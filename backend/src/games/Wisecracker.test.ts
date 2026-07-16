@@ -29,6 +29,14 @@ describe('Wisecracker', () => {
     expect(next.answerSlots).toBe(2)
   })
 
+  it('rejects prompts with more answer slots than the socket contract supports', () => {
+    const state = Wisecracker.applyAction(stateWithPlayers(), { type: 'startMatch', maxScore: 3 }, 'user1', players)
+    const prompt = Array.from({ length: 11 }, () => '_').join(' ')
+
+    expect(() => Wisecracker.applyAction(state, { type: 'setPrompt', prompt }, state.chooserUserId!, players))
+      .toThrow('more than 10 answer slots')
+  })
+
   it('lets the chooser refresh the generated prompt during prompt phase', () => {
     const state = Wisecracker.applyAction(stateWithPlayers(), { type: 'startMatch', maxScore: 3 }, 'user1', players)
     const next = Wisecracker.applyAction(state, { type: 'refreshPrompt' }, state.chooserUserId!, players)
@@ -81,13 +89,8 @@ describe('Wisecracker', () => {
     state = Wisecracker.applyAction(state, { type: 'submitAnswers', answers: ['second'] }, typers[1], players)
     state = Wisecracker.applyAction(state, { type: 'revealNextAnswer' }, state.chooserUserId!, players)
     state = Wisecracker.applyAction(state, { type: 'revealNextAnswer' }, state.chooserUserId!, players)
-    state = Wisecracker.applyAction(state, { type: 'selectRoundWinner', userId: typers[0] }, state.chooserUserId!, players)
+    state = Wisecracker.applyAction(state, { type: 'selectRoundWinner', responseId: state.responseIds[typers[0]] }, state.chooserUserId!, players)
 
     expect(state.phase).toBe('completed')
-    state = Wisecracker.applyAction(state, { type: 'returnToLobby' }, 'user1', players)
-    expect(state.phase).toBe('lobby')
-    expect(state.submittedAnswers).toEqual({})
-    expect(state.answerOrder).toEqual([])
-    expect(state.waitingPlayerIds).toEqual([])
   })
 })

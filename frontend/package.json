@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "Real-time multiplayer games frontend",
   "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25.0.0",
+    "npm": ">=10.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
@@ -12,26 +16,28 @@
     "lint": "eslint src --ext .ts,.tsx"
   },
   "dependencies": {
-    "axios": "^1.4.0",
+    "@games-arena/game-engine": "file:../packages/game-engine",
+    "axios": "1.18.1",
     "lucide-react": "^1.17.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.14.0",
-    "socket.io-client": "^4.6.2",
+    "react-router-dom": "6.30.4",
+    "socket.io-client": "4.8.3",
     "zustand": "^4.3.8"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.1.8",
+    "@tailwindcss/vite": "4.3.2",
+    "@types/node": "24.13.3",
     "@types/react": "^18.2.14",
     "@types/react-dom": "^18.2.6",
     "@typescript-eslint/eslint-plugin": "^7.18.0",
     "@typescript-eslint/parser": "^7.18.0",
-    "@vitejs/plugin-react": "^4.5.0",
+    "@vitejs/plugin-react": "6.0.3",
     "eslint": "^8.57.1",
     "eslint-plugin-react-hooks": "^4.6.2",
-    "tailwindcss": "^4.1.8",
-    "typescript": "^5.1.3",
-    "vite": "^5.4.19",
-    "vitest": "^0.33.0"
+    "tailwindcss": "4.3.2",
+    "typescript": "5.9.3",
+    "vite": "8.1.4",
+    "vitest": "4.1.10"
   }
 }

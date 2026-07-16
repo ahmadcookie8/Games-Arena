@@ -1,8 +1,15 @@
 export type GameType = 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'scrabble' | 'snake' | 'mazeChase' | 'propertyManagement'
 export type GameStatus = 'active' | 'paused' | 'completed' | 'abandoned'
 export type GameMode = 'multiplayer' | 'singlePlayer'
+export type ResultVerification = 'server' | 'replay' | 'unverified'
 export type TicTacToeDifficulty = 'easy' | 'medium' | 'hard'
 export type SnakeBoardSize = 'small' | 'medium' | 'large'
+
+export interface GameReplayDescriptor {
+  version: 1
+  seed: string
+  startedAt?: string
+}
 
 export interface Player {
   userId: string
@@ -45,7 +52,9 @@ export interface Game {
     winnerName?: string
     isDraw: boolean
     winType: string
+    verification?: ResultVerification
   }
+  replay?: GameReplayDescriptor
   metadata?: {
     ratedGame?: boolean
     mode?: GameMode
@@ -98,20 +107,39 @@ export interface ScrabblePendingTrade {
   offerId: string
   fromUserId: string
   targetUserId: string
-  offeredTiles: ScrabbleTile[]
+  offeredTileCount: number
+  offeredTiles?: ScrabbleTile[]
 }
 
 export interface ScrabbleState {
   board: (ScrabbleCell | null)[][]
   racks: Record<string, ScrabbleTile[]>
+  rackCounts: Record<string, number>
   scores: Record<string, number>
-  bag: ScrabbleTile[]
+  bagCount: number
   infiniteLetters: boolean
   usedPremiumSquares: string[]
   pendingTrade: ScrabblePendingTrade | null
   consecutivePasses: number
   givenUpUserIds: string[]
   lastScoreEvent: ScrabbleScoreEvent | null
+}
+
+export interface UnoCard {
+  color: 'red' | 'green' | 'blue' | 'yellow' | 'wild'
+  value: string
+  type: 'NUMBER' | 'SKIP' | 'REVERSE' | 'DRAW2' | 'WILD' | 'WILD_DRAW4'
+}
+
+export interface UnoState {
+  hand: UnoCard[]
+  handCounts: number[]
+  deckCount: number
+  discardPile: UnoCard[]
+  currentTurnIndex: number
+  direction: 1 | -1
+  currentColor: string
+  unoStatus: boolean[]
 }
 
 // Property Management (Monopoly) types
@@ -162,8 +190,8 @@ export interface PropertyManagementState {
   properties: Record<string, PMPropertyOwnership>
   chanceCardIndex: number
   communityChestCardIndex: number
-  chanceCardOrder: number[]
-  communityChestCardOrder: number[]
+  chanceCardOrder?: number[]
+  communityChestCardOrder?: number[]
   chanceFreeCardReturned: boolean
   communityChestFreeCardReturned: boolean
   pendingAction: PMPendingAction | null
@@ -173,6 +201,11 @@ export interface PropertyManagementState {
 }
 
 export type WisecrackerPhase = 'lobby' | 'prompt' | 'answering' | 'revealing' | 'roundResult' | 'completed'
+
+export interface WisecrackerRevealedResponse {
+  responseId: string
+  answers: string[]
+}
 
 export interface WisecrackerState {
   phase: WisecrackerPhase
@@ -184,10 +217,10 @@ export interface WisecrackerState {
   waitingPlayerIds: string[]
   prompt: string
   answerSlots: number
-  submittedAnswers: Record<string, string[]>
-  answerOrder: string[]
-  revealedCount: number
+  submissionStatus: Record<string, boolean>
+  myAnswers?: string[]
+  revealedResponses: WisecrackerRevealedResponse[]
   scores: Record<string, number>
-  roundWinnerUserId: string | null
+  roundWinnerResponseId: string | null
   matchWinnerUserId: string | null
 }

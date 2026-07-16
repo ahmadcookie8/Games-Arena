@@ -1,4 +1,4 @@
-import { WisecrackerPhase, WisecrackerState } from '../types/game'
+import { WisecrackerPhase, WisecrackerRevealedResponse, WisecrackerState } from '../types/game'
 
 const WISECRACKER_PHASES: readonly WisecrackerPhase[] = ['lobby', 'prompt', 'answering', 'revealing', 'roundResult', 'completed']
 
@@ -53,11 +53,11 @@ export function normalizeWisecrackerState(value: unknown, fallbackPlayerIds: rea
     waitingPlayerIds,
     prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
     answerSlots: readInteger(raw.answerSlots, 0, 0),
-    submittedAnswers: readAnswerMap(raw.submittedAnswers),
-    answerOrder: readStringArray(raw.answerOrder),
-    revealedCount: readInteger(raw.revealedCount, 0, 0),
+    submissionStatus: readBooleanMap(raw.submissionStatus),
+    ...(Array.isArray(raw.myAnswers) ? { myAnswers: readAnswers(raw.myAnswers) } : {}),
+    revealedResponses: readRevealedResponses(raw.revealedResponses),
     scores,
-    roundWinnerUserId: typeof raw.roundWinnerUserId === 'string' ? raw.roundWinnerUserId : null,
+    roundWinnerResponseId: typeof raw.roundWinnerResponseId === 'string' ? raw.roundWinnerResponseId : null,
     matchWinnerUserId: typeof raw.matchWinnerUserId === 'string' ? raw.matchWinnerUserId : null,
   }
 }
@@ -74,11 +74,12 @@ export function resolveWisecrackerActionMode(stateValue: Partial<WisecrackerStat
       return state.chooserUserId === userId ? 'choosePrompt' : 'waitForPrompt'
     case 'answering':
       if (state.chooserUserId === userId) return 'waitForAnswers'
-      if (state.submittedAnswers[userId]) return 'answersLocked'
+      if (state.submissionStatus[userId]) return 'answersLocked'
       return state.activePlayerIds.includes(userId) ? 'submitAnswers' : 'waitForAnswers'
     case 'revealing': {
       if (state.chooserUserId !== userId) return 'waitForReveal'
-      const allRevealed = state.answerOrder.length > 0 && state.revealedCount >= state.answerOrder.length
+      const totalResponses = Object.values(state.submissionStatus).filter(Boolean).length
+      const allRevealed = totalResponses > 0 && state.revealedResponses.length >= totalResponses
       return allRevealed ? 'chooseWinner' : 'revealAnswer'
     }
     case 'roundResult':
@@ -110,11 +111,13 @@ export function getWisecrackerPhasePresentation(phase: WisecrackerPhase): Wisecr
 export function getWisecrackerRoundProgress(stateValue: Partial<WisecrackerState>): WisecrackerRoundProgress {
   const state = normalizeWisecrackerState(stateValue)
   const typers = state.activePlayerIds.filter((id) => id !== state.chooserUserId)
+  const submitted = typers.filter((id) => Boolean(state.submissionStatus[id])).length
+  const hasRoundResponses = state.phase === 'revealing' || state.phase === 'roundResult' || state.phase === 'completed'
   return {
-    submitted: typers.filter((id) => Boolean(state.submittedAnswers[id])).length,
+    submitted,
     totalTypers: typers.length,
-    revealed: Math.min(state.revealedCount, state.answerOrder.length),
-    totalAnswers: state.answerOrder.length,
+    revealed: state.revealedResponses.length,
+    totalAnswers: hasRoundResponses ? submitted : 0,
   }
 }
 
@@ -138,13 +141,25 @@ function readNumberMap(value: unknown): Record<string, number> {
   )
 }
 
-function readAnswerMap(value: unknown): Record<string, string[]> {
+function readBooleanMap(value: unknown): Record<string, boolean> {
   if (!isRecord(value)) return {}
   return Object.fromEntries(
-    Object.entries(value)
-      .filter((entry): entry is [string, unknown[]] => Array.isArray(entry[1]))
-      .map(([id, answers]) => [id, answers.filter((answer): answer is string => typeof answer === 'string')]),
+    Object.entries(value).filter((entry): entry is [string, boolean] => typeof entry[1] === 'boolean'),
   )
+}
+
+function readAnswers(value: unknown[]): string[] {
+  return value.filter((answer): answer is string => typeof answer === 'string')
+}
+
+function readRevealedResponses(value: unknown): WisecrackerRevealedResponse[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  return value.flatMap((item) => {
+    if (!isRecord(item) || typeof item.responseId !== 'string' || seen.has(item.responseId) || !Array.isArray(item.answers)) return []
+    seen.add(item.responseId)
+    return [{ responseId: item.responseId, answers: readAnswers(item.answers) }]
+  })
 }
 
 function readInteger(value: unknown, fallback: number, min: number, max = Number.MAX_SAFE_INTEGER): number {

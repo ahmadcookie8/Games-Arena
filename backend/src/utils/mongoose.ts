@@ -1,13 +1,16 @@
 import mongoose from 'mongoose'
 import { config } from '../config'
+import { logSecurityEvent } from './securityLogger'
 
 export async function connectMongoDB(): Promise<void> {
   try {
     await mongoose.connect(config.mongodbUri)
-    console.log('MongoDB connected')
+    logSecurityEvent('mongodb.connected', {}, 'info')
   } catch (err) {
-    console.error('MongoDB connection error:', err)
-    process.exit(1)
+    logSecurityEvent('mongodb.connection_failed', {
+      errorName: err instanceof Error ? err.name : 'UnknownError',
+    }, 'error')
+    throw new Error('MongoDB connection failed')
   }
 }
 

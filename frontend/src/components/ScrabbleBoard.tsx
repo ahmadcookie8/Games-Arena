@@ -125,6 +125,8 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
     () => state.pendingTrade?.targetUserId === myId ? state.pendingTrade : null,
     [myId, state.pendingTrade],
   )
+  const pendingTradeTiles = pendingTradeForMe?.offeredTiles ?? EMPTY_RACK
+  const pendingTradeTileCount = pendingTradeForMe?.offeredTileCount ?? pendingTradeTiles.length
   const incomingTradeId = pendingTradeForMe?.offerId ?? null
   const offeredByMe = state.pendingTrade?.fromUserId === myId
   const activePlayers = useMemo(
@@ -297,7 +299,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
   }
 
   function acceptTrade() {
-    if (pendingTradeForMe && selectedRackIds.length === pendingTradeForMe.offeredTiles.length) {
+    if (pendingTradeForMe && selectedRackIds.length === pendingTradeTileCount) {
       void act({ type: 'respondTrade', accept: true, rackTileIds: selectedRackIds }, 'accept')
     }
   }
@@ -382,7 +384,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
         )}
         {actionMode === 'incomingTrade' && (
           <div className="scr-action-stack">
-            <p className="scr-action-copy">{playerName(game.players, pendingTradeForMe?.fromUserId ?? '')} offered {pendingTradeForMe?.offeredTiles.length ?? 0} tile{pendingTradeForMe?.offeredTiles.length === 1 ? '' : 's'}.</p>
+            <p className="scr-action-copy">{playerName(game.players, pendingTradeForMe?.fromUserId ?? '')} offered {pendingTradeTileCount} tile{pendingTradeTileCount === 1 ? '' : 's'}.</p>
             <button type="button" className="scr-primary-button" onClick={() => openInspector('trade')}>Review trade</button>
           </div>
         )}
@@ -456,13 +458,13 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
 
   function TradePanel() {
     if (pendingTradeForMe) {
-      const required = pendingTradeForMe.offeredTiles.length
+      const required = pendingTradeTileCount
       return (
         <div className="scr-panel-stack">
           <div className="scr-trade-notice">
             <p className="scr-section-label">Incoming offer</p>
             <h3>{playerName(game.players, pendingTradeForMe.fromUserId)} offers</h3>
-            <div className="scr-offered-tiles">{pendingTradeForMe.offeredTiles.map((tile) => <TileFace key={tile.id} tile={tile} variant="rack" />)}</div>
+            <div className="scr-offered-tiles">{pendingTradeTiles.map((tile) => <TileFace key={tile.id} tile={tile} variant="rack" />)}</div>
           </div>
           <div>
             <h3 className="scr-panel-title">Choose {required} tile{required === 1 ? '' : 's'} in return</h3>
@@ -533,7 +535,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
         </div>
         <HudStat label="Up next" value={nextPlayer?.username ?? '—'} />
         <HudStat label="Your score" value={`${state.scores[myId] ?? 0}`} />
-        <HudStat label="Supply" value={state.infiniteLetters ? 'Infinite' : `${state.bag.length} tiles`} />
+        <HudStat label="Supply" value={state.infiniteLetters ? 'Infinite' : `${state.bagCount ?? 0} tiles`} />
         <HudStat label="Active" value={`${activePlayers.length}`} />
         <ScoreAnimation event={state.lastScoreEvent} onHighlight={handleScoreHighlight} />
       </section>

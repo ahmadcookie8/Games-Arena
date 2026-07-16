@@ -1,15 +1,29 @@
+import { useState } from 'react'
 import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import mascot from '../assets/penguin-mascot.png'
 import { ThemeToggle } from './ThemeToggle'
+import Modal from './Modal'
 
 export default function Header() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
+  const [logoutFailed, setLogoutFailed] = useState(false)
+  const [loggingOut, setLoggingOut] = useState(false)
 
   async function handleLogout() {
-    await logout()
-    navigate('/auth')
+    if (loggingOut) return
+    setLoggingOut(true)
+    try {
+      await logout()
+      navigate('/auth')
+    } catch {
+      // The HttpOnly cookie cannot be cleared safely from JavaScript. Keep the
+      // authenticated UI intact unless the server confirms session revocation.
+      setLogoutFailed(true)
+    } finally {
+      setLoggingOut(false)
+    }
   }
 
   const navClass = ({ isActive }: { isActive: boolean }) =>
@@ -39,9 +53,10 @@ export default function Header() {
           <button
             type="button"
             onClick={handleLogout}
+            disabled={loggingOut}
             className="min-h-11 cursor-pointer rounded-lg px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary md:min-h-0"
           >
-            Logout
+            {loggingOut ? 'Logging out…' : 'Logout'}
           </button>
         </div>
       </div>
@@ -49,6 +64,14 @@ export default function Header() {
         <NavLink to="/" end className={navClass}>Dashboard</NavLink>
         <NavLink to="/history" className={navClass}>History</NavLink>
       </nav>
+      <Modal
+        isOpen={logoutFailed}
+        title="Could not log out"
+        variant="danger"
+        onClose={() => setLogoutFailed(false)}
+      >
+        Your session could not be revoked. You are still signed in; check your connection and try again.
+      </Modal>
     </header>
   )
 }

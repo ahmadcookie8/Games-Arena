@@ -5,7 +5,6 @@ import {
   Clock3,
   Crown,
   History,
-  Laugh,
   MessageCircle,
   Mic2,
   RefreshCw,
@@ -36,9 +35,8 @@ type WisecrackerMove =
   | { type: 'setPrompt'; prompt: string }
   | { type: 'submitAnswers'; answers: string[] }
   | { type: 'revealNextAnswer' }
-  | { type: 'selectRoundWinner'; userId: string }
+  | { type: 'selectRoundWinner'; responseId: string }
   | { type: 'startNextRound' }
-  | { type: 'returnToLobby' }
 
 type InspectorTab = 'players' | 'history' | 'chat'
 
@@ -67,7 +65,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
   const [isStartingMatch, setIsStartingMatch] = useState(false)
   const [isUsingPrompt, setIsUsingPrompt] = useState(false)
   const [isRevealing, setIsRevealing] = useState(false)
-  const [selectingWinnerId, setSelectingWinnerId] = useState<string | null>(null)
+  const [selectingResponseId, setSelectingResponseId] = useState<string | null>(null)
   const [isAdvancingRound, setIsAdvancingRound] = useState(false)
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
   const [activeTab, setActiveTab] = useState<InspectorTab>('players')
@@ -85,9 +83,9 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
   const progress = getWisecrackerRoundProgress(state)
   const isHost = state.hostUserId === myId
   const isChooser = state.chooserUserId === myId
-  const hasSubmitted = Boolean(myId && state.submittedAnswers?.[myId])
+  const hasSubmitted = Boolean(myId && state.submissionStatus[myId])
   const typers = state.activePlayerIds.filter((id) => id !== state.chooserUserId)
-  const revealedIds = state.answerOrder.slice(0, state.revealedCount)
+  const revealedResponses = state.revealedResponses
   const canSubmitAnswers = answers.length > 0 && answers.every((answer) => answer.trim().length > 0)
   const chooser = state.chooserUserId ? playersById[state.chooserUserId] : undefined
   const chooserIsConnected = chooser?.isConnected !== false
@@ -124,9 +122,9 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
     setIsStartingMatch(false)
     setIsUsingPrompt(false)
     setIsRevealing(false)
-    setSelectingWinnerId(null)
+    setSelectingResponseId(null)
     setIsAdvancingRound(false)
-  }, [state.phase, state.prompt, state.revealedCount, state.roundWinnerUserId])
+  }, [state.phase, state.prompt, state.revealedResponses.length, state.roundWinnerResponseId])
 
   async function copyGameCode() {
     try {
@@ -175,14 +173,14 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
     setIsRevealing(false)
   }
 
-  async function selectWinner(userId: string) {
-    if (selectingWinnerId) return
-    setSelectingWinnerId(userId)
-    await onMove({ type: 'selectRoundWinner', userId })
-    setSelectingWinnerId(null)
+  async function selectWinner(responseId: string) {
+    if (selectingResponseId) return
+    setSelectingResponseId(responseId)
+    await onMove({ type: 'selectRoundWinner', responseId })
+    setSelectingResponseId(null)
   }
 
-  async function advanceRound(move: Extract<WisecrackerMove, { type: 'startNextRound' | 'returnToLobby' }>) {
+  async function advanceRound(move: Extract<WisecrackerMove, { type: 'startNextRound' }>) {
     if (isAdvancingRound) return
     setIsAdvancingRound(true)
     await onMove(move)
@@ -374,28 +372,28 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
           <span>{progress.revealed}/{progress.totalAnswers} revealed</span>
         </div>
         <div className="wc-answer-stack" aria-live="polite">
-          {revealedIds.length === 0 && <p className="wc-empty-answer">The first answer is waiting behind the curtain.</p>}
-          {revealedIds.map((playerId, index) => {
+          {revealedResponses.length === 0 && <p className="wc-empty-answer">The first answer is waiting behind the curtain.</p>}
+          {revealedResponses.map((response, index) => {
             const card = (
               <>
                 <span className="wc-answer-card__number">Answer {index + 1}</span>
-                <FilledPrompt prompt={state.prompt} answers={state.submittedAnswers[playerId] || []} />
+                <FilledPrompt prompt={state.prompt} answers={response.answers} />
                 {canChoose && <span className="wc-answer-card__vote"><Vote aria-hidden="true" /> Choose this answer</span>}
               </>
             )
             return canChoose ? (
               <button
-                key={playerId}
+                key={response.responseId}
                 type="button"
                 className="wc-answer-card wc-answer-card--selectable"
-                disabled={Boolean(selectingWinnerId)}
+                disabled={Boolean(selectingResponseId)}
                 aria-label={`Choose answer ${index + 1} as the round winner`}
-                onClick={() => void selectWinner(playerId)}
+                onClick={() => void selectWinner(response.responseId)}
               >
                 {card}
               </button>
             ) : (
-              <article key={playerId} className="wc-answer-card">{card}</article>
+              <article key={response.responseId} className="wc-answer-card">{card}</article>
             )
           })}
         </div>
@@ -403,7 +401,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
         {actionMode === 'revealAnswer' && (
           <button type="button" className="wc-button wc-button--primary wc-button--wide" disabled={isRevealing} onClick={() => void revealNextAnswer()}>
             <Sparkles aria-hidden="true" />
-            {isRevealing ? 'Revealing' : revealedIds.length === 0 ? 'Reveal first answer' : 'Reveal next answer'}
+            {isRevealing ? 'Revealing' : revealedResponses.length === 0 ? 'Reveal first answer' : 'Reveal next answer'}
           </button>
         )}
         {actionMode === 'waitForReveal' && (
@@ -415,23 +413,26 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
 
   function renderResultStage() {
     const isComplete = state.phase === 'completed'
-    const winnerId = isComplete ? state.matchWinnerUserId : state.roundWinnerUserId
+    const winnerId = isComplete ? state.matchWinnerUserId : null
     const winner = winnerId ? playersById[winnerId] : undefined
-    const isHostAction = actionMode === 'roundResultHost' || actionMode === 'completedHost'
+    const isHostAction = actionMode === 'roundResultHost'
 
     return (
       <div className="wc-stage-body">
         <div className={`wc-winner ${isComplete ? 'wc-winner--final' : ''}`}>
           <div className="wc-winner__icon">{isComplete ? <Trophy aria-hidden="true" /> : <Crown aria-hidden="true" />}</div>
           <p className="wc-kicker">{isComplete ? 'Match winner' : 'Round winner'}</p>
-          <h3>{winner?.username || 'Winner'}</h3>
+          <h3>{winner?.username || (isComplete ? 'Winner' : 'Room favorite')}</h3>
           <p>{isComplete ? `First to ${state.maxScore} takes the spotlight.` : 'One point for the room favorite.'}</p>
         </div>
 
-        {state.roundWinnerUserId && (
+        {state.roundWinnerResponseId && (
           <article className="wc-answer-card wc-answer-card--winner">
             <span className="wc-answer-card__number">Winning answer</span>
-            <FilledPrompt prompt={state.prompt} answers={state.submittedAnswers[state.roundWinnerUserId] || []} />
+            <FilledPrompt
+              prompt={state.prompt}
+              answers={state.revealedResponses.find((response) => response.responseId === state.roundWinnerResponseId)?.answers || []}
+            />
           </article>
         )}
 
@@ -440,16 +441,16 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
             type="button"
             className="wc-button wc-button--primary wc-button--wide"
             disabled={isAdvancingRound}
-            onClick={() => void advanceRound({ type: isComplete ? 'returnToLobby' : 'startNextRound' })}
+            onClick={() => void advanceRound({ type: 'startNextRound' })}
           >
-            {isComplete ? <Laugh aria-hidden="true" /> : <Mic2 aria-hidden="true" />}
-            {isAdvancingRound ? 'Getting ready' : isComplete ? 'Play again' : 'Start next round'}
+            <Mic2 aria-hidden="true" />
+            {isAdvancingRound ? 'Getting ready' : 'Start next round'}
           </button>
         ) : (
           <WaitingNotice
             icon={Clock3}
-            title={isComplete ? 'Waiting for the host' : 'Next round coming up'}
-            detail={isComplete ? 'The host can bring this lobby back for another match.' : 'The host will start the next prompt when the room is ready.'}
+            title={isComplete ? 'Match complete' : 'Next round coming up'}
+            detail={isComplete ? 'Return to the dashboard to create or join another room.' : 'The host will start the next prompt when the room is ready.'}
           />
         )}
       </div>
@@ -618,7 +619,7 @@ function SubmissionProgress({
       <p className="wc-kicker">Around the room</p>
       <div>
         {typers.map((id) => {
-          const submitted = Boolean(state.submittedAnswers[id])
+          const submitted = Boolean(state.submissionStatus[id])
           const connected = playersById[id]?.isConnected !== false
           return (
             <span key={id} className={submitted ? 'is-ready' : ''}>
@@ -666,7 +667,7 @@ function PlayersInspector({ game, state, currentUserId }: { game: Game; state: W
         const connected = player?.isConnected !== false
         const waiting = state.waitingPlayerIds.includes(id)
         const isChooser = state.chooserUserId === id
-        const isWinner = state.matchWinnerUserId === id || state.roundWinnerUserId === id
+        const isWinner = state.matchWinnerUserId === id
         return (
           <div key={id} className={`wc-player-row ${isChooser ? 'is-chooser' : ''} ${isWinner ? 'is-winner' : ''}`}>
             <span className="wc-player-row__avatar">{player?.username?.[0]?.toUpperCase() || '?'}</span>

@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import axios from 'axios'
+import {
+  REPLAY_SEED_PATTERN,
+  stepMazeChaseState,
+  type Direction,
+  type MazeChaseDirection,
+  type MazeChaseState,
+  type Point as MazePoint,
+} from '@games-arena/game-engine'
 import Header from '../components/Header'
 import Modal, { ModalVariant } from '../components/Modal'
 import MoveHistory from '../components/MoveHistory'
@@ -8,6 +16,19 @@ import PageBackdrop from '../components/PageBackdrop'
 import PlayerCard from '../components/PlayerCard'
 import { useGameState } from '../hooks/useGameState'
 import api from '../lib/api'
+import {
+  buildReplayPayload,
+  createReplayRecorder,
+  getCompletedReplayStatus,
+  getInitialReplayEligibility,
+  getReplayRunPresentation,
+  invalidateReplayRecorder,
+  isExplicitReplayRejection,
+  recordReplayTick,
+  type ReplayRunStatus,
+  type ReplayUnrankedReason,
+} from '../lib/singlePlayerReplay'
+import type { Game } from '../types/game'
 import fruitSprite from '../assets/maze-chase/fruit.png'
 import ghostCyanSprite from '../assets/maze-chase/ghost-cyan.png'
 import ghostFrightenedSprite from '../assets/maze-chase/ghost-frightened.png'
@@ -35,52 +56,6 @@ import wallTeeRightSprite from '../assets/maze-chase/walls/tee-right.png'
 import wallTeeUpSprite from '../assets/maze-chase/walls/tee-up.png'
 import wallVerticalSprite from '../assets/maze-chase/walls/vertical.png'
 
-type Direction = 'up' | 'down' | 'left' | 'right' | 'none'
-type GhostMode = 'chase' | 'frightened' | 'returning' | 'hidden'
-
-interface MazePoint {
-  x: number
-  y: number
-}
-
-interface MazeGhost {
-  id: string
-  color: string
-  position: MazePoint
-  start: MazePoint
-  direction: Direction
-  mode: GhostMode
-  respawnAt?: number
-}
-
-interface MazeChaseState {
-  width: number
-  height: number
-  maze: string[]
-  player: {
-    position: MazePoint
-    start: MazePoint
-    direction: Direction
-    pendingDirection: Direction
-  }
-  ghosts: MazeGhost[]
-  pellets: MazePoint[]
-  powerPellets: MazePoint[]
-  fruit: {
-    position: MazePoint
-    active: boolean
-    collected: boolean
-  } | null
-  score: number
-  lives: number
-  level: number
-  frightenedUntil: number
-  isGameOver: boolean
-  hasStarted?: boolean
-  tickMs: number
-  ghostStepCounter?: number
-}
-
 interface ModalState {
   title: string
   message: string
@@ -95,23 +70,20 @@ interface ModalState {
   }
 }
 
-const DIRECTION_DELTA: Record<Exclude<Direction, 'none'>, MazePoint> = {
+interface ReplayCompletionResponse {
+  game: Game
+  gameState: MazeChaseState
+  moveHistory: Game['moveHistory']
+}
+
+const DIRECTION_DELTA: Record<Direction, MazePoint> = {
   up: { x: 0, y: -1 },
   down: { x: 0, y: 1 },
   left: { x: -1, y: 0 },
   right: { x: 1, y: 0 },
 }
 
-const OPPOSITE_DIRECTION: Record<Exclude<Direction, 'none'>, Direction> = {
-  up: 'down',
-  down: 'up',
-  left: 'right',
-  right: 'left',
-}
-
-const GHOST_EAT_SCORE = 200
-const FRIGHTENED_MS = 7000
-const GHOST_RESPAWN_MS = 3000
+const LEGACY_FALLBACK_SEED = '0'.repeat(64)
 const GHOST_SPRITES: Record<string, string> = {
   spark: ghostCyanSprite,
   rose: ghostPinkSprite,
@@ -162,17 +134,17 @@ function getCellKey(cell: MazePoint): string {
   return `${cell.x}:${cell.y}`
 }
 
-function isDirection(direction: Direction): direction is Exclude<Direction, 'none'> {
+function isDirection(direction: MazeChaseDirection): direction is Direction {
   return direction !== 'none'
 }
 
-function getRawNextPoint(point: MazePoint, direction: Direction): MazePoint {
+function getRawNextPoint(point: MazePoint, direction: MazeChaseDirection): MazePoint {
   if (!isDirection(direction)) return point
   const delta = DIRECTION_DELTA[direction]
   return { x: point.x + delta.x, y: point.y + delta.y }
 }
 
-export function getNextPoint(state: MazeChaseState, point: MazePoint, direction: Direction): MazePoint {
+export function getNextPoint(state: MazeChaseState, point: MazePoint, direction: MazeChaseDirection): MazePoint {
   const next = getRawNextPoint(point, direction)
   if (direction === 'left' && next.x < 0) return { ...next, x: state.width - 1 }
   if (direction === 'right' && next.x >= state.width) return { ...next, x: 0 }
@@ -203,7 +175,7 @@ function getActorStyle(state: MazeChaseState, position: MazePoint, durationMs: n
   }
 }
 
-export function getPlayerSprite(direction: Direction, mouthClosed = false): { src: string; transform?: string } {
+export function getPlayerSprite(direction: MazeChaseDirection, mouthClosed = false): { src: string; transform?: string } {
   const src = mouthClosed ? playerClosedSprite : playerRightSprite
   switch (direction) {
     case 'left': return { src, transform: 'scaleX(-1)' }
@@ -217,7 +189,7 @@ function isWall(state: MazeChaseState, point: MazePoint): boolean {
   return point.x < 0 || point.x >= state.width || point.y < 0 || point.y >= state.height || state.maze[point.y]?.[point.x] === '#'
 }
 
-export function canMove(state: MazeChaseState, point: MazePoint, direction: Direction): boolean {
+export function canMove(state: MazeChaseState, point: MazePoint, direction: MazeChaseDirection): boolean {
   return isDirection(direction) && !isWall(state, getNextPoint(state, point, direction))
 }
 
@@ -262,249 +234,35 @@ export function getWallTileKey(maze: string[], x: number, y: number): WallTileKe
   return 'block'
 }
 
-function distance(left: MazePoint, right: MazePoint): number {
-  return Math.abs(left.x - right.x) + Math.abs(left.y - right.y)
-}
-
-function withoutCell(cells: MazePoint[], target: MazePoint): MazePoint[] {
-  return cells.filter((cell) => !cellsMatch(cell, target))
-}
-
-function resetActors(state: MazeChaseState): MazeChaseState {
-  return {
-    ...state,
-    player: {
-      ...state.player,
-      position: { ...state.player.start },
-      direction: 'none',
-      pendingDirection: 'none',
-    },
-    ghosts: state.ghosts.map((ghost) => ({
-      ...ghost,
-      position: { ...ghost.start },
-      direction: ghost.direction === 'none' ? 'left' : ghost.direction,
-      mode: 'chase',
-      respawnAt: undefined,
-    })),
-    frightenedUntil: 0,
-  }
-}
-
-function resetLevel(state: MazeChaseState): MazeChaseState {
-  const source = state.maze
-  const pellets: MazePoint[] = []
-  const powerPellets: MazePoint[] = []
-  source.forEach((row, y) => row.split('').forEach((cell, x) => {
-    if (cell === '.') pellets.push({ x, y })
-    if (cell === 'o') powerPellets.push({ x, y })
-  }))
-
-  return resetActors({
-    ...state,
-    pellets,
-    powerPellets,
-    fruit: { position: { x: 9, y: 13 }, active: true, collected: false },
-    level: state.level + 1,
-    tickMs: Math.max(90, state.tickMs - 8),
-    ghostStepCounter: 0,
-  })
-}
-
-function rankGhostDirections(state: MazeChaseState, ghost: MazeGhost, now: number): Direction[] {
-  if (ghost.mode === 'hidden') return []
-
-  const options = (Object.keys(DIRECTION_DELTA) as Array<Exclude<Direction, 'none'>>)
-    .filter((direction) => !isWall(state, getNextPoint(state, ghost.position, direction)))
-    .filter((direction) => !isDirection(ghost.direction) || OPPOSITE_DIRECTION[ghost.direction] !== direction)
-  const available = options.length > 0
-    ? options
-    : (Object.keys(DIRECTION_DELTA) as Array<Exclude<Direction, 'none'>>).filter((direction) => !isWall(state, getNextPoint(state, ghost.position, direction)))
-  if (available.length === 0) return []
-
-  const target = ghost.mode === 'returning'
-    ? ghost.start
-    : now < state.frightenedUntil
-      ? { x: state.width - state.player.position.x - 1, y: state.height - state.player.position.y - 1 }
-      : state.player.position
-
-  return available.sort((left, right) => {
-    const leftDistance = distance(getNextPoint(state, ghost.position, left), target)
-    const rightDistance = distance(getNextPoint(state, ghost.position, right), target)
-    return ghost.mode === 'frightened' ? rightDistance - leftDistance : leftDistance - rightDistance
-  })
-}
-
-function chooseGhostDirection(state: MazeChaseState, ghost: MazeGhost, now: number, reservedCells = new Set<string>()): Direction {
-  const rankedDirections = rankGhostDirections(state, ghost, now)
-  return rankedDirections.find((direction) => !reservedCells.has(getCellKey(getNextPoint(state, ghost.position, direction)))) || 'none'
-}
-
-function hasCollision(
-  previousPlayerPosition: MazePoint,
-  nextPlayerPosition: MazePoint,
-  previousGhostPosition: MazePoint,
-  nextGhostPosition: MazePoint
-): boolean {
-  const sameCellCollision = cellsMatch(nextPlayerPosition, nextGhostPosition)
-  const swapCollision = cellsMatch(previousPlayerPosition, nextGhostPosition) && cellsMatch(previousGhostPosition, nextPlayerPosition)
-  return sameCellCollision || swapCollision
-}
-
-function getLiveGhostMode(state: MazeChaseState, ghost: MazeGhost, now: number): GhostMode {
-  if (ghost.mode === 'hidden') return 'hidden'
-  if (ghost.mode === 'returning') return cellsMatch(ghost.position, ghost.start) ? 'chase' : 'returning'
-  return now < state.frightenedUntil ? 'frightened' : 'chase'
-}
-
-function reviveHiddenGhosts(state: MazeChaseState, now: number): MazeChaseState {
-  const reservedCells = new Set(
-    state.ghosts
-      .filter((ghost) => ghost.mode !== 'hidden')
-      .map((ghost) => getCellKey(ghost.position))
-  )
-
-  return {
-    ...state,
-    ghosts: state.ghosts.map((ghost) => {
-      if (ghost.mode !== 'hidden' || ghost.respawnAt === undefined || now < ghost.respawnAt) return ghost
-      const startKey = getCellKey(ghost.start)
-      if (reservedCells.has(startKey)) return ghost
-      reservedCells.add(startKey)
-      return {
-        ...ghost,
-        position: { ...ghost.start },
-        mode: 'chase',
-        direction: ghost.direction === 'none' ? 'left' : ghost.direction,
-        respawnAt: undefined,
-      }
-    }),
-  }
-}
-
-function resolveGhostCollisions(
-  state: MazeChaseState,
-  previousPlayerPosition: MazePoint,
-  nextPlayerPosition: MazePoint,
-  previousGhostPositions: Map<string, MazePoint>,
-  now: number
-): MazeChaseState {
-  let next = state
-  for (const ghost of next.ghosts) {
-    if (ghost.mode === 'returning' || ghost.mode === 'hidden') continue
-    const collisionMode = getLiveGhostMode(next, ghost, now)
-    const previousGhostPosition = previousGhostPositions.get(ghost.id) || ghost.position
-    if (!hasCollision(previousPlayerPosition, nextPlayerPosition, previousGhostPosition, ghost.position)) continue
-
-    if (collisionMode === 'frightened') {
-      next = {
-        ...next,
-        score: next.score + GHOST_EAT_SCORE,
-        ghosts: next.ghosts.map((item) => item.id === ghost.id ? {
-          ...item,
-          position: { ...item.start },
-          mode: 'hidden',
-          direction: 'none',
-          respawnAt: now + GHOST_RESPAWN_MS,
-        } : item),
-      }
-    } else {
-      const lives = Math.max(0, next.lives - 1)
-      next = resetActors({ ...next, lives, isGameOver: lives === 0 })
-      break
-    }
-  }
-  return next
-}
-
-export function nextMazeState(state: MazeChaseState): MazeChaseState {
-  if (state.isGameOver) return state
-
-  const now = Date.now()
-  let next: MazeChaseState = reviveHiddenGhosts({ ...state, hasStarted: true }, now)
-  const previousPlayerPosition = { ...next.player.position }
-  const previousGhostPositions = new Map(next.ghosts.map((ghost) => [ghost.id, { ...ghost.position }]))
-  const desiredDirection = canMove(next, next.player.position, next.player.pendingDirection)
-    ? next.player.pendingDirection
-    : next.player.direction
-  const playerDirection = canMove(next, next.player.position, desiredDirection) ? desiredDirection : 'none'
-  const playerPosition = getNextPoint(next, next.player.position, playerDirection)
-
-  next = {
-    ...next,
-    player: { ...next.player, position: playerPosition, direction: playerDirection },
-  }
-
-  const atePellet = next.pellets.some((cell) => cellsMatch(cell, playerPosition))
-  const atePowerPellet = next.powerPellets.some((cell) => cellsMatch(cell, playerPosition))
-  const ateFruit = Boolean(next.fruit?.active && !next.fruit.collected && cellsMatch(next.fruit.position, playerPosition))
-
-  if (atePellet) {
-    next = { ...next, pellets: withoutCell(next.pellets, playerPosition), score: next.score + 10 }
-  }
-  if (atePowerPellet) {
-    next = {
-      ...next,
-      powerPellets: withoutCell(next.powerPellets, playerPosition),
-      score: next.score + 50,
-      frightenedUntil: now + FRIGHTENED_MS,
-    }
-  }
-  if (ateFruit && next.fruit) {
-    next = {
-      ...next,
-      fruit: { ...next.fruit, active: false, collected: true },
-      score: next.score + 100,
-    }
-  }
-
-  next = resolveGhostCollisions(next, previousPlayerPosition, next.player.position, previousGhostPositions, now)
-
-  if (!next.isGameOver && next.pellets.length === 0 && next.powerPellets.length === 0) {
-    next = resetLevel(next)
-  }
-
-  return next
-}
-
 export function getGhostTickMs(tickMs: number): number {
   return Math.round(tickMs * 1.2)
 }
 
-export function nextGhostState(state: MazeChaseState, previousPlayerPosition = state.player.position): MazeChaseState {
-  if (state.isGameOver) return state
-
-  const now = Date.now()
-  let next = reviveHiddenGhosts({ ...state, hasStarted: true }, now)
-  const previousGhostPositions = new Map(next.ghosts.map((ghost) => [ghost.id, { ...ghost.position }]))
-  const reservedCells = new Set(
-    next.ghosts
-      .filter((ghost) => ghost.mode !== 'hidden')
-      .map((ghost) => getCellKey(ghost.position))
-  )
-
-  next = {
-    ...next,
-    ghosts: next.ghosts.map((ghost) => {
-      if (ghost.mode === 'hidden') return ghost
-
-      reservedCells.delete(getCellKey(ghost.position))
-      const mode = getLiveGhostMode(next, ghost, now)
-      const direction = chooseGhostDirection(next, { ...ghost, mode }, now, reservedCells)
-      const position = direction === 'none' ? ghost.position : getNextPoint(next, ghost.position, direction)
-      reservedCells.add(getCellKey(position))
-      return { ...ghost, mode, direction, position }
-    }),
+/** Adapts pre-replay wall-clock checkpoints for continued, explicitly unranked play. */
+export function normalizeLegacyMazeState(state: MazeChaseState, now = Date.now()): MazeChaseState {
+  if (Number.isSafeInteger(state.tick) && state.tick >= 0 && Number.isSafeInteger(state.elapsedMs) && state.elapsedMs >= 0) {
+    return state
   }
 
-  return resolveGhostCollisions(next, previousPlayerPosition, next.player.position, previousGhostPositions, now)
-}
-
-export function advanceMazeState(state: MazeChaseState, steps: number): MazeChaseState {
-  let next = state
-  for (let index = 0; index < steps; index += 1) {
-    next = nextMazeState(next)
+  const relativeDeadline = (deadline: number | undefined): number | undefined => {
+    if (!Number.isFinite(deadline)) return undefined
+    return Math.max(0, (deadline || 0) - now)
   }
-  return next
+
+  return {
+    ...state,
+    hasStarted: Boolean(state.hasStarted),
+    tick: 0,
+    elapsedMs: 0,
+    ghostStepCounter: Number.isSafeInteger(state.ghostStepCounter) && state.ghostStepCounter >= 0
+      ? state.ghostStepCounter
+      : 0,
+    frightenedUntil: relativeDeadline(state.frightenedUntil) || 0,
+    ghosts: state.ghosts.map((ghost) => ({
+      ...ghost,
+      respawnAt: relativeDeadline(ghost.respawnAt),
+    })),
+  }
 }
 
 export default function MazeChaseGame() {
@@ -514,26 +272,38 @@ export default function MazeChaseGame() {
   const [mazeState, setMazeState] = useState<MazeChaseState | null>(null)
   const [modal, setModal] = useState<ModalState | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
+  const [isStarting, setIsStarting] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
-  const [lastFacingDirection, setLastFacingDirection] = useState<Exclude<Direction, 'none'>>('right')
+  const [lastFacingDirection, setLastFacingDirection] = useState<Direction>('right')
   const [chompClosed, setChompClosed] = useState(false)
   const [wrapActorIds, setWrapActorIds] = useState<Set<string>>(new Set())
   const [countdownRemaining, setCountdownRemaining] = useState<number | null>(null)
   const [snapResetActive, setSnapResetActive] = useState(false)
   const latestStateRef = useRef<MazeChaseState | null>(null)
-  const previousPlayerPositionRef = useRef<MazePoint | null>(null)
-  const pendingDirectionRef = useRef<Direction>('none')
+  const pendingDirectionRef = useRef<Direction | undefined>(undefined)
   const lastCheckpointAtRef = useRef(0)
   const completedRef = useRef(false)
+  const sessionGameIdRef = useRef<string | null>(null)
+  const startCheckpointConfirmedRef = useRef(false)
+  const startPromiseRef = useRef<Promise<boolean> | null>(null)
+  const replayRecorderRef = useRef(createReplayRecorder())
+  const replayEligibleRef = useRef(false)
+  const [replayStatus, setReplayStatus] = useState<ReplayRunStatus>('unranked')
+  const [unrankedReason, setUnrankedReason] = useState<ReplayUnrankedReason>('legacy')
   const prefersReducedMotion = usePrefersReducedMotion()
+  const mazeDirection = mazeState?.player.direction
+  const mazeTickMs = mazeState?.tickMs
+  const engineSeed = game?.replay && REPLAY_SEED_PATTERN.test(game.replay.seed)
+    ? game.replay.seed
+    : LEGACY_FALLBACK_SEED
 
   useEffect(() => {
     if (!game) return
-    const state = game.gameState as unknown as MazeChaseState
+    const rawState = game.gameState as unknown as MazeChaseState
+    const state = normalizeLegacyMazeState(rawState)
     setMazeState(state)
     latestStateRef.current = state
-    previousPlayerPositionRef.current = state.player.position
-    pendingDirectionRef.current = state.player.pendingDirection
+    pendingDirectionRef.current = isDirection(state.player.pendingDirection) ? state.player.pendingDirection : undefined
     setWrapActorIds(new Set())
     setChompClosed(false)
     setCountdownRemaining(null)
@@ -542,6 +312,26 @@ export default function MazeChaseGame() {
       setLastFacingDirection(state.player.direction)
     }
     setIsPlaying(Boolean(state.hasStarted && game.status === 'active' && !state.isGameOver))
+
+    if (sessionGameIdRef.current !== game._id) {
+      sessionGameIdRef.current = game._id
+      completedRef.current = game.status === 'completed'
+      startCheckpointConfirmedRef.current = Boolean(state.hasStarted)
+      startPromiseRef.current = null
+      replayRecorderRef.current = createReplayRecorder(
+        isDirection(state.player.pendingDirection) ? state.player.pendingDirection : undefined,
+      )
+      const eligibility = getInitialReplayEligibility(game.replay, rawState)
+      replayEligibleRef.current = eligibility.eligible
+      setUnrankedReason(eligibility.reason || 'legacy')
+      setReplayStatus(game.status === 'completed'
+        ? getCompletedReplayStatus(game.result?.verification)
+        : eligibility.eligible ? 'eligible' : 'unranked')
+    } else if (game.status === 'completed') {
+      replayEligibleRef.current = false
+      setReplayStatus(getCompletedReplayStatus(game.result?.verification))
+      if (game.result?.verification !== 'replay') setUnrankedReason('verification')
+    }
   }, [game])
 
   useEffect(() => {
@@ -552,17 +342,17 @@ export default function MazeChaseGame() {
   }, [mazeState])
 
   useEffect(() => {
-    if (!isPlaying || !mazeState || !isDirection(mazeState.player.direction)) {
+    if (!isPlaying || !mazeDirection || !isDirection(mazeDirection)) {
       setChompClosed(false)
       return
     }
 
     const interval = window.setInterval(() => {
       setChompClosed((value) => !value)
-    }, Math.max(70, Math.floor(mazeState.tickMs / 2)))
+    }, Math.max(70, Math.floor((mazeTickMs ?? 140) / 2)))
 
     return () => window.clearInterval(interval)
-  }, [isPlaying, mazeState?.player.direction, mazeState?.tickMs])
+  }, [isPlaying, mazeDirection, mazeTickMs])
 
   useEffect(() => {
     if (countdownRemaining === null) return
@@ -589,9 +379,113 @@ export default function MazeChaseGame() {
     }
   }, [game, setGame])
 
+  const markReplayUnranked = useCallback((reason: ReplayUnrankedReason) => {
+    replayEligibleRef.current = false
+    invalidateReplayRecorder(replayRecorderRef.current, reason)
+    setUnrankedReason(reason)
+    setReplayStatus('unranked')
+  }, [])
+
+  const ensureRunStarted = useCallback(async (state: MazeChaseState): Promise<boolean> => {
+    if (startCheckpointConfirmedRef.current) return true
+    if (startPromiseRef.current) return startPromiseRef.current
+
+    const startedState = { ...state, hasStarted: true }
+    latestStateRef.current = startedState
+    setMazeState(startedState)
+    setIsStarting(true)
+
+    const startPromise = (async () => {
+      try {
+        await saveState(startedState)
+        startCheckpointConfirmedRef.current = true
+        setIsPlaying(true)
+        return true
+      } catch (error: unknown) {
+        const latest = latestStateRef.current
+        if (latest && latest.tick === startedState.tick) {
+          const stoppedState = { ...latest, hasStarted: false }
+          latestStateRef.current = stoppedState
+          setMazeState(stoppedState)
+        }
+        setModal({ title: 'Could not start run', message: getErrorMessage(error), variant: 'danger' })
+        return false
+      } finally {
+        setIsStarting(false)
+        startPromiseRef.current = null
+      }
+    })()
+
+    startPromiseRef.current = startPromise
+    return startPromise
+  }, [saveState])
+
+  const completeRun = useCallback(async (state: MazeChaseState) => {
+    if (!game || game.status !== 'active') return
+
+    const recorder = replayRecorderRef.current
+    const replay = buildReplayPayload(recorder)
+    const canVerify = replayEligibleRef.current
+      && replay !== null
+      && recorder.tickCount === state.tick
+
+    if (canVerify) {
+      setReplayStatus('verifying')
+      try {
+        const response = await api.post<ReplayCompletionResponse>(
+          `/api/games/${game._id}/single-player/replay`,
+          replay,
+        )
+        const verified = response.data
+        setGame({
+          ...verified.game,
+          gameState: verified.gameState as unknown as Record<string, unknown>,
+          moveHistory: verified.moveHistory,
+        })
+        replayEligibleRef.current = false
+        setReplayStatus('verified')
+        return
+      } catch (error: unknown) {
+        const rejectionStatus = axios.isAxiosError(error) ? error.response?.status : undefined
+        const rejectionCode = axios.isAxiosError(error) ? error.response?.data?.code : undefined
+        if (!isExplicitReplayRejection(rejectionStatus, rejectionCode)) {
+          setReplayStatus('retry')
+          setModal({
+            title: 'Replay verification is pending',
+            message: 'The replay is still available in this tab. Keep this page open and retry verification when the connection is available.',
+            variant: 'warning',
+          })
+          return
+        }
+
+        markReplayUnranked('verification')
+        try {
+          await saveState(state, true, true)
+          setModal({
+            title: 'Score saved without ranking',
+            message: 'The server could not reproduce this replay. Your run remains in history, but it was not added to the leaderboard.',
+            variant: 'warning',
+          })
+          return
+        } catch (error: unknown) {
+          completedRef.current = false
+          setModal({ title: 'Could not save score', message: getErrorMessage(error), variant: 'danger' })
+          return
+        }
+      }
+    }
+
+    if (replayEligibleRef.current) markReplayUnranked(recorder.reason || 'interrupted')
+    try {
+      await saveState(state, true, true)
+    } catch (error: unknown) {
+      completedRef.current = false
+      setModal({ title: 'Could not save score', message: getErrorMessage(error), variant: 'danger' })
+    }
+  }, [game, markReplayUnranked, saveState, setGame])
+
   const beginLifeResetCountdown = useCallback((state: MazeChaseState) => {
-    pendingDirectionRef.current = 'none'
-    previousPlayerPositionRef.current = state.player.position
+    pendingDirectionRef.current = undefined
     setIsPlaying(false)
     setChompClosed(false)
     setSnapResetActive(true)
@@ -600,14 +494,9 @@ export default function MazeChaseGame() {
     window.setTimeout(() => setSnapResetActive(false), 120)
   }, [])
 
-  function startGame() {
+  async function startGame() {
     if (!mazeState || mazeState.isGameOver || game?.status !== 'active' || countdownRemaining !== null) return
-    const next = { ...mazeState, hasStarted: true }
-    setMazeState(next)
-    latestStateRef.current = next
-    previousPlayerPositionRef.current = next.player.position
-    setIsPlaying(true)
-    void saveState(next).catch(() => undefined)
+    await ensureRunStarted(mazeState)
   }
 
   const setPendingDirection = useCallback((direction: Direction) => {
@@ -615,18 +504,16 @@ export default function MazeChaseGame() {
     if (game?.status !== 'active' || !current || current.isGameOver || countdownRemaining !== null) return
 
     pendingDirectionRef.current = direction
-    setMazeState((current) => {
-      if (!current || current.isGameOver) return current
-      const next = {
-        ...current,
-        hasStarted: true,
-        player: { ...current.player, pendingDirection: direction },
-      }
-      latestStateRef.current = next
-      return next
-    })
-    setIsPlaying(true)
-  }, [countdownRemaining, game?.status])
+    const next = {
+      ...current,
+      hasStarted: true,
+      player: { ...current.player, pendingDirection: direction },
+    }
+    latestStateRef.current = next
+    setMazeState(next)
+    if (startCheckpointConfirmedRef.current) setIsPlaying(true)
+    else void ensureRunStarted(next)
+  }, [countdownRemaining, ensureRunStarted, game?.status])
 
   const handleDirectionPress = useCallback((event: React.PointerEvent<HTMLButtonElement>, direction: Direction) => {
     event.preventDefault()
@@ -671,17 +558,31 @@ export default function MazeChaseGame() {
       const current = latestStateRef.current
       if (!current) return
 
-      const queuedState = {
-        ...current,
-        player: { ...current.player, pendingDirection: pendingDirectionRef.current },
+      const direction = pendingDirectionRef.current
+      if (replayEligibleRef.current) {
+        const recorder = replayRecorderRef.current
+        if (current.tick !== recorder.tickCount) {
+          markReplayUnranked('interrupted')
+        } else if (!recordReplayTick(recorder, direction)) {
+          markReplayUnranked(recorder.reason || 'limit')
+        }
       }
-      const next = nextMazeState(queuedState)
+
+      const next = stepMazeChaseState(current, { seed: engineSeed, direction })
       const wrappedActors = new Set<string>()
       if (isWrapMove(next, current.player.position, next.player.position)) {
         wrappedActors.add('player')
       }
-      pendingDirectionRef.current = next.player.pendingDirection
-      previousPlayerPositionRef.current = current.player.position
+      for (const ghost of next.ghosts) {
+        const previousGhost = current.ghosts.find((item) => item.id === ghost.id)
+        if (previousGhost && isWrapMove(next, previousGhost.position, ghost.position)) {
+          wrappedActors.add(ghost.id)
+        }
+      }
+      pendingDirectionRef.current = isDirection(next.player.pendingDirection)
+        ? next.player.pendingDirection
+        : undefined
+      if (replayEligibleRef.current) replayRecorderRef.current.lastDirection = pendingDirectionRef.current
       latestStateRef.current = next
       setWrapActorIds(wrappedActors)
       setMazeState(next)
@@ -694,9 +595,7 @@ export default function MazeChaseGame() {
       if (next.isGameOver && !completedRef.current) {
         completedRef.current = true
         setIsPlaying(false)
-        void saveState(next, true, true).catch((err: unknown) => {
-          setModal({ title: 'Could not save score', message: getErrorMessage(err), variant: 'danger' })
-        })
+        void completeRun(next)
       } else if (lostLife) {
         beginLifeResetCountdown(next)
         lastCheckpointAtRef.current = now
@@ -708,56 +607,18 @@ export default function MazeChaseGame() {
     }, mazeState?.tickMs ?? 150)
 
     return () => window.clearInterval(interval)
-  }, [beginLifeResetCountdown, game?.status, isPlaying, mazeState?.tickMs, saveState])
-
-  useEffect(() => {
-    if (!latestStateRef.current || !isPlaying || game?.status !== 'active') return
-
-    const interval = window.setInterval(() => {
-      const current = latestStateRef.current
-      if (!current) return
-
-      const next = nextGhostState(current, previousPlayerPositionRef.current || current.player.position)
-      const wrappedActors = new Set<string>()
-      for (const ghost of next.ghosts) {
-        const previousGhost = current.ghosts.find((item) => item.id === ghost.id)
-        if (previousGhost && isWrapMove(next, previousGhost.position, ghost.position)) {
-          wrappedActors.add(ghost.id)
-        }
-      }
-      latestStateRef.current = next
-      setWrapActorIds(wrappedActors)
-      setMazeState(next)
-
-      const scored = next.score > current.score
-      const lostLife = next.lives < current.lives && !next.isGameOver
-      const now = Date.now()
-
-      if (next.isGameOver && !completedRef.current) {
-        completedRef.current = true
-        setIsPlaying(false)
-        void saveState(next, true, true).catch((err: unknown) => {
-          setModal({ title: 'Could not save score', message: getErrorMessage(err), variant: 'danger' })
-        })
-      } else if (lostLife) {
-        beginLifeResetCountdown(next)
-        lastCheckpointAtRef.current = now
-        void saveState(next).catch(() => undefined)
-      } else if (scored || now - lastCheckpointAtRef.current > 3000) {
-        lastCheckpointAtRef.current = now
-        void saveState(next).catch(() => undefined)
-      }
-    }, getGhostTickMs(mazeState?.tickMs ?? 150))
-
-    return () => window.clearInterval(interval)
-  }, [beginLifeResetCountdown, game?.status, isPlaying, mazeState?.tickMs, saveState])
+  }, [beginLifeResetCountdown, completeRun, engineSeed, game?.status, isPlaying, markReplayUnranked, mazeState?.tickMs, saveState])
 
   useEffect(() => {
     function handleBeforeUnload() {
       const state = latestStateRef.current
       if (!game || game.status !== 'active' || !state) return
+      if (state.isGameOver && replayEligibleRef.current) return
       const url = `/api/games/${game._id}/single-player/maze-chase/state`
-      const payload = JSON.stringify({ gameState: state, completed: state.isGameOver })
+      const payload = JSON.stringify({
+        gameState: state,
+        completed: state.isGameOver && !replayEligibleRef.current,
+      })
       navigator.sendBeacon?.(url, new Blob([payload], { type: 'application/json' }))
     }
 
@@ -831,11 +692,18 @@ export default function MazeChaseGame() {
   const isActive = game.status === 'active'
   const isCompleted = game.status === 'completed'
   const canRetry = mazeState.isGameOver || !isActive
+  const canStartNewRun = canRetry && replayStatus !== 'verifying' && replayStatus !== 'retry'
   const isCountingDown = countdownRemaining !== null
   const playerTransitionMs = prefersReducedMotion || snapResetActive ? 0 : mazeState.tickMs
   const ghostTransitionMs = prefersReducedMotion || snapResetActive ? 0 : getGhostTickMs(mazeState.tickMs)
   const isPlayerMoving = isDirection(mazeState.player.direction)
   const playerSprite = getPlayerSprite(lastFacingDirection, isPlayerMoving && chompClosed)
+  const replayPresentation = getReplayRunPresentation(replayStatus, unrankedReason)
+  const replayPresentationClass = replayPresentation.tone === 'success'
+    ? 'border-success/30 bg-success-subtle text-success-text'
+    : replayPresentation.tone === 'warning'
+      ? 'border-warning/30 bg-warning-subtle text-warning-text'
+      : 'border-accent/30 bg-accent-subtle text-accent'
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
@@ -854,7 +722,7 @@ export default function MazeChaseGame() {
             <p className="text-sm text-text-muted">Level {mazeState.level} - {mazeState.lives} lives</p>
           </div>
           <div className="flex items-center gap-3">
-            {canRetry && (
+            {canStartNewRun && (
               <button
                 type="button"
                 onClick={() => void retryGame()}
@@ -897,17 +765,30 @@ export default function MazeChaseGame() {
                 </div>
               </div>
             </div>
+            <div className={`mb-4 rounded-xl border px-4 py-3 ${replayPresentationClass}`} aria-live="polite">
+              <p className="text-sm font-semibold">{replayPresentation.label}</p>
+              <p className="mt-1 text-xs opacity-90">{replayPresentation.detail}</p>
+            </div>
             {mazeState.isGameOver && (
               <div className="mb-4 flex flex-col items-center justify-center gap-3 rounded-xl border border-success/30 bg-success-subtle px-4 py-3 text-center text-sm font-medium text-success-text sm:flex-row">
                 <span>Game over: final score {mazeState.score}</span>
-                <button
+                {replayStatus === 'retry' && (
+                  <button
+                    type="button"
+                    onClick={() => void completeRun(mazeState)}
+                    className="min-h-10 cursor-pointer rounded-lg border border-warning/40 bg-warning-subtle px-4 py-2 text-sm font-medium text-warning-text"
+                  >
+                    Retry verification
+                  </button>
+                )}
+                {canStartNewRun && <button
                   type="button"
                   onClick={() => void retryGame()}
                   disabled={isRetrying}
                   className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isRetrying ? 'Starting...' : 'Retry'}
-                </button>
+                </button>}
               </div>
             )}
             <div className="mx-auto w-full max-w-[min(92vw,72vh,42rem)]">
@@ -979,15 +860,15 @@ export default function MazeChaseGame() {
                   onClick={() => {
                     if (isCountingDown) return
                     if (!mazeState.hasStarted) {
-                      startGame()
+                      void startGame()
                       return
                     }
                     setIsPlaying((value) => !value)
                   }}
-                  disabled={!isActive || mazeState.isGameOver || isCountingDown}
+                  disabled={!isActive || mazeState.isGameOver || isCountingDown || isStarting}
                   className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {!mazeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
+                  {isStarting ? 'Starting...' : !mazeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
                 <span className="rounded-lg bg-overlay px-3 py-2 text-sm text-text-secondary">Use WASD or arrow keys</span>
               </div>
@@ -1001,15 +882,15 @@ export default function MazeChaseGame() {
                   onClick={() => {
                     if (isCountingDown) return
                     if (!mazeState.hasStarted) {
-                      startGame()
+                      void startGame()
                       return
                     }
                     setIsPlaying((value) => !value)
                   }}
-                  disabled={!isActive || mazeState.isGameOver || isCountingDown}
+                  disabled={!isActive || mazeState.isGameOver || isCountingDown || isStarting}
                   className="min-h-12 rounded-lg bg-accent text-xs font-bold text-text-on-accent disabled:opacity-60"
                 >
-                  {!mazeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
+                  {isStarting ? 'Starting' : !mazeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
                 <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'right')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Right</button>
                 <span />

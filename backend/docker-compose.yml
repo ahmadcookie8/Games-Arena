@@ -1,35 +1,75 @@
-version: '3.8'
-
 services:
   node:
     image: ${BACKEND_IMAGE:-games-arena-backend:local}
-    build: . 
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    init: true
+    user: node
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
-      - NODE_ENV=${NODE_ENV:-development}
-      - MONGODB_URI=${MONGODB_URI}
-      - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=${JWT_SECRET}
-      - CORS_ORIGIN=${CORS_ORIGIN}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - PORT=3000
+      NODE_ENV: ${NODE_ENV:?Set NODE_ENV to development locally or production when deployed}
+      MONGODB_URI: ${MONGODB_URI:?MONGODB_URI must be set}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN must be set}
+      LEGACY_GAME_CODE_CUTOFF: ${LEGACY_GAME_CODE_CUTOFF:-2026-10-15T00:00:00.000Z}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: "3000"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     networks:
       - app-network
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: 1.0
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    image: redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    user: redis
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
     volumes:
       - redis-data:/data
     networks:
       - app-network
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 volumes:
   redis-data:

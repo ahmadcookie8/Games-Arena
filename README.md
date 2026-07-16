@@ -54,7 +54,7 @@ Games Arena is a full-featured online gaming platform that brings the classic ex
 - **Socket.io** for real-time WebSocket connections
 - **MongoDB Atlas** (free tier) for persistent game storage
 - **Redis** (Docker) for caching active games and sessions
-- **JWT** for stateless authentication
+- **Signed HttpOnly JWT cookies** with per-user session revocation
 - **Deployed on:** AWS EC2 t4g.micro (~$6-7/month after free tier)
 
 ### Infrastructure
@@ -155,36 +155,36 @@ Games-Arena/
 ## API Overview
 
 ### Authentication
-- `POST /api/auth/signup` — Create account (username only)
-- `POST /api/auth/login` — Log in
+- `POST /api/auth/signup` — Create an account with username, password, and optional email
+- `POST /api/auth/login` — Log in and receive the HttpOnly session cookie
 - `GET /api/auth/me` — Get current user
+- `POST /api/auth/logout` — Revoke all current sessions and clear the cookie
 
 ### Games
 - `POST /api/games/create` — Create a new game
 - `GET /api/games` — List all your games (active, waiting, completed)
-- `POST /api/games/:gameId/join` — Join a game via share code
+- `POST /api/games/join` — Join a game via share code
 - `GET /api/games/:gameId` — Get game details and current state
+- `POST /api/games/:gameId/single-player/replay` — Verify a completed Snake or Maze Chase input replay
 - `POST /api/games/:gameId/resign` — Resign from a game
-- `GET /api/games/:gameId/resume` — Resume a paused game
 - `GET /api/games/:gameId/history` — Get move history
 
 ### Statistics
 - `GET /api/users/:userId/stats` — Get player stats
 - `GET /api/leaderboards/:gameType` — Get leaderboard for a game type
+- `GET /api/leaderboards/single-player/:gameType` — Get verified solo rankings
 - `GET /api/leaderboards` — Get all leaderboards
 
 ## Real-time Events (Socket.io)
 
-### Game State Sync
-- `gameStarted` — Game begins, players notified
-- `moveMade` — A player made a move, all players updated
-- `turnChanged` — It's now player X's turn
-- `gameOver` — Game ended, winner announced
+The authenticated client may emit only `joinRoom`, `makeMove`, and
+`sendChatMessage`. Every payload is runtime validated and every operation uses
+the unified acknowledgement envelope. Participant-specific updates arrive as
+`gameUpdated`, `moveMade`, `gameOver`, `gamesChanged`, and `chatMessage`.
 
-### Player Management
-- `playerJoined` — New player joined the game
-- `playerDisconnected` — Player lost connection (timeout in 5 minutes)
-- `playerReconnected` — Player reconnected
+Snake and Maze Chase use the shared deterministic game engine and a server-issued
+seed. Public solo rankings include only bounded input replays that the server can
+reproduce; legacy or interrupted runs remain visible as explicitly unranked history.
 
 ## Deployment
 
@@ -193,11 +193,18 @@ Games Arena is deployed on:
 - **Frontend:** Vercel (free tier)
   - Automatic deploys on push to `main`
   - Domain: `https://games.penguincookie.ca`
+  - `https://games-arena.penguincookie.ca` is a retired/parked hostname and must not be used for auth, CORS, or frontend environment variables
 
 - **Backend:** AWS EC2 t4g.micro
   - Cost: ~$6-7/month after 12-month free tier
   - Database: MongoDB Atlas (free tier, 5GB storage)
   - Cache: Redis (Docker container)
+
+Backend releases are gated by lint, tests, builds, dependency audits, image scanning, and SBOM generation. The workflow publishes only a commit-addressed image and deploys its immutable digest. It also synchronizes `backend/docker-compose.yml`, verifies the EC2 SSH host key through the `EC2_KNOWN_HOSTS` secret, waits for the health check, and rolls back a failed update.
+
+Required production secrets are `DOCKER_HUB_USERNAME`, `DOCKER_HUB_PASSWORD`, `EC2_HOST`, `EC2_SSH_KEY`, and `EC2_KNOWN_HOSTS`. Capture the known-hosts entry through a trusted administrative channel; do not populate it with an unverified key scan during deployment. Install the versioned `backend/deploy/nginx-api.conf` on the host when the API proxy configuration changes.
+
+Before the first hardened release, schedule a maintenance window, verify a MongoDB backup, run `npm run security:migrate` in report-only mode, and review its counts. Writes require the explicit `-- --apply --backup-confirmed` guard. Rotate `JWT_SECRET` (minimum 32 random bytes) during the same maintenance window; this intentionally invalidates all existing sessions. Full rollout and verification steps are recorded in `agents.md`.
 
 See `getting_started/README_SETUP.md` for detailed deployment instructions.
 

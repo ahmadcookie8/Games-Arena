@@ -1,0 +1,4 @@
+# Install as /etc/sudoers.d/games-arena-deploy with mode 0440.
+# The target helper must be root-owned and non-writable by the deployment user.
+Cmnd_Alias GAMES_ARENA_SWITCH_UPSTREAM = /usr/local/sbin/games-arena-switch-upstream *
+ubuntu ALL=(root) NOPASSWD: GAMES_ARENA_SWITCH_UPSTREAM

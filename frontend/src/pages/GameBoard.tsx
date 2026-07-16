@@ -17,6 +17,7 @@ import { useAuth } from '../hooks/useAuth'
 import { useGameState } from '../hooks/useGameState'
 import { useSocket } from '../hooks/useSocket'
 import api from '../lib/api'
+import { canHostCloseGame, getCloseGamePrompt } from '../lib/gameClose'
 import { getGameLabel } from '../lib/gameRules'
 import { ChatMessage, Game } from '../types/game'
 
@@ -47,9 +48,9 @@ interface ModalState {
 }
 
 function getCloseGameModal(game: Game, onConfirm: () => void, onCancel: () => void): ModalState {
+  const prompt = getCloseGamePrompt(game)
   return {
-    title: 'Close this game?',
-    message: `This will close the ${getGameLabel(game.gameType)} room and remove it from your active games list. Other players will no longer be able to join or continue it.`,
+    ...prompt,
     variant: 'warning',
     primaryAction: {
       label: 'Close game',
@@ -67,7 +68,7 @@ export default function GameBoard() {
   const navigate = useNavigate()
   const { user } = useAuth()
   const { game, loading, setGame } = useGameState(gameId)
-  const { emit, on, connected } = useSocket()
+  const { emitWithAck, on, connected } = useSocket()
   const [modal, setModal] = useState<ModalState | null>(null)
   const [isReplaying, setIsReplaying] = useState(false)
   const latestGameRef = useRef<Game | null>(null)
@@ -114,9 +115,12 @@ export default function GameBoard() {
 
   useEffect(() => {
     if (!gameId || !connected) return
-    emit('joinRoom', { gameId }, (res: { game?: Game; error?: string }) => {
-      if (res.game) setGame(res.game)
-      if (res.error) showGameErrorModal(res.error)
+    let cancelled = false
+
+    void emitWithAck<{ game: Game }>('joinRoom', { gameId }).then((acknowledgement) => {
+      if (cancelled) return
+      if (acknowledgement.ok) setGame(acknowledgement.data.game)
+      else showGameErrorModal(acknowledgement.error.message)
     })
 
     const offGameUpdated = on('gameUpdated', (data: unknown) => {
@@ -150,30 +154,31 @@ export default function GameBoard() {
     })
 
     return () => {
+      cancelled = true
       offGameUpdated()
       offMoveMade()
       offGameOver()
       offChatMessage()
       offReplayCreated()
     }
-  }, [gameId, connected, emit, on, navigate, setGame, showGameErrorModal])
+  }, [gameId, connected, emitWithAck, on, navigate, setGame, showGameErrorModal])
 
-  function handleMove(move: unknown): Promise<MoveResponse> {
-    return new Promise((resolve) => {
-      emit('makeMove', { gameId, move }, (res: MoveResponse) => {
-        if (res.game) setGame(res.game)
-        if (!res.success) showGameErrorModal(res.error || 'Move failed')
-        resolve(res)
-      })
-    })
+  async function handleMove(move: unknown): Promise<MoveResponse> {
+    const acknowledgement = await emitWithAck<{ game: Game }>('makeMove', { gameId, move })
+    if (acknowledgement.ok) {
+      setGame(acknowledgement.data.game)
+      return { success: true, game: acknowledgement.data.game }
+    }
+
+    showGameErrorModal(acknowledgement.error.message)
+    return { success: false, error: acknowledgement.error.message }
   }
 
-  function handleSendChat(text: string): Promise<ChatResponse> {
-    return new Promise((resolve) => {
-      emit('sendChatMessage', { gameId, text }, (res: ChatResponse) => {
-        resolve(res)
-      })
-    })
+  async function handleSendChat(text: string): Promise<ChatResponse> {
+    const acknowledgement = await emitWithAck<{ message: ChatMessage }>('sendChatMessage', { gameId, text })
+    return acknowledgement.ok
+      ? { success: true, message: acknowledgement.data.message }
+      : { success: false, error: acknowledgement.error.message }
   }
 
   function closeModal() {
@@ -225,7 +230,7 @@ export default function GameBoard() {
   }
 
   function promptCloseGame() {
-    if (!game || game.status !== 'active') return
+    if (!game || !canHostCloseGame(game, user?._id)) return
     setModal(getCloseGameModal(game, () => {
       void confirmCloseGame()
     }, closeModal))
@@ -252,6 +257,7 @@ export default function GameBoard() {
   const isActive = game.status === 'active'
   const isWaitingForPlayer = isActive && game.players.length < minPlayers && game.gameType !== 'wisecracker' && game.gameType !== 'propertyManagement'
   const isCompleted = game.status === 'completed'
+  const canCurrentUserClose = canHostCloseGame(game, user?._id)
   const isMyTurn = isActive && !isWaitingForPlayer && !isCompleted && game.currentTurnIndex === myIndex
   const currentPlayer = game.players[game.currentTurnIndex]
   const resultText = game.result?.isDraw
@@ -296,7 +302,7 @@ export default function GameBoard() {
             statusLabel={tabletopStatus}
             statusTone={isCompleted ? 'success' : isWaitingForPlayer ? 'warning' : 'default'}
             onBack={() => navigate('/?tab=multiplayer')}
-            onClose={isActive ? promptCloseGame : undefined}
+            onClose={canCurrentUserClose ? promptCloseGame : undefined}
             primaryAction={game.gameType === 'scrabble' && canPlayAgain ? {
               label: isReplaying ? 'Starting…' : 'Play Again',
               onClick: () => void playAgain(),
@@ -328,7 +334,7 @@ export default function GameBoard() {
                 {isReplaying ? 'Starting...' : 'Play Again'}
               </button>
             )}
-            {isActive && (
+            {canCurrentUserClose && (
               <button
                 type="button"
                 onClick={promptCloseGame}

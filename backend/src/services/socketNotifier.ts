@@ -8,42 +8,40 @@ export function setSocketServer(server: Server): void {
   io = server
 }
 
+/** Revokes every live transport for a user after logout/auth-version changes. */
+export function disconnectUserSockets(userId: string): void {
+  io?.in(`user:${userId}`).disconnectSockets(true)
+}
+
 export function emitGameUpdated(game: IGameDocument): void {
-  if (game.gameType === 'scrabble') {
-    emitScrabblePersonalized(game, 'gameUpdated')
-    return
-  }
-  io?.to(String(game._id)).emit('gameUpdated', { game })
+  emitPersonalizedGameEvent(game, 'gameUpdated')
 }
 
 export function emitMoveMade(game: IGameDocument, move: string): void {
-  if (game.gameType === 'scrabble') {
-    emitScrabblePersonalized(game, 'moveMade', { move })
-    return
-  }
-  io?.to(String(game._id)).emit('moveMade', { game, move })
+  emitPersonalizedGameEvent(game, 'moveMade', { move })
 }
 
 export function emitGameOver(game: IGameDocument): void {
-  if (game.gameType === 'scrabble') {
-    emitScrabblePersonalized(game, 'gameOver', { result: game.result })
-    return
-  }
-  io?.to(String(game._id)).emit('gameOver', { game, result: game.result })
+  forEachPlayer(game, (userId) => {
+    const presented = presentGameForUser(game, userId)
+    io?.to(`user:${userId}`).emit('gameOver', { game: presented, result: presented.result })
+  })
 }
 
 export function emitGamesChanged(game: IGameDocument): void {
-  for (const player of game.players) {
-    io?.to(`user:${player.userId.toString()}`).emit('gamesChanged')
-  }
+  forEachPlayer(game, (userId) => {
+    io?.to(`user:${userId}`).emit('gamesChanged')
+  })
 }
 
 export function emitChatMessage(game: IGameDocument, message: unknown): void {
-  io?.to(String(game._id)).emit('chatMessage', { gameId: String(game._id), message })
+  forEachPlayer(game, (userId) => {
+    io?.to(`user:${userId}`).emit('chatMessage', { gameId: String(game._id), message })
+  })
 }
 
-export function emitGameReplayCreated(sourceGame: IGameDocument, replayGame: IGameDocument): void {
-  io?.to(String(sourceGame._id)).emit('gameReplayCreated', {
+export function emitGameReplayCreated(sourceGame: IGameDocument, replayGame: IGameDocument, requestedByUserId: string): void {
+  io?.to(`user:${requestedByUserId}`).emit('gameReplayCreated', {
     oldGameId: String(sourceGame._id),
     gameId: String(replayGame._id),
     gameCode: replayGame.gameCode,
@@ -51,9 +49,17 @@ export function emitGameReplayCreated(sourceGame: IGameDocument, replayGame: IGa
   })
 }
 
-function emitScrabblePersonalized(game: IGameDocument, event: 'gameUpdated' | 'moveMade' | 'gameOver', extra: Record<string, unknown> = {}): void {
-  for (const player of game.players) {
-    const userId = player.userId.toString()
+function emitPersonalizedGameEvent(
+  game: IGameDocument,
+  event: 'gameUpdated' | 'moveMade',
+  extra: Record<string, unknown> = {}
+): void {
+  forEachPlayer(game, (userId) => {
     io?.to(`user:${userId}`).emit(event, { game: presentGameForUser(game, userId), ...extra })
-  }
+  })
+}
+
+function forEachPlayer(game: IGameDocument, callback: (userId: string) => void): void {
+  const userIds = new Set(game.players.map((player) => player.userId.toString()))
+  for (const userId of userIds) callback(userId)
 }

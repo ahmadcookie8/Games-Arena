@@ -1,13 +1,14 @@
 import Redis from 'ioredis'
 import { config } from '../config'
+import { logSecurityEvent } from './securityLogger'
 
 let redisClient: Redis | null = null
 
 export function getRedisClient(): Redis {
   if (!redisClient) {
     redisClient = new Redis(config.redisUrl)
-    redisClient.on('error', (err) => console.error('Redis error:', err))
-    redisClient.on('connect', () => console.log('Redis connected'))
+    redisClient.on('error', (err) => logSecurityEvent('redis.failure', { errorName: err.name }, 'error'))
+    redisClient.on('connect', () => logSecurityEvent('redis.connected', {}, 'info'))
   }
   return redisClient
 }
@@ -31,6 +32,26 @@ export async function redisSet(key: string, value: unknown, ttlSeconds?: number)
 export async function redisDel(key: string): Promise<void> {
   const client = getRedisClient()
   await client.del(key)
+}
+
+export async function redisDelMany(keys: string[]): Promise<void> {
+  if (keys.length === 0) return
+  const client = getRedisClient()
+  const uniqueKeys = [...new Set(keys)]
+  for (let index = 0; index < uniqueKeys.length; index += 500) {
+    await client.del(...uniqueKeys.slice(index, index + 500))
+  }
+}
+
+export async function closeRedisClient(): Promise<void> {
+  const client = redisClient
+  redisClient = null
+  if (!client) return
+  try {
+    await client.quit()
+  } catch {
+    client.disconnect()
+  }
 }
 
 export async function redisIsConnected(): Promise<boolean> {

@@ -32,7 +32,7 @@ export function useGameState(gameId?: string) {
       .then((res) => setGame(res.data.game))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
-  }, [gameId])
+  }, [gameId, setGame])
 
   return { game: currentGame, loading, error, setGame, updateGameState }
 }
