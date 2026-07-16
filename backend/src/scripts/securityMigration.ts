@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { randomBytes } from 'crypto'
 import { Game } from '../models/Game'
 import { User } from '../models/User'
 import { connectMongoDB } from '../utils/mongoose'
@@ -10,6 +11,8 @@ interface MigrationGame extends LegacyGameForVerification {
   _id: mongoose.Types.ObjectId
   completedAt?: Date
   statsProcessedAt?: Date
+  statsParticipantIds?: mongoose.Types.ObjectId[]
+  gameState?: Record<string, unknown>
 }
 
 interface MigrationReport {
@@ -21,7 +24,20 @@ interface MigrationReport {
   statsProcessedMarkersToWrite: number
   usersToReconcile: number
   usersWhoseStatsChange: number
+  wisecrackerGamesNeedingResponseIdRepair: number
+  wisecrackerResponseIdsToWrite: number
+  wisecrackerUnresolvedWinnerReferences: number
 }
+
+interface WisecrackerResponseIdRepair {
+  gameId: mongoose.Types.ObjectId
+  responseIds: Record<string, string>
+  repairedCount: number
+  unresolvedWinner: boolean
+}
+
+const USER_ID_PATTERN = /^[a-f0-9]{24}$/
+const RESPONSE_ID_PATTERN = /^[a-f0-9]{32}$/
 
 function equalStats(left: unknown, right: unknown): boolean {
   const fields = ['gamesPlayed', 'gamesWon', 'gamesLost', 'gamesDraw', 'winRate'] as const
@@ -39,9 +55,16 @@ export async function runSecurityMigration(args = process.argv.slice(2)): Promis
   await connectMongoDB()
 
   try {
-    const games = await Game.find({ status: 'completed' })
-      .select('gameType status players metadata result completedAt statsProcessedAt')
+    const allGames = await Game.find({
+      $or: [{ status: 'completed' }, { gameType: 'wisecracker' }],
+    })
+      .select('gameType status players metadata result completedAt statsProcessedAt statsParticipantIds gameState')
       .lean<MigrationGame[]>()
+    const games = allGames.filter((game) => game.status === 'completed')
+    const wisecrackerRepairs = allGames
+      .filter((game) => game.gameType === 'wisecracker')
+      .map(analyzeWisecrackerResponseIds)
+      .filter((repair): repair is WisecrackerResponseIdRepair => repair !== null)
 
     const effectiveGames = games.map((game) => {
       const verification = classifyLegacyResult(game)
@@ -77,21 +100,33 @@ export async function runSecurityMigration(args = process.argv.slice(2)): Promis
       statsProcessedMarkersToWrite,
       usersToReconcile: users.length,
       usersWhoseStatsChange,
+      wisecrackerGamesNeedingResponseIdRepair: wisecrackerRepairs.filter((repair) => repair.repairedCount > 0).length,
+      wisecrackerResponseIdsToWrite: wisecrackerRepairs.reduce((total, repair) => total + repair.repairedCount, 0),
+      wisecrackerUnresolvedWinnerReferences: wisecrackerRepairs.filter((repair) => repair.unresolvedWinner).length,
     }
 
     if (apply) {
       const now = new Date()
-      const gameOperations = games.map((game, index) => {
-        const effective = effectiveGames[index]
+      const effectiveById = new Map(effectiveGames.map((game) => [String(game._id), game]))
+      const responseRepairById = new Map(wisecrackerRepairs.map((repair) => [String(repair.gameId), repair]))
+      const gameOperations = allGames.map((game) => {
+        const effective = effectiveById.get(String(game._id))
         const set: Record<string, unknown> = {}
-        if (!game.metadata?.mode) set['metadata.mode'] = 'multiplayer'
-        if (game.result && !game.result.verification) set['result.verification'] = effective.result?.verification || 'unverified'
+        if (game.status === 'completed' && !game.metadata?.mode) set['metadata.mode'] = 'multiplayer'
+        if (game.status === 'completed' && game.result && !game.result.verification) {
+          set['result.verification'] = effective?.result?.verification || 'unverified'
+        }
         if (
-          !game.statsProcessedAt
-          && effective.metadata?.mode === 'multiplayer'
-          && (effective.result?.verification === 'server' || effective.result?.verification === 'replay')
+          game.status === 'completed'
+          && !game.statsProcessedAt
+          && effective?.metadata?.mode === 'multiplayer'
+          && (effective?.result?.verification === 'server' || effective?.result?.verification === 'replay')
         ) {
           set.statsProcessedAt = game.completedAt || now
+        }
+        const responseRepair = responseRepairById.get(String(game._id))
+        if (responseRepair && responseRepair.repairedCount > 0) {
+          set['gameState.responseIds'] = responseRepair.responseIds
         }
         return Object.keys(set).length > 0
           ? { updateOne: { filter: { _id: game._id }, update: { $set: set } } }
@@ -129,6 +164,53 @@ export async function runSecurityMigration(args = process.argv.slice(2)): Promis
     await closeRedisClient()
     await mongoose.disconnect()
   }
+}
+
+function analyzeWisecrackerResponseIds(game: MigrationGame): WisecrackerResponseIdRepair | null {
+  const state = game.gameState
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return null
+  const submittedAnswers = isRecord(state.submittedAnswers) ? state.submittedAnswers : {}
+  const currentResponseIds = isRecord(state.responseIds) ? state.responseIds : {}
+  const submittedUserIds = Object.entries(submittedAnswers)
+    .filter(([userId, answers]) => USER_ID_PATTERN.test(userId) && Array.isArray(answers))
+    .map(([userId]) => userId)
+  const usedResponseIds = new Set<string>()
+  const responseIds: Record<string, string> = {}
+
+  for (const [userId, responseId] of Object.entries(currentResponseIds)) {
+    if (
+      USER_ID_PATTERN.test(userId)
+      && typeof responseId === 'string'
+      && RESPONSE_ID_PATTERN.test(responseId)
+      && !usedResponseIds.has(responseId)
+    ) {
+      responseIds[userId] = responseId
+      usedResponseIds.add(responseId)
+    }
+  }
+
+  let repairedCount = 0
+  for (const userId of submittedUserIds) {
+    if (responseIds[userId]) continue
+    let responseId: string
+    do responseId = randomBytes(16).toString('hex')
+    while (usedResponseIds.has(responseId))
+    usedResponseIds.add(responseId)
+    responseIds[userId] = responseId
+    repairedCount += 1
+  }
+
+  const roundWinnerUserId = typeof state.roundWinnerUserId === 'string' ? state.roundWinnerUserId : null
+  return {
+    gameId: game._id,
+    responseIds,
+    repairedCount,
+    unresolvedWinner: Boolean(roundWinnerUserId && !responseIds[roundWinnerUserId]),
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 if (require.main === module) {

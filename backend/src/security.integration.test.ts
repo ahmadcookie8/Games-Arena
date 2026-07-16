@@ -11,6 +11,7 @@ import { httpServer, io } from './server'
 import { AUTH_COOKIE_NAME, signAuthToken } from './utils/authToken'
 import { connectMongoDB } from './utils/mongoose'
 import { closeRedisClient, getRedisClient } from './utils/redis'
+import { gameUserRoom } from './utils/socketRooms'
 
 interface SocketAck {
   ok: boolean
@@ -418,9 +419,165 @@ integrationDescribe('real-service security integration', () => {
     ])
     expect(rapidRoomAcks.every((ack) => ack.ok)).toBe(true)
     const serverSocket = io.sockets.sockets.get(ownerSocket.id)
-    expect([...serverSocket!.rooms].filter((room) => room.startsWith('game:'))).toEqual([
-      `game:${secondGame._id}`,
+    const joinedGameRooms = [...serverSocket!.rooms].filter((room) => room.startsWith('game:'))
+    expect(joinedGameRooms).toEqual([
+      gameUserRoom(String(secondGame._id), String(owner.document._id)),
     ])
+    expect(joinedGameRooms.some((room) => room.includes(String(game._id)))).toBe(false)
+  })
+
+  test('isolates revisioned full-state events across two simultaneous games for one user', async () => {
+    const owner = await seedUser('twogameowner')
+    const challenger = await seedUser('twogamechallenger')
+    const ownerId = String(owner.document._id)
+    const challengerId = String(challenger.document._id)
+    const firstGame = await gameService.createGame(ownerId, owner.document.username, 'ticTacToe')
+    const secondGame = await gameService.createGame(ownerId, owner.document.username, 'ticTacToe')
+    await gameService.joinGame(firstGame.gameCode, challengerId, challenger.document.username)
+    await gameService.joinGame(secondGame.gameCode, challengerId, challenger.document.username)
+
+    const firstSocket = await connectSocket(owner.cookie)
+    const secondSocket = await connectSocket(owner.cookie)
+    const firstJoin = await emitWithAck(firstSocket, 'joinRoom', { gameId: String(firstGame._id) })
+    const secondJoin = await emitWithAck(secondSocket, 'joinRoom', { gameId: String(secondGame._id) })
+    expect(firstJoin).toMatchObject({ ok: true, data: { gameId: String(firstGame._id), revision: expect.any(Number) } })
+    expect(secondJoin).toMatchObject({ ok: true, data: { gameId: String(secondGame._id), revision: expect.any(Number) } })
+
+    let foreignFullStateEvents = 0
+    secondSocket.on('gameUpdated', () => { foreignFullStateEvents += 1 })
+
+    const versionBeforeDeltas = (await Game.findById(firstGame._id).orFail()).__v
+    expect((await emitWithAck(firstSocket, 'sendChatMessage', {
+      gameId: String(firstGame._id),
+      text: 'first table only',
+    })).ok).toBe(true)
+    expect((await Game.findById(firstGame._id).orFail()).__v).toBe(versionBeforeDeltas)
+
+    const moveAck = await emitWithAck(firstSocket, 'makeMove', { gameId: String(firstGame._id), move: '0' })
+    expect(moveAck).toMatchObject({
+      ok: true,
+      data: {
+        gameId: String(firstGame._id),
+        revision: expect.any(Number),
+        game: { _id: String(firstGame._id) },
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+
+    expect(foreignFullStateEvents).toBe(0)
+    expect((await Game.findById(firstGame._id).orFail()).__v).toBe(versionBeforeDeltas + 1)
+    expect((await Game.findById(secondGame._id).orFail()).moveHistory).toHaveLength(0)
+  })
+
+  test('races a gameplay move with presence and chat without advancing the gameplay revision for deltas', async () => {
+    const owner = await seedUser('deltaraceowner')
+    const challenger = await seedUser('deltaracechallenger')
+    const ownerId = String(owner.document._id)
+    const challengerId = String(challenger.document._id)
+    const game = await gameService.createGame(ownerId, owner.document.username, 'ticTacToe')
+    await gameService.joinGame(game.gameCode, challengerId, challenger.document.username)
+    const gameId = String(game._id)
+
+    const moveSocket = await connectSocket(owner.cookie)
+    const chatSocket = await connectSocket(owner.cookie)
+    const presenceSocket = await connectSocket(challenger.cookie)
+    expect((await emitWithAck(moveSocket, 'joinRoom', { gameId })).ok).toBe(true)
+    expect((await emitWithAck(chatSocket, 'joinRoom', { gameId })).ok).toBe(true)
+
+    const chatEvents: Array<{ gameId?: string; message?: { text?: string } }> = []
+    const presenceEvents: Array<{ gameId?: string; userId?: string; isConnected?: boolean }> = []
+    const stateEvents: Array<{
+      gameId?: string
+      revision?: number
+      game?: { _id?: string; gameState?: { board?: Array<string | null> } }
+    }> = []
+    moveSocket.on('chatMessage', (event) => chatEvents.push(event))
+    moveSocket.on('playerPresenceChanged', (event) => presenceEvents.push(event))
+    moveSocket.on('gameUpdated', (event) => stateEvents.push(event))
+
+    const versionBeforeRace = (await Game.findById(gameId).orFail()).__v
+    const [moveAck, chatAck, presenceAck] = await Promise.all([
+      emitWithAck(moveSocket, 'makeMove', { gameId, move: '0' }),
+      emitWithAck(chatSocket, 'sendChatMessage', { gameId, text: 'concurrent delta' }),
+      emitWithAck(presenceSocket, 'joinRoom', { gameId }),
+    ])
+
+    expect(moveAck).toMatchObject({
+      ok: true,
+      data: {
+        gameId,
+        revision: versionBeforeRace + 1,
+        game: { _id: gameId },
+      },
+    })
+    expect(chatAck).toMatchObject({ ok: true, data: { message: { text: 'concurrent delta' } } })
+    expect(presenceAck).toMatchObject({ ok: true, data: { gameId } })
+
+    await waitForCondition(() => (
+      chatEvents.some((event) => event.gameId === gameId && event.message?.text === 'concurrent delta')
+      && presenceEvents.some((event) => (
+        event.gameId === gameId
+        && event.userId === challengerId
+        && event.isConnected === true
+      ))
+      && stateEvents.some((event) => (
+        event.gameId === gameId
+        && event.revision === versionBeforeRace + 1
+        && event.game?._id === gameId
+        && event.game.gameState?.board?.[0] === 'X'
+      ))
+    ))
+
+    const persisted = await Game.findById(gameId).orFail()
+    expect(persisted.__v).toBe(versionBeforeRace + 1)
+    expect((persisted.gameState as { board: Array<string | null> }).board[0]).toBe('X')
+    expect(persisted.moveHistory).toHaveLength(1)
+    expect(persisted.chatMessages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ userId: owner.document._id, text: 'concurrent delta' }),
+    ]))
+    expect(persisted.players.find((player) => player.userId.equals(challenger.document._id))).toMatchObject({
+      isConnected: true,
+    })
+  })
+
+  test('commits three simultaneous Wisecracker submissions and advances the phase once', async () => {
+    const users = await Promise.all([
+      seedUser('wisehost'),
+      seedUser('wisewriterone'),
+      seedUser('wisewritertwo'),
+      seedUser('wisewriterthree'),
+    ])
+    const [host, ...writers] = users
+    const game = await gameService.createGame(String(host.document._id), host.document.username, 'wisecracker')
+    for (const writer of writers) {
+      await gameService.joinGame(game.gameCode, String(writer.document._id), writer.document.username)
+    }
+
+    const gameId = String(game._id)
+    await gameService.makeMove(gameId, String(host.document._id), { type: 'startMatch', maxScore: 3 })
+    await gameService.makeMove(gameId, String(host.document._id), { type: 'setPrompt', prompt: 'A _ needs _.' })
+
+    const writerSockets = await Promise.all(writers.map((writer) => connectSocket(writer.cookie)))
+    for (const socket of writerSockets) {
+      expect((await emitWithAck(socket, 'joinRoom', { gameId })).ok).toBe(true)
+    }
+
+    const submissions = await Promise.all(writerSockets.map((socket, index) => emitWithAck(socket, 'makeMove', {
+      gameId,
+      move: { type: 'submitAnswers', answers: [`answer-${index}-a`, `answer-${index}-b`] },
+    })))
+    expect(submissions.every((ack) => ack.ok)).toBe(true)
+
+    const persisted = await Game.findById(game._id).orFail()
+    const state = persisted.gameState as {
+      phase: string
+      submittedAnswers: Record<string, string[]>
+      answerOrder: string[]
+    }
+    expect(state.phase).toBe('revealing')
+    expect(Object.keys(state.submittedAnswers)).toHaveLength(3)
+    expect(state.answerOrder).toHaveLength(3)
+    expect(persisted.moveHistory.filter((move) => move.move === 'submitted answers')).toHaveLength(3)
   })
 
   test('gives missing and unauthorized REST game reads identical responses and enforces request boundaries', async () => {
@@ -494,7 +651,7 @@ integrationDescribe('real-service security integration', () => {
     await expect(getRedisClient().ping()).resolves.toBe('PONG')
   })
 
-  test('keeps a committed MongoDB move successful when the Redis cache is unavailable', async () => {
+  test('keeps a committed MongoDB move successful when Redis-derived services are unavailable', async () => {
     const owner = await seedUser('cacheowner')
     const challenger = await seedUser('cachechallenger')
     const game = await gameService.createGame(String(owner.document._id), owner.document.username, 'ticTacToe')
@@ -536,6 +693,8 @@ integrationDescribe('real-service security integration', () => {
 
     const ownerSocket = await connectSocket(owner.cookie)
     const challengerSocket = await connectSocket(challenger.cookie)
+    expect((await emitWithAck(ownerSocket, 'joinRoom', { gameId: String(game._id) })).ok).toBe(true)
+    expect((await emitWithAck(challengerSocket, 'joinRoom', { gameId: String(game._id) })).ok).toBe(true)
     const nextEvent = (socket: ClientSocket, event: 'gameUpdated' | 'gamesChanged') => new Promise<unknown>((resolve) => {
       socket.once(event, resolve)
     })
@@ -618,12 +777,14 @@ integrationDescribe('real-service security integration', () => {
       gameService.resignGame(String(resignRace._id), challengerId),
     ])
     expect(resignRaceResults.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
-    const afterResignRace = await Game.findById(resignRace._id).orFail()
+    let afterResignRace = await Game.findById(resignRace._id).orFail()
     expect(['abandoned', 'completed']).toContain(afterResignRace.status)
     if (afterResignRace.status === 'abandoned') {
       expect(afterResignRace.result).toBeUndefined()
       expect(afterResignRace.statsProcessedAt).toBeUndefined()
     } else {
+      await waitForCondition(async () => Boolean((await Game.findById(resignRace._id))?.statsProcessedAt))
+      afterResignRace = await Game.findById(resignRace._id).orFail()
       expect(afterResignRace.result?.winType).toBe('resignation')
       expect(afterResignRace.statsProcessedAt).toBeInstanceOf(Date)
     }
@@ -673,6 +834,7 @@ integrationDescribe('real-service security integration', () => {
     const resignResults = await Promise.all([resignRequest(), resignRequest()])
     expect(resignResults.filter((result) => result.status === 200)).toHaveLength(1)
 
+    await waitForCondition(async () => Boolean((await Game.findById(game._id))?.statsProcessedAt))
     persisted = await Game.findById(game._id).orFail()
     expect(persisted.status).toBe('completed')
     expect(String(persisted.result?.winner)).toBe(ownerId)

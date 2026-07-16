@@ -37,6 +37,7 @@ export interface IGameDocument extends Document {
   completedAt?: Date
   inviteExpiresAt?: Date
   statsProcessedAt?: Date
+  statsParticipantIds?: mongoose.Types.ObjectId[]
   replay?: {
     version: 1
     seed: string
@@ -127,6 +128,7 @@ const GameSchema = new Schema<IGameDocument>(
     completedAt: Date,
     inviteExpiresAt: Date,
     statsProcessedAt: Date,
+    statsParticipantIds: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     replay: { type: ReplaySchema, default: undefined },
     result: { type: ResultSchema, default: undefined },
     metadata: {

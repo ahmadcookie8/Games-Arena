@@ -23,6 +23,10 @@ export type PropertyActionMode =
   | 'auction'
   | 'card'
 
+export type PropertyAuctionBidValidation =
+  | { valid: true; amount: number; error: null }
+  | { valid: false; amount: null; error: string }
+
 export function getPropertyBoardPosition(squareIndex: number): PropertyBoardPosition {
   if (squareIndex === 0) return { row: 11, col: 11 }
   if (squareIndex <= 9) return { row: 11, col: 11 - squareIndex }
@@ -70,4 +74,23 @@ export function resolvePropertyActionMode(
   if (phase === 'completed') return 'complete'
   if (!isMyTurn && turnPhase !== 'auction') return 'waiting'
   return turnPhase
+}
+
+export function validatePropertyAuctionBid(
+  input: string,
+  currentBid: number,
+  availableCash: number,
+): PropertyAuctionBidValidation {
+  if (!input.trim()) return { valid: false, amount: null, error: 'Enter a bid amount.' }
+  const amount = Number(input)
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    return { valid: false, amount: null, error: 'Your bid must be a whole dollar amount.' }
+  }
+  if (amount <= currentBid) {
+    return { valid: false, amount: null, error: `Bid at least $${currentBid + 1}.` }
+  }
+  if (amount > availableCash) {
+    return { valid: false, amount: null, error: 'You do not have enough cash for that bid.' }
+  }
+  return { valid: true, amount, error: null }
 }

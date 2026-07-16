@@ -26,8 +26,16 @@ export interface PMPlayerState {
   inJail: boolean
   jailRollCount: number
   getOutOfJailFreeCards: number
+  /**
+   * Deck provenance for cards created by the corrected engine. Older games only
+   * persisted the aggregate count; those cards are normalized to `legacy` and
+   * remain usable without guessing which deck they came from.
+   */
+  getOutOfJailFreeCardDecks?: PMJailCardDeck[]
   isBankrupt: boolean
 }
+
+export type PMJailCardDeck = 'chance' | 'communityChest' | 'legacy'
 
 export interface PMPropertyOwnership {
   ownerId: string | null
@@ -68,6 +76,8 @@ export interface PropertyManagementState {
   turnPhase: PMTurnPhase
   dice: [number, number] | null
   doublesCount: number
+  /** A doubles roll waiting for any landing/card/auction flow to finish. */
+  extraRollPending?: boolean
   playerOrder: string[]
   playerStates: Record<string, PMPlayerState>
   properties: Record<string, PMPropertyOwnership>
@@ -205,6 +215,159 @@ function clone<T>(obj: T): T {
   return JSON.parse(JSON.stringify(obj)) as T
 }
 
+/**
+ * Upgrade persisted states lazily so games created by older releases remain
+ * playable. In particular, legacy jail cards keep their value without
+ * inventing a deck identity that was never persisted.
+ */
+export function normalizePropertyManagementState(state: PropertyManagementState): PropertyManagementState {
+  const expectedPendingType: Partial<Record<PMTurnPhase, PMPendingAction['type']>> = {
+    buyOrAuction: 'buyOrAuction',
+    auction: 'auction',
+    card: 'card',
+  }
+  const expected = expectedPendingType[state.turnPhase]
+  const pendingActionIsCoherent = expected
+    ? state.pendingAction?.type === expected
+    : state.pendingAction === null
+  const persistedDecks = Object.values(state.playerStates).flatMap(
+    player => player.getOutOfJailFreeCardDecks ?? []
+  )
+  const hasNormalizedShape = typeof state.extraRollPending === 'boolean'
+    && typeof state.chanceFreeCardReturned === 'boolean'
+    && typeof state.communityChestFreeCardReturned === 'boolean'
+    && Object.values(state.playerStates).every(player => {
+      const decks = player.getOutOfJailFreeCardDecks
+      return Array.isArray(decks)
+        && decks.length === player.getOutOfJailFreeCards
+        && decks.every(deck => deck === 'chance' || deck === 'communityChest' || deck === 'legacy')
+    })
+    && persistedDecks.filter(deck => deck === 'chance').length <= 1
+    && persistedDecks.filter(deck => deck === 'communityChest').length <= 1
+
+  const chanceCardIsHeld = Object.values(state.playerStates).some(
+    player => player.getOutOfJailFreeCardDecks?.includes('chance')
+  )
+
+  const communityChestCardIsHeld = Object.values(state.playerStates).some(
+    player => player.getOutOfJailFreeCardDecks?.includes('communityChest')
+  )
+
+  if (
+    hasNormalizedShape
+    && pendingActionIsCoherent
+    && state.chanceFreeCardReturned === !chanceCardIsHeld
+    && state.communityChestFreeCardReturned === !communityChestCardIsHeld
+  ) return state
+
+  const s = clone(state)
+  s.extraRollPending = s.extraRollPending === true
+  const unavailableLegacyDecks: DrawableCardDeck[] = []
+  if (s.chanceFreeCardReturned === false) unavailableLegacyDecks.push('chance')
+  if (s.communityChestFreeCardReturned === false) unavailableLegacyDecks.push('communityChest')
+
+  const orderedPlayerIds = [
+    ...s.playerOrder,
+    ...Object.keys(s.playerStates).filter(id => !s.playerOrder.includes(id)),
+  ]
+  const targetCounts = new Map<string, number>()
+  const assignedKnownDecks = new Set<DrawableCardDeck>()
+
+  for (const playerId of orderedPlayerIds) {
+    const player = s.playerStates[playerId]
+    if (!player) continue
+    const rawDecks = Array.isArray(player.getOutOfJailFreeCardDecks)
+      ? player.getOutOfJailFreeCardDecks
+      : []
+    const sanitizedDecks: PMJailCardDeck[] = []
+    for (const rawDeck of rawDecks) {
+      if (rawDeck === 'legacy') {
+        sanitizedDecks.push('legacy')
+      } else if ((rawDeck === 'chance' || rawDeck === 'communityChest') && !assignedKnownDecks.has(rawDeck)) {
+        sanitizedDecks.push(rawDeck)
+        assignedKnownDecks.add(rawDeck)
+      } else if (rawDeck === 'chance' || rawDeck === 'communityChest') {
+        // A deck has only one such card. Preserve corrupt duplicates as unknown
+        // usable cards instead of discarding player value.
+        sanitizedDecks.push('legacy')
+      }
+    }
+    const persistedCount = Number.isSafeInteger(player.getOutOfJailFreeCards) && player.getOutOfJailFreeCards > 0
+      ? player.getOutOfJailFreeCards
+      : 0
+    targetCounts.set(playerId, Math.max(persistedCount, sanitizedDecks.length))
+    player.getOutOfJailFreeCardDecks = sanitizedDecks
+  }
+
+  for (const deck of unavailableLegacyDecks) {
+    if (assignedKnownDecks.has(deck)) continue
+    let assigned = false
+    for (const playerId of orderedPlayerIds) {
+      const player = s.playerStates[playerId]
+      if (!player) continue
+      const decks = player.getOutOfJailFreeCardDecks ?? []
+      const legacyIndex = decks.indexOf('legacy')
+      if (legacyIndex !== -1) {
+        decks[legacyIndex] = deck
+        assignedKnownDecks.add(deck)
+        assigned = true
+        break
+      }
+      if (decks.length < (targetCounts.get(playerId) ?? 0)) {
+        decks.push(deck)
+        assignedKnownDecks.add(deck)
+        assigned = true
+        break
+      }
+    }
+    if (!assigned) {
+      // A stale unavailable flag with no corresponding aggregate card is safer
+      // to repair as available than to leave the deck permanently locked.
+      assignedKnownDecks.delete(deck)
+    }
+  }
+
+  for (const playerId of orderedPlayerIds) {
+    const player = s.playerStates[playerId]
+    if (!player) continue
+    const decks = player.getOutOfJailFreeCardDecks ?? []
+    while (decks.length < (targetCounts.get(playerId) ?? 0)) decks.push('legacy')
+    player.getOutOfJailFreeCardDecks = decks
+    player.getOutOfJailFreeCards = decks.length
+  }
+
+  s.chanceFreeCardReturned = !assignedKnownDecks.has('chance')
+  s.communityChestFreeCardReturned = !assignedKnownDecks.has('communityChest')
+
+  if (s.phase === 'playing') {
+    const normalizedExpected = expectedPendingType[s.turnPhase]
+    if (normalizedExpected && s.pendingAction?.type !== normalizedExpected) {
+      const player = s.playerStates[s.currentPlayerUserId]
+      const square = player ? BOARD_SQUARES[player.position] : null
+      const ownership = player ? s.properties[String(player.position)] : null
+      const canReconstructPurchase = square
+        && (square.type === 'property' || square.type === 'railroad' || square.type === 'utility')
+        && ownership?.ownerId === null
+
+      if (canReconstructPurchase && player) {
+        s.turnPhase = 'buyOrAuction'
+        s.pendingAction = { type: 'buyOrAuction', squareIndex: player.position }
+      } else {
+        s.turnPhase = 'postRoll'
+        s.pendingAction = null
+        return resolveDeferredExtraRoll(s, s.currentPlayerUserId)
+      }
+    } else if (!normalizedExpected && s.pendingAction !== null) {
+      s.pendingAction = null
+    }
+  } else {
+    s.pendingAction = null
+    s.extraRollPending = false
+  }
+
+  return s
+}
+
 function shuffleDeck(n: number): number[] {
   const arr = Array.from({ length: n }, (_, i) => i)
   for (let i = arr.length - 1; i > 0; i--) {
@@ -216,6 +379,99 @@ function shuffleDeck(n: number): number[] {
 
 function rollDie(): number {
   return Math.floor(Math.random() * 6) + 1
+}
+
+function movePlayerBy(state: PropertyManagementState, playerId: string, spaces: number): PropertyManagementState {
+  const s = clone(state)
+  const player = s.playerStates[playerId]
+  const destination = player.position + spaces
+  if (destination >= BOARD_SQUARES.length) player.money += 200
+  player.position = destination % BOARD_SQUARES.length
+  return s
+}
+
+function movePlayerTo(
+  state: PropertyManagementState,
+  playerId: string,
+  target: number,
+  collectGo: boolean
+): PropertyManagementState {
+  const s = clone(state)
+  const player = s.playerStates[playerId]
+  if (collectGo && (target === 0 || target < player.position)) player.money += 200
+  player.position = target
+  return s
+}
+
+function resolveDeferredExtraRoll(state: PropertyManagementState, playerId: string): PropertyManagementState {
+  const s = clone(state)
+  if (
+    s.turnPhase === 'postRoll'
+    && s.extraRollPending
+    && s.currentPlayerUserId === playerId
+    && !s.playerStates[playerId]?.inJail
+  ) {
+    s.extraRollPending = false
+    s.turnPhase = 'preRoll'
+    s.dice = null
+    const playerName = s.playerStates[playerId]?.username ?? playerId
+    s.lastEventMessage = `${s.lastEventMessage ?? ''} ${playerName} rolled doubles and rolls again.`.trim()
+  }
+  return s
+}
+
+type DrawableCardDeck = Exclude<PMJailCardDeck, 'legacy'>
+
+function drawNextAvailableCard(
+  state: PropertyManagementState,
+  deck: DrawableCardDeck
+): { text: string; effect: PMCardEffect } | null {
+  const isChance = deck === 'chance'
+  const cards = isChance ? CHANCE_CARDS : COMMUNITY_CHEST_CARDS
+  const orderKey = isChance ? 'chanceCardOrder' : 'communityChestCardOrder'
+  const indexKey = isChance ? 'chanceCardIndex' : 'communityChestCardIndex'
+  const freeCardIndex = isChance ? 7 : 4
+  const order = state[orderKey]
+  if (!Array.isArray(order) || order.length === 0) return null
+
+  for (let inspected = 0; inspected < order.length; inspected++) {
+    const orderIndex = state[indexKey] % order.length
+    const cardIndex = order[orderIndex]
+    state[indexKey] = (orderIndex + 1) % order.length
+    const freeCardAvailable = isChance ? state.chanceFreeCardReturned : state.communityChestFreeCardReturned
+    if (cardIndex === freeCardIndex && !freeCardAvailable) continue
+    return cards[cardIndex] ?? null
+  }
+  return null
+}
+
+function addJailCard(state: PropertyManagementState, playerId: string, deck: DrawableCardDeck): void {
+  const player = state.playerStates[playerId]
+  const decks = player.getOutOfJailFreeCardDecks ?? []
+  decks.push(deck)
+  player.getOutOfJailFreeCardDecks = decks
+  player.getOutOfJailFreeCards = decks.length
+  if (deck === 'chance') state.chanceFreeCardReturned = false
+  else state.communityChestFreeCardReturned = false
+}
+
+function refreshJailCardAvailability(state: PropertyManagementState, deck: DrawableCardDeck): void {
+  const isHeld = Object.values(state.playerStates).some(
+    player => player.getOutOfJailFreeCardDecks?.includes(deck)
+  )
+  if (deck === 'chance') state.chanceFreeCardReturned = !isHeld
+  else state.communityChestFreeCardReturned = !isHeld
+}
+
+function consumeJailCard(state: PropertyManagementState, playerId: string): PMJailCardDeck | null {
+  const player = state.playerStates[playerId]
+  const decks = player.getOutOfJailFreeCardDecks ?? []
+  if (decks.length === 0) return null
+  const [consumed] = decks.splice(0, 1)
+  player.getOutOfJailFreeCardDecks = decks
+  player.getOutOfJailFreeCards = decks.length
+  if (consumed === 'chance' || consumed === 'communityChest') refreshJailCardAvailability(state, consumed)
+  return consumed
 }
 
 function getNextActivePlayer(state: PropertyManagementState, currentId: string): string | null {
@@ -273,6 +529,8 @@ function sendToJail(state: PropertyManagementState, playerId: string): PropertyM
   s.playerStates[playerId].inJail = true
   s.playerStates[playerId].jailRollCount = 0
   s.doublesCount = 0
+  s.extraRollPending = false
+  s.pendingAction = null
   return s
 }
 
@@ -282,6 +540,8 @@ function checkBankruptcy(state: PropertyManagementState): PropertyManagementStat
   if (active.length <= 1) {
     s.phase = 'completed'
     s.winnerId = active[0] ?? null
+    s.pendingAction = null
+    s.extraRollPending = false
     s.lastEventMessage = active[0]
       ? `${s.playerStates[active[0]]?.username ?? active[0]} wins!`
       : 'Game over!'
@@ -296,7 +556,6 @@ function applyLanding(state: PropertyManagementState, playerId: string, squareIn
 
   switch (square.type) {
     case 'go':
-      s.playerStates[playerId].money += 200
       s.lastEventMessage = `${playerName} landed on GO and collected $200!`
       s.turnPhase = 'postRoll'
       break
@@ -335,9 +594,7 @@ function applyLanding(state: PropertyManagementState, playerId: string, squareIn
     }
 
     case 'chance': {
-      const cardIdx = s.chanceCardOrder[s.chanceCardIndex % s.chanceCardOrder.length]
-      s.chanceCardIndex = (s.chanceCardIndex + 1) % s.chanceCardOrder.length
-      const card = CHANCE_CARDS[cardIdx]
+      const card = drawNextAvailableCard(s, 'chance')
       if (!card) { s.turnPhase = 'postRoll'; break }
       s.pendingAction = { type: 'card', cardText: card.text, cardEffect: card.effect }
       s.turnPhase = 'card'
@@ -346,9 +603,7 @@ function applyLanding(state: PropertyManagementState, playerId: string, squareIn
     }
 
     case 'communityChest': {
-      const cardIdx = s.communityChestCardOrder[s.communityChestCardIndex % s.communityChestCardOrder.length]
-      s.communityChestCardIndex = (s.communityChestCardIndex + 1) % s.communityChestCardOrder.length
-      const card = COMMUNITY_CHEST_CARDS[cardIdx]
+      const card = drawNextAvailableCard(s, 'communityChest')
       if (!card) { s.turnPhase = 'postRoll'; break }
       s.pendingAction = { type: 'card', cardText: card.text, cardEffect: card.effect }
       s.turnPhase = 'card'
@@ -378,6 +633,9 @@ function applyLanding(state: PropertyManagementState, playerId: string, squareIn
 function applyCardEffect(state: PropertyManagementState, playerId: string, effect: PMCardEffect, diceTotal: number): PropertyManagementState {
   let s = clone(state)
   const playerName = s.playerStates[playerId]?.username ?? playerId
+  // The acknowledged card is consumed first. A movement effect may create a
+  // different pending action at the destination; that replacement must live.
+  s.pendingAction = null
 
   switch (effect.type) {
     case 'collectMoney':
@@ -419,17 +677,8 @@ function applyCardEffect(state: PropertyManagementState, playerId: string, effec
     }
 
     case 'advanceTo': {
-      const oldPos = s.playerStates[playerId].position
       const target = effect.squareIndex
-      if (target === 0) {
-        s.playerStates[playerId].money += 200
-        s.lastEventMessage = `${playerName} advanced to GO and collected $200.`
-      } else if (effect.collectGoIfPassed && target < oldPos) {
-        s.playerStates[playerId].money += 200
-        s.lastEventMessage = `${playerName} passed GO and collected $200.`
-      }
-      s.playerStates[playerId].position = target
-      s.pendingAction = null
+      s = movePlayerTo(s, playerId, target, target === 0 || effect.collectGoIfPassed)
       s = applyLanding(s, playerId, target, diceTotal)
       break
     }
@@ -444,9 +693,7 @@ function applyCardEffect(state: PropertyManagementState, playerId: string, effec
         if (dist < minDist) { minDist = dist; nearest = idx }
       }
       if (minDist === 0) { nearest = indices[(indices.indexOf(pos) + 1) % indices.length] }
-      if (nearest < pos) s.playerStates[playerId].money += 200
-      s.playerStates[playerId].position = nearest
-      s.pendingAction = null
+      s = movePlayerTo(s, playerId, nearest, true)
       s = applyLanding(s, playerId, nearest, diceTotal)
       break
     }
@@ -455,16 +702,13 @@ function applyCardEffect(state: PropertyManagementState, playerId: string, effec
       s = sendToJail(s, playerId)
       s.lastEventMessage = `${playerName} was sent to Jail by a card!`
       s.turnPhase = 'preRoll'
-      s.pendingAction = null
       s.currentPlayerUserId = getNextActivePlayer(s, playerId) ?? playerId
       break
     }
 
     case 'getOutOfJailFree':
-      s.playerStates[playerId].getOutOfJailFreeCards += 1
+      addJailCard(s, playerId, effect.cardDeck)
       s.lastEventMessage = `${playerName} received a Get Out of Jail Free card!`
-      if (effect.cardDeck === 'chance') s.chanceFreeCardReturned = false
-      else s.communityChestFreeCardReturned = false
       s.turnPhase = 'postRoll'
       break
 
@@ -486,14 +730,32 @@ function applyCardEffect(state: PropertyManagementState, playerId: string, effec
     case 'goBack': {
       const newPos = (s.playerStates[playerId].position - effect.spaces + 40) % 40
       s.playerStates[playerId].position = newPos
-      s.pendingAction = null
       s = applyLanding(s, playerId, newPos, diceTotal)
       break
     }
   }
 
-  s.pendingAction = null
   return s
+}
+
+function isAuctionComplete(auction: PMAuctionState): boolean {
+  if (auction.highBidderUserId) {
+    return auction.activeUserIds.every(
+      id => id === auction.highBidderUserId || auction.passedUserIds.includes(id)
+    )
+  }
+  return auction.activeUserIds.every(id => auction.passedUserIds.includes(id))
+}
+
+function advanceAuctionBidder(auction: PMAuctionState): void {
+  for (let offset = 1; offset <= auction.activeUserIds.length; offset++) {
+    const candidateIndex = (auction.currentBidderIndex + offset) % auction.activeUserIds.length
+    const candidate = auction.activeUserIds[candidateIndex]
+    if (!auction.passedUserIds.includes(candidate) && candidate !== auction.highBidderUserId) {
+      auction.currentBidderIndex = candidateIndex
+      return
+    }
+  }
 }
 
 function finalizeAuction(state: PropertyManagementState, auction: PMAuctionState): PropertyManagementState {
@@ -510,7 +772,7 @@ function finalizeAuction(state: PropertyManagementState, auction: PMAuctionState
   }
   s.pendingAction = null
   s.turnPhase = 'postRoll'
-  return s
+  return resolveDeferredExtraRoll(s, s.currentPlayerUserId)
 }
 
 function canBuildHouse(state: PropertyManagementState, playerId: string, squareIndex: number): boolean {
@@ -546,6 +808,134 @@ function canSellHouse(state: PropertyManagementState, playerId: string, squareIn
   return true
 }
 
+/** Returns every actionable state-machine invariant violation in a state. */
+export function getPropertyManagementInvariantViolations(state: PropertyManagementState): string[] {
+  const s = state
+  const errors: string[] = []
+  const order = s.playerOrder
+  const orderSet = new Set(order)
+  const active = order.filter(id => !s.bankruptPlayerIds.includes(id))
+  const heldCardDecks = Object.values(s.playerStates).flatMap(
+    player => player.getOutOfJailFreeCardDecks ?? []
+  )
+
+  if (orderSet.size !== order.length) errors.push('playerOrder contains duplicate users')
+  if (!orderSet.has(s.hostUserId)) errors.push('hostUserId is not in playerOrder')
+  for (const id of order) {
+    const player = s.playerStates[id]
+    if (!player) {
+      errors.push(`playerStates is missing ${id}`)
+      continue
+    }
+    if (player.userId !== id) errors.push(`playerStates.${id}.userId does not match its key`)
+    if (!Number.isInteger(player.position) || player.position < 0 || player.position >= BOARD_SQUARES.length) {
+      errors.push(`player ${id} has an invalid board position`)
+    }
+    if (!Number.isFinite(player.money)) errors.push(`player ${id} has invalid money`)
+    if (player.isBankrupt !== s.bankruptPlayerIds.includes(id)) {
+      errors.push(`player ${id} bankruptcy flags disagree`)
+    }
+    if (player.getOutOfJailFreeCards !== (player.getOutOfJailFreeCardDecks?.length ?? 0)) {
+      errors.push(`player ${id} jail-card count disagrees with provenance`)
+    }
+  }
+  if (heldCardDecks.filter(deck => deck === 'chance').length > 1) {
+    errors.push('multiple players hold the Chance jail card')
+  }
+  if (heldCardDecks.filter(deck => deck === 'communityChest').length > 1) {
+    errors.push('multiple players hold the Community Chest jail card')
+  }
+  if (s.chanceFreeCardReturned !== !heldCardDecks.includes('chance')) {
+    errors.push('Chance jail-card availability disagrees with player holdings')
+  }
+  if (s.communityChestFreeCardReturned !== !heldCardDecks.includes('communityChest')) {
+    errors.push('Community Chest jail-card availability disagrees with player holdings')
+  }
+
+  if (s.phase === 'lobby') {
+    if (s.currentPlayerUserId !== s.hostUserId) errors.push('lobby current player must be the host')
+    if (s.turnPhase !== 'preRoll') errors.push('lobby turnPhase must be preRoll')
+    if (s.pendingAction !== null) errors.push('lobby cannot have a pending action')
+    if (s.extraRollPending) errors.push('lobby cannot have a pending extra roll')
+  }
+
+  if (s.phase === 'playing') {
+    if (!active.includes(s.currentPlayerUserId)) errors.push('current player is not active')
+    if (active.length < 2) errors.push('playing state must have at least two active players')
+
+    const expectedPendingType: Partial<Record<PMTurnPhase, PMPendingAction['type']>> = {
+      buyOrAuction: 'buyOrAuction',
+      auction: 'auction',
+      card: 'card',
+    }
+    const expected = expectedPendingType[s.turnPhase]
+    if (expected && s.pendingAction?.type !== expected) {
+      errors.push(`${s.turnPhase} phase requires a ${expected} pending action`)
+    }
+    if (!expected && s.pendingAction !== null) {
+      errors.push(`${s.turnPhase} phase cannot have a pending action`)
+    }
+    if (s.extraRollPending && !expected) {
+      errors.push('extraRollPending must be resolved outside a deferred action phase')
+    }
+  }
+
+  if (s.phase === 'completed') {
+    if (active.length > 1) errors.push('completed state has multiple active players')
+    if (s.winnerId !== (active[0] ?? null)) errors.push('winnerId does not match the last active player')
+    if (s.pendingAction !== null) errors.push('completed state cannot have a pending action')
+    if (s.extraRollPending) errors.push('completed state cannot have a pending extra roll')
+  }
+
+  if (s.pendingAction?.type === 'buyOrAuction') {
+    const ownership = s.properties[String(s.pendingAction.squareIndex)]
+    if (!ownership || ownership.ownerId !== null) errors.push('buyOrAuction property is not available')
+  }
+
+  if (s.pendingAction?.type === 'auction') {
+    const auction = s.pendingAction.auction
+    const auctionOwnership = s.properties[String(auction.squareIndex)]
+    if (!auctionOwnership || auctionOwnership.ownerId !== null) {
+      errors.push('auction property is not available')
+    }
+    const auctionUsers = new Set(auction.activeUserIds)
+    if (auctionUsers.size !== auction.activeUserIds.length) errors.push('auction contains duplicate users')
+    if (auction.activeUserIds.length === 0) errors.push('auction has no active users')
+    if (!Number.isSafeInteger(auction.currentBid) || auction.currentBid < 0) errors.push('auction bid is invalid')
+    if (auction.currentBidderIndex < 0 || auction.currentBidderIndex >= auction.activeUserIds.length) {
+      errors.push('auction currentBidderIndex is out of range')
+    }
+    for (const id of auction.activeUserIds) {
+      if (!active.includes(id)) errors.push(`auction includes inactive player ${id}`)
+    }
+    for (const id of auction.passedUserIds) {
+      if (!auctionUsers.has(id)) errors.push(`auction passed player ${id} is not eligible`)
+    }
+    if (auction.highBidderUserId) {
+      if (!auctionUsers.has(auction.highBidderUserId)) errors.push('auction high bidder is not eligible')
+      if (auction.passedUserIds.includes(auction.highBidderUserId)) errors.push('auction high bidder has passed')
+      if (auction.currentBid <= 0) errors.push('auction high bidder has no positive bid')
+    } else if (auction.currentBid !== 0) {
+      errors.push('auction has a bid without a high bidder')
+    }
+    const currentBidder = auction.activeUserIds[auction.currentBidderIndex]
+    if (currentBidder && auction.passedUserIds.includes(currentBidder)) errors.push('auction current bidder has passed')
+    if (currentBidder && currentBidder === auction.highBidderUserId) errors.push('auction current bidder is already high bidder')
+    if (isAuctionComplete(auction)) errors.push('completed auction was not finalized')
+  }
+
+  for (const [squareIndex, ownership] of Object.entries(s.properties)) {
+    if (ownership.ownerId !== null && !active.includes(ownership.ownerId)) {
+      errors.push(`property ${squareIndex} is owned by an inactive player`)
+    }
+    if (!Number.isInteger(ownership.houses) || ownership.houses < 0 || ownership.houses > 5) {
+      errors.push(`property ${squareIndex} has an invalid building count`)
+    }
+  }
+
+  return errors
+}
+
 // ─── Game Class ────────────────────────────────────────────────────────────────
 
 export class PropertyManagement extends GameBase {
@@ -569,6 +959,7 @@ export class PropertyManagement extends GameBase {
       turnPhase: 'preRoll',
       dice: null,
       doublesCount: 0,
+      extraRollPending: false,
       playerOrder: [hostUserId],
       playerStates: {
         [hostUserId]: {
@@ -579,6 +970,7 @@ export class PropertyManagement extends GameBase {
           inJail: false,
           jailRollCount: 0,
           getOutOfJailFreeCards: 0,
+          getOutOfJailFreeCardDecks: [],
           isBankrupt: false,
         },
       },
@@ -597,9 +989,10 @@ export class PropertyManagement extends GameBase {
   }
 
   static addPlayer(state: PropertyManagementState, userId: string, username: string): PropertyManagementState {
-    if (state.phase !== 'lobby') throw new BadRequestError('Game has already started')
-    if (state.playerStates[userId]) return state
-    const s = clone(state)
+    const normalized = normalizePropertyManagementState(state)
+    if (normalized.phase !== 'lobby') throw new BadRequestError('Game has already started')
+    if (normalized.playerStates[userId]) return normalized
+    const s = clone(normalized)
     s.playerOrder.push(userId)
     s.playerStates[userId] = {
       userId,
@@ -609,30 +1002,35 @@ export class PropertyManagement extends GameBase {
       inJail: false,
       jailRollCount: 0,
       getOutOfJailFreeCards: 0,
+      getOutOfJailFreeCardDecks: [],
       isBankrupt: false,
     }
     return s
   }
 
   static applyAction(state: PropertyManagementState, action: PMAction, userId: string): PropertyManagementState {
-    if (state.phase === 'completed') throw new BadRequestError('Game is already over')
+    const normalized = normalizePropertyManagementState(state)
+    if (normalized.phase === 'completed') throw new BadRequestError('Game is already over')
+    if (action.type !== 'startGame' && normalized.phase !== 'playing') {
+      throw new BadRequestError('Game is not active')
+    }
 
     switch (action.type) {
-      case 'startGame':       return PropertyManagement.applyStartGame(state, userId)
-      case 'rollDice':        return PropertyManagement.applyRollDice(state, userId)
-      case 'buyProperty':     return PropertyManagement.applyBuyProperty(state, userId)
-      case 'declineProperty': return PropertyManagement.applyDeclineProperty(state, userId)
-      case 'auctionBid':      return PropertyManagement.applyAuctionBid(state, userId, action.amount)
-      case 'auctionPass':     return PropertyManagement.applyAuctionPass(state, userId)
-      case 'payJailFine':     return PropertyManagement.applyPayJailFine(state, userId)
-      case 'useGetOutOfJailCard': return PropertyManagement.applyUseGetOutOfJailCard(state, userId)
-      case 'buildHouse':      return PropertyManagement.applyBuildHouse(state, userId, action.squareIndex)
-      case 'sellHouse':       return PropertyManagement.applySellHouse(state, userId, action.squareIndex)
-      case 'mortgageProperty':   return PropertyManagement.applyMortgage(state, userId, action.squareIndex)
-      case 'unmortgageProperty': return PropertyManagement.applyUnmortgage(state, userId, action.squareIndex)
-      case 'declareBankruptcy':  return PropertyManagement.applyDeclareBankruptcy(state, userId)
-      case 'endTurn':         return PropertyManagement.applyEndTurn(state, userId)
-      case 'acknowledgeCard': return PropertyManagement.applyAcknowledgeCard(state, userId)
+      case 'startGame':       return PropertyManagement.applyStartGame(normalized, userId)
+      case 'rollDice':        return PropertyManagement.applyRollDice(normalized, userId)
+      case 'buyProperty':     return PropertyManagement.applyBuyProperty(normalized, userId)
+      case 'declineProperty': return PropertyManagement.applyDeclineProperty(normalized, userId)
+      case 'auctionBid':      return PropertyManagement.applyAuctionBid(normalized, userId, action.amount)
+      case 'auctionPass':     return PropertyManagement.applyAuctionPass(normalized, userId)
+      case 'payJailFine':     return PropertyManagement.applyPayJailFine(normalized, userId)
+      case 'useGetOutOfJailCard': return PropertyManagement.applyUseGetOutOfJailCard(normalized, userId)
+      case 'buildHouse':      return PropertyManagement.applyBuildHouse(normalized, userId, action.squareIndex)
+      case 'sellHouse':       return PropertyManagement.applySellHouse(normalized, userId, action.squareIndex)
+      case 'mortgageProperty':   return PropertyManagement.applyMortgage(normalized, userId, action.squareIndex)
+      case 'unmortgageProperty': return PropertyManagement.applyUnmortgage(normalized, userId, action.squareIndex)
+      case 'declareBankruptcy':  return PropertyManagement.applyDeclareBankruptcy(normalized, userId)
+      case 'endTurn':         return PropertyManagement.applyEndTurn(normalized, userId)
+      case 'acknowledgeCard': return PropertyManagement.applyAcknowledgeCard(normalized, userId)
       default: throw new BadRequestError('Unknown action')
     }
   }
@@ -665,30 +1063,29 @@ export class PropertyManagement extends GameBase {
 
     // In jail
     if (player.inJail) {
+      s.extraRollPending = false
       if (isDoubles) {
         player.inJail = false
         player.jailRollCount = 0
         s.doublesCount = 0 // freed by doubles, don't get extra roll
-        const oldPos = player.position
-        player.position = (oldPos + diceTotal) % 40
-        if (player.position < oldPos) player.money += 200
-        s.lastEventMessage = `${playerName} rolled doubles (${d1}+${d2}) and got out of jail!`
-        return applyLanding(s, userId, player.position, diceTotal)
+        const moved = movePlayerBy(s, userId, diceTotal)
+        moved.lastEventMessage = `${playerName} rolled doubles (${d1}+${d2}) and got out of jail!`
+        return applyLanding(moved, userId, moved.playerStates[userId].position, diceTotal)
       } else if (player.jailRollCount >= 2) {
         // 3rd failed roll — forced out, pay $50
         player.money -= 50
         player.inJail = false
         player.jailRollCount = 0
-        const oldPos = player.position
-        player.position = (oldPos + diceTotal) % 40
-        if (player.position < oldPos) player.money += 200
-        s.lastEventMessage = `${playerName} paid $50 jail fine and rolled ${d1}+${d2}=${diceTotal}.`
-        return applyLanding(s, userId, player.position, diceTotal)
+        const moved = movePlayerBy(s, userId, diceTotal)
+        moved.lastEventMessage = `${playerName} paid $50 jail fine and rolled ${d1}+${d2}=${diceTotal}.`
+        return applyLanding(moved, userId, moved.playerStates[userId].position, diceTotal)
       } else {
         player.jailRollCount += 1
         s.lastEventMessage = `${playerName} rolled ${d1}+${d2} in jail (attempt ${player.jailRollCount}/3). Still in jail.`
         s.turnPhase = 'preRoll'
         s.currentPlayerUserId = getNextActivePlayer(s, userId) ?? userId
+        s.dice = null
+        s.doublesCount = 0
         return s
       }
     }
@@ -706,20 +1103,13 @@ export class PropertyManagement extends GameBase {
       }
     }
 
-    const oldPos = player.position
-    player.position = (oldPos + diceTotal) % 40
-    if (player.position < oldPos && diceTotal > 0) player.money += 200
-    s.lastEventMessage = `${playerName} rolled ${d1}+${d2}=${diceTotal} and moved to ${BOARD_SQUARES[player.position]?.name ?? player.position}.`
+    s.extraRollPending = isDoubles
+    const moved = movePlayerBy(s, userId, diceTotal)
+    const position = moved.playerStates[userId].position
+    moved.lastEventMessage = `${playerName} rolled ${d1}+${d2}=${diceTotal} and moved to ${BOARD_SQUARES[position]?.name ?? position}.`
 
-    const landed = applyLanding(s, userId, player.position, diceTotal)
-
-    // After landing, if doubles and not in a special phase, let player roll again
-    if (isDoubles && landed.turnPhase === 'postRoll' && !landed.playerStates[userId]?.inJail) {
-      landed.turnPhase = 'preRoll'
-      // Keep currentPlayerUserId as userId so they roll again
-    }
-
-    return landed
+    const landed = applyLanding(moved, userId, position, diceTotal)
+    return resolveDeferredExtraRoll(landed, userId)
   }
 
   private static applyBuyProperty(state: PropertyManagementState, userId: string): PropertyManagementState {
@@ -739,7 +1129,7 @@ export class PropertyManagement extends GameBase {
     s.pendingAction = null
     s.turnPhase = 'postRoll'
     s.lastEventMessage = `${s.playerStates[userId]?.username ?? userId} bought ${square.name} for $${square.price}.`
-    return s
+    return resolveDeferredExtraRoll(s, userId)
   }
 
   private static applyDeclineProperty(state: PropertyManagementState, userId: string): PropertyManagementState {
@@ -780,6 +1170,7 @@ export class PropertyManagement extends GameBase {
     const auction = pending.auction
     const currentBidder = auction.activeUserIds[auction.currentBidderIndex]
     if (userId !== currentBidder) throw new BadRequestError('Not your turn to bid')
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new BadRequestError('Bid must be a positive whole number')
     if (amount <= auction.currentBid) throw new BadRequestError(`Bid must be more than $${auction.currentBid}`)
     if (amount > state.playerStates[userId].money) throw new BadRequestError('Not enough money')
 
@@ -787,15 +1178,9 @@ export class PropertyManagement extends GameBase {
     const a = (s.pendingAction as { type: 'auction'; auction: PMAuctionState }).auction
     a.currentBid = amount
     a.highBidderUserId = userId
-    a.currentBidderIndex = (a.currentBidderIndex + 1) % a.activeUserIds.length
-
-    // Skip passed players
-    let safety = a.activeUserIds.length
-    while (a.passedUserIds.includes(a.activeUserIds[a.currentBidderIndex]) && safety-- > 0) {
-      a.currentBidderIndex = (a.currentBidderIndex + 1) % a.activeUserIds.length
-    }
-
     s.lastEventMessage = `${s.playerStates[userId]?.username ?? userId} bid $${amount}.`
+    if (isAuctionComplete(a)) return finalizeAuction(s, a)
+    advanceAuctionBidder(a)
     return s
   }
 
@@ -812,25 +1197,9 @@ export class PropertyManagement extends GameBase {
     const a = (s.pendingAction as { type: 'auction'; auction: PMAuctionState }).auction
     if (!a.passedUserIds.includes(userId)) a.passedUserIds.push(userId)
 
-    const remaining = a.activeUserIds.filter(id => !a.passedUserIds.includes(id))
     s.lastEventMessage = `${s.playerStates[userId]?.username ?? userId} passed on the auction.`
-
-    if (remaining.length <= 1) {
-      return finalizeAuction(s, a)
-    }
-
-    a.currentBidderIndex = (a.currentBidderIndex + 1) % a.activeUserIds.length
-    let safety = a.activeUserIds.length
-    while (a.passedUserIds.includes(a.activeUserIds[a.currentBidderIndex]) && safety-- > 0) {
-      a.currentBidderIndex = (a.currentBidderIndex + 1) % a.activeUserIds.length
-    }
-
-    // If only the high bidder remains (everyone else passed), finalize
-    const activeRemaining = a.activeUserIds.filter(id => !a.passedUserIds.includes(id))
-    if (activeRemaining.length === 1 && activeRemaining[0] === a.highBidderUserId) {
-      return finalizeAuction(s, a)
-    }
-
+    if (isAuctionComplete(a)) return finalizeAuction(s, a)
+    advanceAuctionBidder(a)
     return s
   }
 
@@ -855,11 +1224,9 @@ export class PropertyManagement extends GameBase {
     if ((state.playerStates[userId]?.getOutOfJailFreeCards ?? 0) <= 0) throw new BadRequestError('No Get Out of Jail Free card')
 
     const s = clone(state)
-    s.playerStates[userId].getOutOfJailFreeCards -= 1
+    if (!consumeJailCard(s, userId)) throw new BadRequestError('No Get Out of Jail Free card')
     s.playerStates[userId].inJail = false
     s.playerStates[userId].jailRollCount = 0
-    s.chanceFreeCardReturned = true
-    s.communityChestFreeCardReturned = true
     s.lastEventMessage = `${s.playerStates[userId]?.username ?? userId} used a Get Out of Jail Free card!`
     return s
   }
@@ -937,10 +1304,21 @@ export class PropertyManagement extends GameBase {
   }
 
   private static applyDeclareBankruptcy(state: PropertyManagementState, userId: string): PropertyManagementState {
+    if (state.phase !== 'playing') throw new BadRequestError('Game is not active')
     if (!state.playerStates[userId]) throw new BadRequestError('Not in game')
     if (state.playerStates[userId].isBankrupt) throw new BadRequestError('Already bankrupt')
+    if (userId !== state.currentPlayerUserId) throw new BadRequestError('Not your turn')
+    if (state.turnPhase !== 'preRoll' && state.turnPhase !== 'postRoll') {
+      throw new BadRequestError('Cannot declare bankruptcy while an action is pending')
+    }
+    if (state.pendingAction !== null) throw new BadRequestError('Cannot declare bankruptcy while an action is pending')
 
     const s = clone(state)
+    const returnedDecks = new Set(s.playerStates[userId].getOutOfJailFreeCardDecks ?? [])
+    s.playerStates[userId].getOutOfJailFreeCardDecks = []
+    s.playerStates[userId].getOutOfJailFreeCards = 0
+    if (returnedDecks.has('chance')) refreshJailCardAvailability(s, 'chance')
+    if (returnedDecks.has('communityChest')) refreshJailCardAvailability(s, 'communityChest')
     s.playerStates[userId].isBankrupt = true
     s.bankruptPlayerIds.push(userId)
     const name = s.playerStates[userId]?.username ?? userId
@@ -958,15 +1336,13 @@ export class PropertyManagement extends GameBase {
     const checked = checkBankruptcy(s)
     if (checked.phase === 'completed') return checked
 
-    // If it was bankrupt player's turn, advance
-    if (userId === s.currentPlayerUserId) {
-      const next = getNextActivePlayer(s, userId)
-      s.currentPlayerUserId = next ?? userId
-      s.turnPhase = 'preRoll'
-      s.dice = null
-      s.doublesCount = 0
-      s.pendingAction = null
-    }
+    const next = getNextActivePlayer(s, userId)
+    s.currentPlayerUserId = next ?? userId
+    s.turnPhase = 'preRoll'
+    s.dice = null
+    s.doublesCount = 0
+    s.extraRollPending = false
+    s.pendingAction = null
 
     return s
   }
@@ -981,6 +1357,7 @@ export class PropertyManagement extends GameBase {
     s.turnPhase = 'preRoll'
     s.dice = null
     s.doublesCount = 0
+    s.extraRollPending = false
     s.pendingAction = null
     const nextName = s.playerStates[s.currentPlayerUserId]?.username ?? s.currentPlayerUserId
     s.lastEventMessage = `It's ${nextName}'s turn.`
@@ -994,9 +1371,9 @@ export class PropertyManagement extends GameBase {
     if (!pending || pending.type !== 'card') throw new BadRequestError('No card pending')
 
     const s = clone(state)
-    s.pendingAction = null
     const diceTotal = s.dice ? s.dice[0] + s.dice[1] : 7
-    return applyCardEffect(s, userId, pending.cardEffect, diceTotal)
+    const resolved = applyCardEffect(s, userId, pending.cardEffect, diceTotal)
+    return resolveDeferredExtraRoll(resolved, userId)
   }
 
   static getMoveDescription(action: PMAction): string {

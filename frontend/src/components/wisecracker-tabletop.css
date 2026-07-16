@@ -305,6 +305,8 @@
 .wc-host-setting input { padding: 0.65rem 0.75rem; font-family: var(--font-mono); font-weight: 750; }
 .wc-cue-editor textarea { min-height: 7rem; padding: 0.8rem; line-height: 1.55; resize: vertical; }
 .wc-answer-form input { padding: 0.7rem 0.8rem; }
+.wc-answer-form label > span { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.wc-answer-form label > span small { color: var(--wc-muted); font-family: var(--font-mono); font-size: 0.64rem; font-weight: 700; }
 .wc-host-setting input:focus,
 .wc-cue-editor textarea:focus,
 .wc-answer-form input:focus { border-color: var(--wc-violet); box-shadow: 0 0 0 3px color-mix(in oklch, var(--wc-violet) 18%, transparent); }
@@ -345,6 +347,12 @@
   border-radius: 1rem;
   background: color-mix(in oklch, var(--wc-stage-raised) 90%, transparent);
 }
+
+.wc-input-count { margin: 0.45rem 0 0; color: var(--wc-muted); font-family: var(--font-mono); font-size: 0.68rem; text-align: right; }
+.wc-input-count.is-invalid,
+.wc-field-error { color: var(--danger-text); }
+.wc-field-error { margin: 0.35rem 0 0; font-size: 0.72rem; font-weight: 750; }
+.wc-move-error { margin: 0.75rem 1rem 0; border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--wc-line)); border-radius: 0.8rem; background: var(--danger-subtle); padding: 0.7rem 0.8rem; color: var(--danger-text); font-size: 0.75rem; font-weight: 750; }
 
 .wc-preview { display: grid; gap: 0.45rem; }
 

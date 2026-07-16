@@ -162,6 +162,72 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  multiplayer-e2e:
+    name: Published multiplayer journeys
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      MULTIPLAYER_E2E_MONGODB_URI: mongodb://127.0.0.1:27017/games_arena_multiplayer_e2e
+      MULTIPLAYER_E2E_REDIS_URL: redis://127.0.0.1:6379/14
+      MULTIPLAYER_E2E_JWT_SECRET: ci-only-isolated-multiplayer-e2e-secret
+    services:
+      mongo:
+        image: mongo:8.0@sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci --prefix ../backend --no-audit --no-fund
+
+      - name: Install frontend dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run real-service multiplayer journeys
+        run: npm run test:e2e:multiplayer
+
+      - name: Upload multiplayer diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: multiplayer-e2e-results
+          path: |
+            frontend/node_modules/.cache/multiplayer-playwright-results
+            frontend/node_modules/.cache/multiplayer-playwright-report
+          if-no-files-found: ignore
+          retention-days: 7
+
   frontend-visual:
     name: Frontend Chromium responsive visuals
     runs-on: ubuntu-24.04

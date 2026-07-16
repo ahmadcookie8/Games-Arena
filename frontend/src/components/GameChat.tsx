@@ -4,7 +4,7 @@ import type { ChatMessage } from '../types/game'
 interface Props {
   messages: ChatMessage[]
   currentUserId?: string
-  onSend: (text: string) => Promise<{ success: boolean; error?: string }>
+  onSend: (text: string) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
   variant?: 'card' | 'embedded'
 }
 
@@ -30,7 +30,7 @@ export default function GameChat({ messages, currentUserId, onSend, variant = 'c
       const result = await onSend(trimmed)
       if (result.success) {
         setText('')
-      } else {
+      } else if (!result.handledGlobally) {
         setError(result.error || 'Message failed')
       }
     } catch {

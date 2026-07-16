@@ -6,7 +6,11 @@ let redisClient: Redis | null = null
 
 export function getRedisClient(): Redis {
   if (!redisClient) {
-    redisClient = new Redis(config.redisUrl)
+    redisClient = new Redis(config.redisUrl, {
+      connectTimeout: 5_000,
+      commandTimeout: 3_000,
+      maxRetriesPerRequest: 1,
+    })
     redisClient.on('error', (err) => logSecurityEvent('redis.failure', { errorName: err.name }, 'error'))
     redisClient.on('connect', () => logSecurityEvent('redis.connected', {}, 'info'))
   }

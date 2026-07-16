@@ -15,6 +15,8 @@ export const loginSchema = z.object({
 })
 
 export const createGameSchema = z.object({
+  // Recognize legacy catalog values so the service can return the stable
+  // GAME_TYPE_UNAVAILABLE code while still rejecting arbitrary strings.
   gameType: z.enum(['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker', 'scrabble', 'propertyManagement']),
 }).strict()
 
@@ -101,9 +103,20 @@ export const joinGameSchema = z.object({
   gameCode: z.string().trim().toUpperCase().regex(/^(?:[A-Z0-9]{6}|[A-Z0-9]{8})$/, 'Game code must be 6 or 8 letters and numbers'),
 }).strict()
 
-const boundedIdentifierSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/)
 const userIdSchema = gameIdSchema
 const ticTacToeMoveSchema = z.enum(['0', '1', '2', '3', '4', '5', '6', '7', '8'])
+
+// Scrabble racks created before UUID tile IDs used `<letter>-<timestamp>-<random>`,
+// including `?` as the letter for blank tiles. Keep that exact legacy shape
+// available for active games while requiring UUIDs for newly generated IDs.
+const scrabbleTileIdSchema = z.union([
+  z.string().uuid(),
+  z.string().min(17).max(128).regex(/^[A-Z?]-\d{13}-[a-z0-9]+$/),
+])
+const scrabbleOfferIdSchema = z.union([
+  z.string().uuid(),
+  z.string().min(15).max(128).regex(/^\d{13}-[a-z0-9]+$/),
+])
 
 const wisecrackerActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('startMatch'), maxScore: z.number().int().min(1).max(50).optional() }).strict(),
@@ -116,7 +129,7 @@ const wisecrackerActionSchema = z.discriminatedUnion('type', [
 ])
 
 const scrabblePlacementSchema = z.object({
-  rackTileId: boundedIdentifierSchema,
+  rackTileId: scrabbleTileIdSchema,
   row: z.number().int().min(0).max(14),
   col: z.number().int().min(0).max(14),
   blankLetter: z.string().length(1).regex(/^[A-Za-z]$/).transform((letter) => letter.toUpperCase()).optional(),
@@ -124,9 +137,10 @@ const scrabblePlacementSchema = z.object({
 
 const scrabbleActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('placeTiles'), placements: z.array(scrabblePlacementSchema).min(1).max(7) }).strict(),
-  z.object({ type: z.literal('exchangeWithBag'), rackTileIds: z.array(boundedIdentifierSchema).min(1).max(7) }).strict(),
-  z.object({ type: z.literal('offerTrade'), targetUserId: userIdSchema, rackTileIds: z.array(boundedIdentifierSchema).min(1).max(7) }).strict(),
-  z.object({ type: z.literal('respondTrade'), accept: z.boolean(), rackTileIds: z.array(boundedIdentifierSchema).max(7).optional() }).strict(),
+  z.object({ type: z.literal('exchangeWithBag'), rackTileIds: z.array(scrabbleTileIdSchema).min(1).max(7) }).strict(),
+  z.object({ type: z.literal('offerTrade'), targetUserId: userIdSchema, rackTileIds: z.array(scrabbleTileIdSchema).min(1).max(7) }).strict(),
+  z.object({ type: z.literal('respondTrade'), offerId: scrabbleOfferIdSchema.optional(), accept: z.boolean(), rackTileIds: z.array(scrabbleTileIdSchema).max(7).optional() }).strict(),
+  z.object({ type: z.literal('cancelTrade'), offerId: scrabbleOfferIdSchema.optional() }).strict(),
   z.object({ type: z.literal('pass') }).strict(),
   z.object({ type: z.literal('giveUp') }).strict(),
 ])

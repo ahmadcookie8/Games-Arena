@@ -21,13 +21,13 @@ import { gameService } from './services/gameService'
 import { getLeaderboard, getLeaderboardByType, getSinglePlayerLeaderboard } from './controllers/userController'
 import { getAuthTokenFromCookie, VerifiedAuthPayload } from './utils/authToken'
 import { authenticateSessionPayload, authenticateSessionToken } from './services/sessionAuthService'
-import { setSocketServer } from './services/socketNotifier'
+import { createGameStateEnvelope, setSocketServer } from './services/socketNotifier'
 import { AuthPayload } from './types/api'
-import { presentGameForUser } from './utils/gamePresenter'
 import { AppError, NotFoundError } from './utils/errors'
 import { joinRoomEventSchema, makeMoveEventSchema, sendChatMessageEventSchema } from './utils/validators'
 import { logSecurityEvent, startResourcePressureMonitor } from './utils/securityLogger'
 import { startStatsReconciliationWorker } from './services/statsReconciliationWorker'
+import { gameUserRoom, userRoom } from './utils/socketRooms'
 
 import authRoutes from './routes/auth'
 import gameRoutes from './routes/games'
@@ -74,7 +74,7 @@ const io = new Server(httpServer, {
   allowRequest: (request, callback) => {
     void authorizeHandshake(request as AuthenticatedHandshakeRequest)
       .then(() => callback(null, true))
-      .catch(() => callback('Unauthorized', false))
+      .catch((error) => callback(error instanceof Error ? error.message : 'Unauthorized', false))
   },
 })
 setSocketServer(io)
@@ -196,8 +196,8 @@ async function authorizeHandshake(request: AuthenticatedHandshakeRequest): Promi
 }
 
 io.use((socket, next) => {
+  const request = socket.request as AuthenticatedHandshakeRequest
   void (async () => {
-    const request = socket.request as AuthenticatedHandshakeRequest
     const token = getAuthTokenFromCookie(request.headers.cookie)
     if (!request.gamesArenaUser || !token) throw new Error('Unauthorized')
 
@@ -211,6 +211,13 @@ io.use((socket, next) => {
     next()
   })().catch(() => {
     logSecurityEvent('socket.connection_rejected', { socketId: socket.id })
+    const userId = request.gamesArenaUser?.userId
+    const slotId = request.gamesArenaSlotId
+    if (userId && slotId) {
+      void releaseRedisConcurrencySlot('socket-user', userId, slotId)
+        .catch(() => logSecurityEvent('socket.connection_slot_release_failed', { userId }, 'error'))
+      request.gamesArenaSlotId = undefined
+    }
     next(new Error('Unauthorized'))
   })
 })
@@ -250,7 +257,7 @@ io.on('connection', (socket) => {
       await enforceSocketRateLimit(user.userId, RATE_LIMIT_POLICIES.socketEventUser)
       const event = packet[0]
       if (typeof event !== 'string' || !clientEvents.has(event)) {
-        logSecurityEvent('socket.unknown_event', { event: typeof event === 'string' ? event : 'invalid', socketId: socket.id, userId: user.userId })
+        logSecurityEvent('socket.unknown_event', { socketEvent: typeof event === 'string' ? event : 'invalid', socketId: socket.id, userId: user.userId })
         const maybeCallback = packet[packet.length - 1]
         sendSocketResponse(socket, typeof event === 'string' ? event : 'unknown', typeof maybeCallback === 'function' ? maybeCallback : undefined, {
           ok: false,
@@ -266,7 +273,7 @@ io.on('connection', (socket) => {
     })
   })
 
-  socket.join(`user:${user.userId}`)
+  socket.join(userRoom(user.userId))
   socket.emit('welcome', { socketId: socket.id, message: 'Connected to Games Arena' })
 
   registerSocketEvent(socket, 'joinRoom', joinRoomEventSchema, ({ gameId }) => {
@@ -283,7 +290,7 @@ io.on('connection', (socket) => {
       if (joinedGameId && joinedGameId !== gameId) {
         const previousGameId = joinedGameId
         joinedGameId = null
-        await socket.leave(gameRoom(previousGameId))
+        await socket.leave(gameUserRoom(previousGameId, user.userId))
         try {
           await markPlayerDisconnectedIfLastSocket(previousGameId, user.userId)
         } catch {
@@ -291,11 +298,11 @@ io.on('connection', (socket) => {
         }
       }
 
-      await socket.join(gameRoom(gameId))
+      await socket.join(gameUserRoom(gameId, user.userId))
       joinedGameId = gameId
       if (disconnecting || !socket.connected) {
         joinedGameId = null
-        await socket.leave(gameRoom(gameId))
+        await socket.leave(gameUserRoom(gameId, user.userId))
         throw new AppError('Connection closed', 400, 'CONNECTION_CLOSED')
       }
 
@@ -304,10 +311,10 @@ io.on('connection', (socket) => {
           gameService.setPlayerConnection(gameId, user.userId, true)
         ))
         if (!game) throw new NotFoundError('Game')
-        return { game: presentGameForUser(game, user.userId) }
+        return createGameStateEnvelope(game, user.userId)
       } catch (error) {
         joinedGameId = null
-        await socket.leave(gameRoom(gameId))
+        await socket.leave(gameUserRoom(gameId, user.userId))
         try {
           await markPlayerDisconnectedIfLastSocket(gameId, user.userId)
         } catch {
@@ -325,7 +332,7 @@ io.on('connection', (socket) => {
     if (joinedGameId !== gameId) throw new AppError('Join the game before making a move', 403, 'JOIN_GAME_FIRST')
 
     const game = await gameService.makeMove(gameId, user.userId, move)
-    return { game: presentGameForUser(game, user.userId) }
+    return createGameStateEnvelope(game, user.userId)
   })
 
   registerSocketEvent(socket, 'sendChatMessage', sendChatMessageEventSchema, async ({ gameId, text }) => {
@@ -369,10 +376,10 @@ export function registerSocketEvent<TInput, TOutput>(
     })().catch((error) => {
       const failure = socketFailure(error)
       if (error instanceof ZodError) {
-        logSecurityEvent('socket.malformed_event', { event, socketId: socket.id, userId: (socket.data.user as AuthPayload | undefined)?.userId })
+        logSecurityEvent('socket.malformed_event', { socketEvent: event, socketId: socket.id, userId: (socket.data.user as AuthPayload | undefined)?.userId })
       }
       if (!(error instanceof AppError) && !(error instanceof ZodError)) {
-        logSecurityEvent('socket.unhandled_event_error', { event, socketId: socket.id }, 'error')
+        logSecurityEvent('socket.unhandled_event_error', { socketEvent: event, socketId: socket.id }, 'error')
       }
       sendSocketResponse(socket, event, callback, failure)
     })
@@ -384,7 +391,7 @@ function sendSocketResponse<T>(socket: Socket, event: string, callback: SocketCa
     try {
       callback(response)
     } catch {
-      logSecurityEvent('socket.acknowledgement_failed', { event, socketId: socket.id }, 'error')
+      logSecurityEvent('socket.acknowledgement_failed', { socketEvent: event, socketId: socket.id }, 'error')
     }
     return
   }
@@ -463,12 +470,8 @@ function normalizeIpAddress(address: string): string {
   return isIP(mappedAddress) === 4 ? mappedAddress : withoutZone
 }
 
-function gameRoom(gameId: string): string {
-  return `game:${gameId}`
-}
-
 function hasLiveUserSocketInGame(gameId: string, userId: string): boolean {
-  const socketIds = io.sockets.adapter.rooms.get(gameRoom(gameId))
+  const socketIds = io.sockets.adapter.rooms.get(gameUserRoom(gameId, userId))
   if (!socketIds) return false
 
   for (const socketId of socketIds) {

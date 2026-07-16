@@ -3,9 +3,11 @@ import {
   SCRABBLE_BOARD_MAX_ZOOM,
   SCRABBLE_BOARD_MIN_ZOOM,
   captureScrabbleCameraCenter,
+  canExchangeScrabbleTiles,
   clampScrabbleZoom,
   fitScrabbleBoardZoom,
   getScrabbleCoordinate,
+  getEligibleScrabbleTradePlayers,
   getScrabbleLastPlayCenter,
   resolveScrabbleActionMode,
   restoreScrabbleCameraCenter,
@@ -87,5 +89,33 @@ describe('Scrabble action presentation', () => {
   it('prioritizes an incoming trade over turn ownership', () => {
     expect(resolveScrabbleActionMode({ ...base, pendingTradeRole: 'incoming', isMyTurn: false })).toBe('incomingTrade')
     expect(resolveScrabbleActionMode({ ...base, pendingTradeRole: 'incoming', isMyTurn: true, swapMode: true })).toBe('incomingTrade')
+  })
+})
+
+describe('Scrabble exchange and trade eligibility', () => {
+  it('allows finite exchanges only when the bag can replace every tile', () => {
+    expect(canExchangeScrabbleTiles(0, 7, false)).toBe(false)
+    expect(canExchangeScrabbleTiles(2, 2, false)).toBe(true)
+    expect(canExchangeScrabbleTiles(3, 2, false)).toBe(false)
+    expect(canExchangeScrabbleTiles(7, 0, true)).toBe(true)
+  })
+
+  it('offers trades only to connected active players with enough return tiles', () => {
+    const players = [
+      { userId: 'me', username: 'Me', index: 0, isConnected: true },
+      { userId: 'ready', username: 'Ready', index: 1, isConnected: true },
+      { userId: 'offline', username: 'Offline', index: 2, isConnected: false },
+      { userId: 'unknown', username: 'Unknown presence', index: 3 },
+      { userId: 'short', username: 'Short rack', index: 4, isConnected: true },
+      { userId: 'gave-up', username: 'Gave up', index: 5, isConnected: true },
+    ]
+
+    expect(getEligibleScrabbleTradePlayers(
+      players,
+      'me',
+      ['gave-up'],
+      { me: 7, ready: 3, offline: 7, unknown: 7, short: 1, 'gave-up': 7 },
+      2,
+    ).map((player) => player.userId)).toEqual(['ready'])
   })
 })

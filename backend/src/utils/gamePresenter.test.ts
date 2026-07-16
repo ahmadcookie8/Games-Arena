@@ -19,6 +19,7 @@ describe('presentGameForUser', () => {
     }, 'user1')
 
     expect(presented).not.toHaveProperty('__v')
+    expect(presented.revision).toBe(9)
     expect(presented).not.toHaveProperty('statsProcessedAt')
     expect(presented).not.toHaveProperty('futureInternalField')
     expect((presented.players as Array<Record<string, unknown>>)[0]).toEqual({
@@ -28,6 +29,12 @@ describe('presentGameForUser', () => {
     expect((presented.chatMessages as Array<Record<string, unknown>>)[0]).not.toHaveProperty('_id')
     expect(presented.result).not.toHaveProperty('internalResult')
     expect(presented.metadata).not.toHaveProperty('internalMetadata')
+  })
+
+  it('normalizes missing or unsafe revisions to zero', () => {
+    expect(presentGameForUser({ gameType: 'ticTacToe', gameState: {}, revision: 4 }, 'user1').revision).toBe(4)
+    expect(presentGameForUser({ gameType: 'ticTacToe', gameState: {}, __v: -1 }, 'user1').revision).toBe(0)
+    expect(presentGameForUser({ gameType: 'ticTacToe', gameState: {}, __v: Number.MAX_SAFE_INTEGER + 1 }, 'user1').revision).toBe(0)
   })
 
   it('positively allowlists state fields for each game type', () => {

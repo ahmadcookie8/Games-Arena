@@ -2,7 +2,6 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import axios from 'axios'
 import BrandMascot from '../components/BrandMascot'
-import GameChat from '../components/GameChat'
 import { GameRouteLoading, GameRouteUnavailable } from '../components/GameRouteState'
 import GameShell from '../components/GameShell'
 import GameInvite from '../components/GameInvite'
@@ -12,11 +11,12 @@ import PlayerCard from '../components/PlayerCard'
 import { Button, RouteState } from '../components/ui'
 import { useAuth } from '../hooks/useAuth'
 import { useGameState } from '../hooks/useGameState'
-import { useSocket } from '../hooks/useSocket'
+import { useSocket, type SocketAcknowledgementError } from '../hooks/useSocket'
 import api from '../lib/api'
 import { canHostCloseGame, getCloseGamePrompt } from '../lib/gameClose'
 import { getGameLabel } from '../lib/gameRules'
 import { getGameMode } from '../lib/gameCatalog'
+import { parseGameStateEnvelope } from '../lib/gameStateEvents'
 import { ChatMessage, Game } from '../types/game'
 
 const PropertyManagementBoard = lazy(() => import('../components/PropertyManagementBoard'))
@@ -27,13 +27,16 @@ const WisecrackerBoard = lazy(() => import('../components/WisecrackerBoard'))
 interface MoveResponse {
   success: boolean
   game?: Game
+  errorCode?: string
   error?: string
+  handledGlobally?: boolean
 }
 
 interface ChatResponse {
   success: boolean
   message?: ChatMessage
   error?: string
+  handledGlobally?: boolean
 }
 
 interface ModalState {
@@ -61,95 +64,116 @@ function getCloseGameModal(game: Game, onConfirm: () => void, onCancel: () => vo
   }
 }
 
+function isFatalGameError(code: string): boolean {
+  return ['FORBIDDEN', 'GAME_NOT_FOUND', 'GAME_TYPE_UNAVAILABLE', 'INVALID_ACK', 'UNAUTHORIZED'].includes(code)
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  if (!value || typeof value !== 'object') return false
+  const message = value as Partial<ChatMessage>
+  return typeof message.messageId === 'string'
+    && typeof message.userId === 'string'
+    && typeof message.username === 'string'
+    && typeof message.text === 'string'
+    && typeof message.timestamp === 'string'
+}
+
 export default function GameBoard() {
   const { gameId } = useParams<{ gameId: string }>()
   const navigate = useNavigate()
   const { user } = useAuth()
-  const { game, loading, error, refetch, setGame } = useGameState(gameId)
-  const { emitWithAck, on, connected } = useSocket()
+  const { game, loading, error, refetch, applySnapshot, appendChatMessage, updatePlayerPresence } = useGameState(gameId)
+  const { emitWithAck, on, connected, connectionError } = useSocket()
   const [modal, setModal] = useState<ModalState | null>(null)
+  const [actionError, setActionError] = useState<SocketAcknowledgementError | null>(null)
+  const [roomJoined, setRoomJoined] = useState(false)
   const [isReplaying, setIsReplaying] = useState(false)
   const [isClosing, setIsClosing] = useState(false)
-  const latestGameRef = useRef<Game | null>(null)
   const interactionRootRef = useRef<HTMLDivElement | null>(null)
   const closingRef = useRef(false)
+  const replayingRef = useRef(false)
+  const moveInFlightRef = useRef(false)
+  const chatInFlightRef = useRef(false)
+  const roomJoinedRef = useRef(false)
+  const roomReady = connected && roomJoined
 
   useEffect(() => {
-    latestGameRef.current = game
-  }, [game])
+    moveInFlightRef.current = false
+    chatInFlightRef.current = false
+    roomJoinedRef.current = false
+    setRoomJoined(false)
+    setActionError(null)
+  }, [gameId])
 
   useEffect(() => {
-    interactionRootRef.current?.toggleAttribute('inert', !connected)
-  }, [connected, game])
+    interactionRootRef.current?.toggleAttribute('inert', !roomReady)
+  }, [roomReady, game])
 
-  const showGameErrorModal = useCallback((error: string) => {
-    const modalByError: Record<string, ModalState> = {
-      'Waiting for another player': {
-        title: 'Waiting for another player',
-        message: 'This game needs another player before moves can be made. Share the invite code and try again once they join.',
-        variant: 'warning',
-      },
-      'It is not your turn': {
-        title: 'Not your turn',
-        message: 'Hold up for the other player to make their move before playing again.',
-        variant: 'info',
-      },
-      'You are not in this game': {
-        title: 'You are not in this game',
-        message: 'Only players who joined this game can make moves here.',
-        variant: 'danger',
-      },
-      'Game is not active': {
-        title: 'Game is not active',
-        message: 'This game is completed, paused, or unavailable, so moves cannot be made right now.',
-        variant: 'warning',
-      },
-      'Invalid move': {
-        title: 'Invalid move',
-        message: 'That move is not valid for the current board. Choose another option and try again.',
-        variant: 'danger',
-      },
+  const showFatalGameError = useCallback((error: SocketAcknowledgementError) => {
+    const titleByCode: Record<string, string> = {
+      FORBIDDEN: 'Game access denied',
+      GAME_NOT_FOUND: 'Game unavailable',
+      GAME_TYPE_UNAVAILABLE: 'Game unavailable',
+      INVALID_ACK: 'Invalid server response',
+      SOCKET_CONNECTION_LIMIT: 'Connection limit reached',
+      SOCKET_ORIGIN_REJECTED: 'Live connection blocked',
+      SOCKET_SESSION_ENDED: 'Live session ended',
+      UNAUTHORIZED: 'Session expired',
     }
-
-    setModal(modalByError[error] ?? {
-      title: 'Action blocked',
-      message: error,
+    setModal({
+      title: titleByCode[error.code] ?? 'Game unavailable',
+      message: error.message,
       variant: 'danger',
     })
   }, [])
 
   useEffect(() => {
+    if (!connectionError || !['SOCKET_CONNECTION_LIMIT', 'SOCKET_ORIGIN_REJECTED', 'SOCKET_SESSION_ENDED', 'UNAUTHORIZED'].includes(connectionError.code)) return
+    showFatalGameError(connectionError)
+  }, [connectionError, showFatalGameError])
+
+  useEffect(() => {
+    roomJoinedRef.current = false
+    setRoomJoined(false)
     if (!gameId || !connected) return
     let cancelled = false
 
-    void emitWithAck<{ game: Game }>('joinRoom', { gameId }).then((acknowledgement) => {
+    void emitWithAck<unknown>('joinRoom', { gameId }).then((acknowledgement) => {
       if (cancelled) return
-      if (acknowledgement.ok) setGame(acknowledgement.data.game)
-      else showGameErrorModal(acknowledgement.error.message)
+      if (acknowledgement.ok) {
+        const parsed = parseGameStateEnvelope(acknowledgement.data)
+        if (!parsed || parsed.gameId !== gameId) {
+          showFatalGameError({ code: 'INVALID_ACK', message: 'The server returned a game for a different room. Refresh and try again.' })
+          return
+        }
+        applySnapshot(acknowledgement.data, true)
+        roomJoinedRef.current = true
+        setRoomJoined(true)
+      } else {
+        showFatalGameError(acknowledgement.error)
+      }
     })
 
-    const offGameUpdated = on('gameUpdated', (data: unknown) => {
-      const { game: updatedGame } = data as { game: Game }
-      setGame(updatedGame)
-    })
-
-    const offMoveMade = on('moveMade', (data: unknown) => {
-      const { game: updatedGame } = data as { game: Game }
-      setGame(updatedGame)
-    })
-
-    const offGameOver = on('gameOver', (data: unknown) => {
-      const { game: updatedGame } = data as { game: Game }
-      setGame(updatedGame)
-    })
+    const applyLiveSnapshot = (data: unknown) => {
+      if (applySnapshot(data, false, true)) setActionError(null)
+    }
+    const offGameUpdated = on('gameUpdated', applyLiveSnapshot)
+    // One-release compatibility for servers that still use these as full-state events.
+    const offMoveMade = on('moveMade', applyLiveSnapshot)
+    const offGameOver = on('gameOver', applyLiveSnapshot)
 
     const offChatMessage = on('chatMessage', (data: unknown) => {
-      const { gameId: messageGameId, message } = data as { gameId: string; message: ChatMessage }
-      const currentGame = latestGameRef.current
-      if (messageGameId !== gameId || !message || !currentGame) return
-      const existing = currentGame.chatMessages || []
-      if (existing.some((item) => item.messageId === message.messageId)) return
-      setGame({ ...currentGame, chatMessages: [...existing, message].slice(-100) })
+      if (!data || typeof data !== 'object') return
+      const { gameId: messageGameId, message } = data as { gameId?: unknown; message?: unknown }
+      if (messageGameId !== gameId || !isChatMessage(message)) return
+      appendChatMessage(gameId, message)
+    })
+
+    const offPlayerPresence = on('playerPresenceChanged', (data: unknown) => {
+      if (!data || typeof data !== 'object') return
+      const { gameId: presenceGameId, userId, isConnected } = data as Record<string, unknown>
+      if (presenceGameId !== gameId || typeof userId !== 'string' || typeof isConnected !== 'boolean') return
+      updatePlayerPresence(gameId, userId, isConnected)
     })
 
     const offReplayCreated = on('gameReplayCreated', (data: unknown) => {
@@ -160,32 +184,73 @@ export default function GameBoard() {
 
     return () => {
       cancelled = true
+      roomJoinedRef.current = false
       offGameUpdated()
       offMoveMade()
       offGameOver()
       offChatMessage()
+      offPlayerPresence()
       offReplayCreated()
     }
-  }, [gameId, connected, emitWithAck, on, navigate, setGame, showGameErrorModal])
+  }, [gameId, connected, emitWithAck, on, navigate, applySnapshot, appendChatMessage, updatePlayerPresence, showFatalGameError])
 
   async function handleMove(move: unknown): Promise<MoveResponse> {
-    if (!connected) return { success: false, error: 'Reconnecting to the game server.' }
-    const acknowledgement = await emitWithAck<{ game: Game }>('makeMove', { gameId, move })
-    if (acknowledgement.ok) {
-      setGame(acknowledgement.data.game)
-      return { success: true, game: acknowledgement.data.game }
+    if (!connected || !gameId || !roomJoinedRef.current) {
+      const reconnectError = connectionError ?? (connected
+        ? { code: 'JOINING_ROOM', message: 'Waiting for the server to authorize this game room.' }
+        : { code: 'SOCKET_DISCONNECTED', message: 'Reconnecting to the game server.' })
+      setActionError(reconnectError)
+      return { success: false, errorCode: reconnectError.code, error: reconnectError.message }
+    }
+    if (moveInFlightRef.current) {
+      return { success: false, errorCode: 'ACTION_IN_FLIGHT', error: '' }
     }
 
-    showGameErrorModal(acknowledgement.error.message)
-    return { success: false, error: acknowledgement.error.message }
+    moveInFlightRef.current = true
+    setActionError(null)
+    try {
+      const acknowledgement = await emitWithAck<unknown>('makeMove', { gameId, move })
+      if (acknowledgement.ok) {
+        const snapshot = parseGameStateEnvelope(acknowledgement.data)
+        if (!snapshot || snapshot.gameId !== gameId) {
+          const invalidAck = { code: 'INVALID_ACK', message: 'The server returned an invalid game response. Refresh and try again.' }
+          showFatalGameError(invalidAck)
+          return { success: false, errorCode: invalidAck.code, error: invalidAck.message }
+        }
+        applySnapshot(acknowledgement.data, true, true)
+        return { success: true, game: snapshot.game }
+      }
+
+      if (acknowledgement.error.code === 'GAME_STATE_CONFLICT' || acknowledgement.error.code === 'ACK_TIMEOUT') refetch()
+      const handledGlobally = isFatalGameError(acknowledgement.error.code)
+      if (handledGlobally) showFatalGameError(acknowledgement.error)
+      else setActionError(acknowledgement.error)
+      return {
+        success: false,
+        errorCode: acknowledgement.error.code,
+        error: acknowledgement.error.message,
+        handledGlobally,
+      }
+    } finally {
+      moveInFlightRef.current = false
+    }
   }
 
   async function handleSendChat(text: string): Promise<ChatResponse> {
-    if (!connected) return { success: false, error: 'Chat will be available after the room reconnects.' }
-    const acknowledgement = await emitWithAck<{ message: ChatMessage }>('sendChatMessage', { gameId, text })
-    return acknowledgement.ok
-      ? { success: true, message: acknowledgement.data.message }
-      : { success: false, error: acknowledgement.error.message }
+    if (!connected || !gameId || !roomJoinedRef.current) {
+      return { success: false, error: connectionError?.message ?? 'Chat will be available after the room is authorized.' }
+    }
+    if (chatInFlightRef.current) return { success: false, error: 'Your previous message is still being sent.' }
+    chatInFlightRef.current = true
+    try {
+      const acknowledgement = await emitWithAck<{ message: ChatMessage }>('sendChatMessage', { gameId, text })
+      if (acknowledgement.ok) return { success: true, message: acknowledgement.data.message }
+      const handledGlobally = isFatalGameError(acknowledgement.error.code)
+      if (handledGlobally) showFatalGameError(acknowledgement.error)
+      return { success: false, error: acknowledgement.error.message, handledGlobally }
+    } finally {
+      chatInFlightRef.current = false
+    }
   }
 
   function closeModal() {
@@ -219,9 +284,10 @@ export default function GameBoard() {
   }
 
   async function playAgain() {
-    if (!game || isReplaying) return
+    if (!game || replayingRef.current) return
 
     try {
+      replayingRef.current = true
       setIsReplaying(true)
       const res = await api.post(`/api/games/${game._id}/replay`)
       navigate(`/game/${res.data.game._id}`, { replace: true })
@@ -237,6 +303,7 @@ export default function GameBoard() {
         variant: 'danger',
       })
     } finally {
+      replayingRef.current = false
       setIsReplaying(false)
     }
   }
@@ -288,7 +355,7 @@ export default function GameBoard() {
   const isWaitingForPlayer = isActive && game.players.length < minPlayers && game.gameType !== 'wisecracker' && game.gameType !== 'propertyManagement'
   const isCompleted = game.status === 'completed'
   const canCurrentUserClose = canHostCloseGame(game, user?._id)
-  const isMyTurn = connected && isActive && !isWaitingForPlayer && !isCompleted && game.currentTurnIndex === myIndex
+  const isMyTurn = roomReady && isActive && !isWaitingForPlayer && !isCompleted && game.currentTurnIndex === myIndex
   const currentPlayer = game.players[game.currentTurnIndex]
   const resultText = game.result?.isDraw
     ? 'Draw'
@@ -306,7 +373,11 @@ export default function GameBoard() {
         ? 'Classic table'
         : 'Private table'
   const tabletopStatus = !connected
-    ? 'Reconnecting...'
+    ? connectionError?.code === 'SOCKET_CONNECTION_LIMIT' ? 'Connection limit reached' : 'Reconnecting...'
+    : !roomJoined
+      ? 'Joining game...'
+    : game.gameType === 'propertyManagement' && gamePhase === 'lobby'
+      ? 'Waiting room'
     : game.gameType === 'wisecracker' && gamePhase
     ? gamePhase.replace(/([A-Z])/g, ' $1').replace(/^./, (letter) => letter.toUpperCase())
     : isCompleted
@@ -329,7 +400,7 @@ export default function GameBoard() {
         gameCode={game.gameCode}
         statusLabel={tabletopStatus}
         announceStatus
-        statusTone={!connected || isWaitingForPlayer ? 'warning' : isCompleted ? 'success' : 'default'}
+        statusTone={!roomReady || isWaitingForPlayer ? 'warning' : isCompleted ? 'success' : 'default'}
         onBack={() => navigate('/?tab=multiplayer')}
         onClose={canCurrentUserClose ? promptCloseGame : undefined}
         width={isTabletopGame ? 'wide' : 'standard'}
@@ -341,9 +412,19 @@ export default function GameBoard() {
       >
         <div
           ref={interactionRootRef}
-          aria-disabled={!connected || undefined}
-          className={`transition-opacity duration-180 ${connected ? '' : 'opacity-70'}`}
+          aria-disabled={!roomReady || undefined}
+          className={`transition-opacity duration-180 ${roomReady ? '' : 'opacity-70'}`}
         >
+        {connectionError && (
+          <div className="mb-4 rounded-xl border border-warning/30 bg-warning-subtle px-4 py-3 text-sm font-medium text-warning-text" role="alert">
+            {connectionError.message}
+          </div>
+        )}
+        {actionError && game.gameType === 'ticTacToe' && (
+          <div className="mb-4 rounded-xl border border-danger/30 bg-danger-subtle px-4 py-3 text-sm font-medium text-danger-text" role="alert">
+            {actionError.message}
+          </div>
+        )}
         <Suspense fallback={<div className="grid min-h-72 place-items-center rounded-2xl border border-border bg-surface/80 text-sm text-text-secondary" role="status">Preparing game table…</div>}>
           {game.gameType === 'propertyManagement' ? (
             <PropertyManagementBoard game={game} user={user} onMove={handleMove} onSendChat={handleSendChat} />
@@ -359,7 +440,7 @@ export default function GameBoard() {
             <TicTacToeExperience
               game={game}
               currentUserId={user?._id}
-              connected={connected}
+              connected={roomReady}
               isReplaying={isReplaying}
               onMove={handleMove}
               onPlayAgain={playAgain}
@@ -414,7 +495,6 @@ export default function GameBoard() {
               </div>
             </div>
             <MoveHistory moves={game.moveHistory} />
-            {game.metadata?.mode !== 'singlePlayer' && <GameChat messages={game.chatMessages || []} currentUserId={user?._id} onSend={handleSendChat} />}
           </aside>
         </div>
           )}

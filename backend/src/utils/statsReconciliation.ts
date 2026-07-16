@@ -1,7 +1,10 @@
 import { ResultVerification } from './resultVerification'
 
 export interface ReconciliationGame {
+  gameType?: string
   players?: Array<{ userId?: unknown }>
+  statsParticipantIds?: unknown[]
+  gameState?: Record<string, unknown>
   metadata?: { mode?: string }
   result?: {
     winner?: unknown
@@ -34,9 +37,19 @@ export function reconcileVerifiedStats(games: ReconciliationGame[]): Map<string,
     if ((game.metadata?.mode || 'multiplayer') !== 'multiplayer') continue
     if (game.result?.verification !== 'server' && game.result?.verification !== 'replay') continue
 
-    const playerIds = [...new Set((game.players || [])
+    const roomPlayerIds = [...new Set((game.players || [])
       .map((player) => player.userId === undefined || player.userId === null ? '' : String(player.userId))
       .filter(Boolean))]
+    const roomPlayers = new Set(roomPlayerIds)
+    const frozenIds = Array.isArray(game.statsParticipantIds)
+      ? game.statsParticipantIds.map(String)
+      : []
+    const wisecrackerIds = game.gameType === 'wisecracker' && Array.isArray(game.gameState?.activePlayerIds)
+      ? game.gameState.activePlayerIds.map(String)
+      : []
+    const eligibleIds = (frozenIds.length > 0 ? frozenIds : wisecrackerIds)
+      .filter((playerId) => roomPlayers.has(playerId))
+    const playerIds = eligibleIds.length > 0 ? [...new Set(eligibleIds)] : roomPlayerIds
     if (playerIds.length < 2 || !game.result) continue
 
     if (game.result.isDraw) {

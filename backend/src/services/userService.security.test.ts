@@ -149,6 +149,18 @@ describe('idempotent verified statistics', () => {
     }
   })
 
+  it('loads frozen Wisecracker participants when rebuilding verified statistics', async () => {
+    const lean = jest.fn().mockResolvedValue([])
+    const select = jest.fn().mockReturnValue({ lean })
+    findMock.mockReturnValue({ select })
+
+    await userService.updateStatsAfterGame({ winnerId: 'winner', loserIds: ['loser'] })
+
+    expect(select).toHaveBeenCalledWith(
+      'gameType players statsParticipantIds gameState.activePlayerIds metadata result'
+    )
+  })
+
   it('locks affected users in a stable order before deriving statistics', async () => {
     mockFindResult([])
 

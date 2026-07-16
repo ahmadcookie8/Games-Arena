@@ -28,7 +28,7 @@ describe('game catalog', () => {
     expect(getGamePath({ _id: 'solo', gameType: 'ticTacToe', metadata: { mode: 'singlePlayer' } })).toBe('/single-player/tic-tac-toe/solo')
     expect(getGamePath({ _id: 'snake', gameType: 'snake' })).toBe('/single-player/snake/snake')
     expect(getGamePath({ _id: 'maze', gameType: 'mazeChase' })).toBe('/single-player/maze-chase/maze')
-    expect(getGamePath({ _id: 'legacy', gameType: 'chess' })).toBeNull()
+    expect(getGamePath({ _id: 'legacy', gameType: 'chess' })).toBe('/game/legacy')
   })
 
   it('infers older solo score records that predate mode metadata', () => {

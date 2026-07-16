@@ -381,7 +381,10 @@ class UserService {
         ...verifiedResultFilter,
         ...multiplayerModeFilter,
       })
-        .select('players metadata result')
+        // Wisecracker freezes the players who actually participated when the
+        // match completes. Keep those fields in the projection so lobby-only
+        // players are never recomputed as losers during idempotent rebuilds.
+        .select('gameType players statsParticipantIds gameState.activePlayerIds metadata result')
         .lean()
       const reconciled = reconcileVerifiedStats(verifiedGames)
 

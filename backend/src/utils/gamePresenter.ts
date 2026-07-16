@@ -1,4 +1,5 @@
 import { IGameDocument } from '../models/Game'
+import { normalizePropertyManagementState, type PropertyManagementState } from '../games/PropertyManagement'
 
 type PlainObject = Record<string, unknown>
 
@@ -31,7 +32,7 @@ const GAME_STATE_FIELDS: Record<string, readonly string[]> = {
     'usedPremiumSquares', 'pendingTrade', 'consecutivePasses', 'givenUpUserIds', 'lastScoreEvent',
   ],
   propertyManagement: [
-    'phase', 'hostUserId', 'currentPlayerUserId', 'turnPhase', 'dice', 'doublesCount',
+    'phase', 'hostUserId', 'currentPlayerUserId', 'turnPhase', 'dice', 'doublesCount', 'extraRollPending',
     'playerOrder', 'playerStates', 'properties', 'chanceCardIndex', 'communityChestCardIndex',
     'chanceFreeCardReturned', 'communityChestFreeCardReturned', 'pendingAction',
     'lastEventMessage', 'bankruptPlayerIds', 'winnerId',
@@ -54,8 +55,12 @@ const MAX_PRESENTED_MOVES = 100
 export function presentGameForUser(game: IGameDocument | PlainObject, userId: string): PlainObject {
   const source = toPlainObject(game)
   const plain = pickFields(source, GAME_FIELDS)
+  const sourceRevision = source.__v ?? source.revision
+  plain.revision = typeof sourceRevision === 'number' && Number.isSafeInteger(sourceRevision) && sourceRevision >= 0
+    ? sourceRevision
+    : 0
   sanitizeTopLevelCollections(plain)
-  const gameState = isPlainObject(plain.gameState) ? plain.gameState : null
+  let gameState = isPlainObject(plain.gameState) ? plain.gameState : null
   if (!gameState) {
     if (Object.prototype.hasOwnProperty.call(plain, 'gameState')) plain.gameState = {}
     return plain
@@ -69,6 +74,14 @@ export function presentGameForUser(game: IGameDocument | PlainObject, userId: st
       presentScrabbleState(gameState, userId)
       break
     case 'propertyManagement':
+      try {
+        gameState = normalizePropertyManagementState(gameState as unknown as PropertyManagementState) as unknown as PlainObject
+      } catch {
+        // A malformed legacy state still goes through the positive DTO
+        // allowlist below. Keep the readable public fields so a recoverable
+        // room does not become a blank screen merely because normalization
+        // could not infer every internal engine field.
+      }
       delete gameState.chanceCardOrder
       delete gameState.communityChestCardOrder
       break

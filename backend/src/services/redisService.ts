@@ -1,7 +1,6 @@
 import { getRedisClient } from '../utils/redis'
 
 export const KEYS = {
-  game: (gameType: string, gameId: string) => `game:${gameType}:${gameId}`,
   session: (userId: string, socketId: string) => `session:${userId}:${socketId}`,
   onlineUsers: 'online:users',
   leaderboard: (gameType: string) => `leaderboard:${gameType}`,

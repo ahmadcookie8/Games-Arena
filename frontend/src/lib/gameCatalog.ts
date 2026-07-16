@@ -209,9 +209,11 @@ export function getGameMode(game: Pick<Game, 'gameType' | 'metadata'>): GameMode
 export function getGamePath(game: Pick<Game, '_id' | 'gameType' | 'metadata'>): string | null {
   const entry = getCatalogEntry(game.gameType)
   const mode = getGameMode(game)
-  if (!getCatalogMode(entry, mode)) return null
 
+  // Existing multiplayer records remain readable and host-closable even when
+  // their game type is no longer in the published creation/join catalog.
   if (mode === 'multiplayer') return `/game/${game._id}`
+  if (!getCatalogMode(entry, mode)) return null
   if (game.gameType === 'snake') return `/single-player/snake/${game._id}`
   if (game.gameType === 'mazeChase') return `/single-player/maze-chase/${game._id}`
   if (game.gameType === 'ticTacToe') return `/single-player/tic-tac-toe/${game._id}`

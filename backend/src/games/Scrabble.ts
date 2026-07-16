@@ -1,4 +1,5 @@
-import { BadRequestError } from '../utils/errors'
+import { randomUUID } from 'crypto'
+import { AppError, BadRequestError, ForbiddenError } from '../utils/errors'
 import { isCommonAbbreviation, isDictionaryWord } from './ScrabbleDictionary'
 
 export type ScrabblePremium = 'DL' | 'TL' | 'DW' | 'TW'
@@ -47,7 +48,7 @@ export interface ScrabbleScoreEvent {
 }
 
 export interface ScrabblePendingTrade {
-  offerId: string
+  offerId?: string
   fromUserId: string
   targetUserId: string
   offeredTiles: ScrabbleTile[]
@@ -70,13 +71,15 @@ export type ScrabbleAction =
   | { type: 'placeTiles'; placements: ScrabblePlacement[] }
   | { type: 'exchangeWithBag'; rackTileIds: string[] }
   | { type: 'offerTrade'; targetUserId: string; rackTileIds: string[] }
-  | { type: 'respondTrade'; accept: boolean; rackTileIds?: string[] }
+  | { type: 'respondTrade'; offerId?: string; accept: boolean; rackTileIds?: string[] }
+  | { type: 'cancelTrade'; offerId?: string }
   | { type: 'pass' }
   | { type: 'giveUp' }
 
 export interface ScrabblePlayerView {
   userId: string
   username: string
+  isConnected?: boolean
 }
 
 export interface ScrabbleApplyResult {
@@ -198,7 +201,8 @@ export class Scrabble {
     userId: string,
     players: ScrabblePlayerView[],
     currentTurnIndex: number,
-    moveNumber: number
+    moveNumber: number,
+    hostUserId = players[0]?.userId
   ): ScrabbleApplyResult {
     const next = clone(state)
     normalize(next, players)
@@ -206,6 +210,9 @@ export class Scrabble {
 
     if (action.type === 'respondTrade') {
       return respondTrade(next, action, userId, players, currentTurnIndex)
+    }
+    if (action.type === 'cancelTrade') {
+      return cancelTrade(next, action, userId, players, hostUserId)
     }
 
     ensureNoPendingTrade(next)
@@ -218,7 +225,7 @@ export class Scrabble {
       case 'exchangeWithBag':
         return exchangeWithBag(next, action.rackTileIds, userId, players, currentTurnIndex)
       case 'offerTrade':
-        return offerTrade(next, action.targetUserId, action.rackTileIds, userId, players, currentTurnIndex)
+        return offerTrade(next, action.targetUserId, action.rackTileIds, userId, players)
       case 'pass':
         next.consecutivePasses += 1
         next.lastScoreEvent = null
@@ -237,6 +244,7 @@ export class Scrabble {
       case 'exchangeWithBag': return `exchanged ${action.rackTileIds.length} tile${action.rackTileIds.length === 1 ? '' : 's'} with the bag`
       case 'offerTrade': return `offered ${action.rackTileIds.length} tile${action.rackTileIds.length === 1 ? '' : 's'} for trade`
       case 'respondTrade': return action.accept ? 'accepted a tile trade' : 'declined a tile trade'
+      case 'cancelTrade': return 'cancelled a tile trade'
       case 'pass': return 'passed'
       case 'giveUp': return 'gave up'
     }
@@ -329,21 +337,23 @@ function offerTrade(
   targetUserId: string,
   rackTileIds: string[],
   userId: string,
-  players: ScrabblePlayerView[],
-  currentTurnIndex: number
+  players: ScrabblePlayerView[]
 ): ScrabbleApplyResult {
   if (targetUserId === userId) throw new BadRequestError('Choose another player to trade with')
-  if (!state.racks[targetUserId]) throw new BadRequestError('Trade target is not in this game')
+  const targetPlayer = players.find((player) => player.userId === targetUserId)
+  if (!targetPlayer || !state.racks[targetUserId]) throw new BadRequestError('Trade target is not in this game')
+  if (targetPlayer.isConnected !== true) throw new BadRequestError('Cannot trade with an offline player')
   if (state.givenUpUserIds.includes(targetUserId)) throw new BadRequestError('Cannot trade with a player who gave up')
   const ids = uniqueIds(rackTileIds)
   if (ids.length === 0) throw new BadRequestError('Choose at least one tile to trade')
+  if (ids.length > state.racks[targetUserId].length) throw new BadRequestError('That player does not have enough tiles to complete this trade')
   const offeredTiles = ids.map((id) => {
     const tile = state.racks[userId].find((candidate) => candidate.id === id)
     if (!tile) throw new BadRequestError('Trade tile is not in your rack')
     return tile
   })
   state.pendingTrade = {
-    offerId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    offerId: randomUUID(),
     fromUserId: userId,
     targetUserId,
     offeredTiles,
@@ -363,10 +373,10 @@ function respondTrade(
   players: ScrabblePlayerView[],
   currentTurnIndex: number
 ): ScrabbleApplyResult {
-  if (!state.pendingTrade) throw new BadRequestError('There is no pending trade')
-  if (state.pendingTrade.targetUserId !== userId) throw new BadRequestError('Only the target player can respond to this trade')
-
+  if (!state.pendingTrade) throw staleTradeError()
   const trade = state.pendingTrade
+  ensureCurrentTrade(trade, action.offerId)
+  if (trade.targetUserId !== userId) throw new BadRequestError('Only the target player can respond to this trade')
   if (!action.accept) {
     state.pendingTrade = null
     state.lastScoreEvent = null
@@ -398,6 +408,40 @@ function respondTrade(
   state.consecutivePasses = 0
   state.lastScoreEvent = null
   return finishTurn(state, players, currentTurnIndex, `${getPlayerName(players, userId)} accepted a tile trade`)
+}
+
+function cancelTrade(
+  state: ScrabbleState,
+  action: Extract<ScrabbleAction, { type: 'cancelTrade' }>,
+  userId: string,
+  players: ScrabblePlayerView[],
+  hostUserId?: string
+): ScrabbleApplyResult {
+  const trade = state.pendingTrade
+  if (!trade) throw staleTradeError()
+  ensureCurrentTrade(trade, action.offerId)
+  if (trade.fromUserId !== userId && hostUserId !== userId) {
+    throw new ForbiddenError('Only the offerer or room host can cancel this trade')
+  }
+
+  state.pendingTrade = null
+  state.lastScoreEvent = null
+  return {
+    state,
+    description: `${getPlayerName(players, userId)} cancelled a tile trade`,
+    completed: false,
+  }
+}
+
+function ensureCurrentTrade(trade: ScrabblePendingTrade, offerId?: string): void {
+  // One compatibility release permits a missing reference only for offers that
+  // predate offer IDs. Every modern offer must carry the exact UUID it exposed.
+  if (trade.offerId === undefined && offerId === undefined) return
+  if (!trade.offerId || !offerId || trade.offerId !== offerId) throw staleTradeError()
+}
+
+function staleTradeError(): AppError {
+  return new AppError('This trade offer is no longer active', 409, 'STALE_TRADE_OFFER')
 }
 
 function finishTurn(state: ScrabbleState, players: ScrabblePlayerView[], currentTurnIndex: number, description: string): ScrabbleApplyResult {
@@ -622,7 +666,7 @@ function createTileBag(): ScrabbleTile[] {
 
 function makeTile(letter: string, value: number): ScrabbleTile {
   return {
-    id: `${letter}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    id: randomUUID(),
     letter,
     value,
     isBlank: letter === '?',

@@ -41,36 +41,21 @@ import {
   getPropertyBoardSide,
   resolvePropertyActionMode,
   stepPropertyBoardZoom,
+  validatePropertyAuctionBid,
 } from '../lib/propertyManagementBoard'
+import { multiplayerActions, type PropertyManagementMove } from '../lib/multiplayerActions'
 import GameChat from './GameChat'
 import Modal from './Modal'
 import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs, type TabletopTab } from './TabletopShell'
 import './property-management.css'
-
-type PropertyManagementMove =
-  | { type: 'startGame' }
-  | { type: 'rollDice' }
-  | { type: 'buyProperty' }
-  | { type: 'declineProperty' }
-  | { type: 'auctionBid'; amount: number }
-  | { type: 'auctionPass' }
-  | { type: 'payJailFine' }
-  | { type: 'useGetOutOfJailCard' }
-  | { type: 'buildHouse'; squareIndex: number }
-  | { type: 'sellHouse'; squareIndex: number }
-  | { type: 'mortgageProperty'; squareIndex: number }
-  | { type: 'unmortgageProperty'; squareIndex: number }
-  | { type: 'declareBankruptcy' }
-  | { type: 'endTurn' }
-  | { type: 'acknowledgeCard' }
 
 type InspectorTab = 'tile' | 'portfolio' | 'players' | 'chat'
 
 interface Props {
   game: Game
   user: User | null
-  onMove: (move: PropertyManagementMove) => Promise<{ success: boolean; error?: string }>
-  onSendChat: (text: string) => Promise<{ success: boolean; error?: string }>
+  onMove: (move: PropertyManagementMove) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
+  onSendChat: (text: string) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
 }
 
 const EMPTY_PLAYER_ORDER: string[] = []
@@ -228,15 +213,20 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
     playerOrder.map((id) => state.playerStates[id]).filter(Boolean)
   ), [playerOrder, state.playerStates])
 
-  async function act(move: PropertyManagementMove) {
-    if (loading) return
+  async function act(move: PropertyManagementMove): Promise<boolean> {
+    if (loading) return false
     setError(null)
     setLoading(true)
     try {
       const result = await onMove(move)
-      if (!result.success) setError(result.error ?? 'Action failed')
+      if (!result.success) {
+        if (!result.handledGlobally) setError(result.error ?? 'Action failed')
+        return false
+      }
+      return true
     } catch {
       setError('Network error')
+      return false
     } finally {
       setLoading(false)
     }
@@ -244,7 +234,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
 
   function confirmBankruptcy() {
     setShowBankruptcyModal(false)
-    void act({ type: 'declareBankruptcy' })
+    void act(multiplayerActions.propertyManagement.declareBankruptcy())
   }
 
   function selectSquare(squareIndex: number) {
@@ -288,7 +278,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
           {isHost ? (
             <PrimaryButton
               disabled={playerOrder.length < 2 || loading}
-              onClick={() => void act({ type: 'startGame' })}
+              onClick={() => void act(multiplayerActions.propertyManagement.startGame())}
             >
               {playerOrder.length < 2 ? 'Waiting for another player' : 'Start the game'}
             </PrimaryButton>
@@ -327,7 +317,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-text-muted">Card drawn</p>
                 <p className="mt-2 text-sm leading-6 text-text-primary">{pending.cardText}</p>
               </div>
-              <PrimaryButton onClick={() => void act({ type: 'acknowledgeCard' })} disabled={loading}>Continue</PrimaryButton>
+              <PrimaryButton onClick={() => void act(multiplayerActions.propertyManagement.acknowledgeCard())} disabled={loading}>Continue</PrimaryButton>
             </>
           )}
 
@@ -340,14 +330,14 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
                   <div className="pm-inline-notice pm-inline-notice--warning">
                     In jail · attempt {(myPlayer.jailRollCount ?? 0) + 1} of 3
                   </div>
-                  <SecondaryButton onClick={() => void act({ type: 'payJailFine' })} disabled={(myPlayer.money ?? 0) < 50 || loading}>Pay $50 fine</SecondaryButton>
+                  <SecondaryButton onClick={() => void act(multiplayerActions.propertyManagement.payJailFine())} disabled={(myPlayer.money ?? 0) < 50 || loading}>Pay $50 fine</SecondaryButton>
                   {(myPlayer.getOutOfJailFreeCards ?? 0) > 0 && (
-                    <SecondaryButton onClick={() => void act({ type: 'useGetOutOfJailCard' })} disabled={loading}>Use jail card</SecondaryButton>
+                    <SecondaryButton onClick={() => void act(multiplayerActions.propertyManagement.useGetOutOfJailCard())} disabled={loading}>Use jail card</SecondaryButton>
                   )}
                 </div>
               )}
-              {mode === 'preRoll' && <PrimaryButton onClick={() => void act({ type: 'rollDice' })} disabled={loading}>Roll the dice</PrimaryButton>}
-              {mode === 'postRoll' && <PrimaryButton onClick={() => void act({ type: 'endTurn' })} disabled={loading}>End turn</PrimaryButton>}
+              {mode === 'preRoll' && <PrimaryButton onClick={() => void act(multiplayerActions.propertyManagement.rollDice())} disabled={loading}>Roll the dice</PrimaryButton>}
+              {mode === 'postRoll' && <PrimaryButton onClick={() => void act(multiplayerActions.propertyManagement.endTurn())} disabled={loading}>End turn</PrimaryButton>}
               <button
                 disabled={loading}
                 onClick={() => setShowBankruptcyModal(true)}
@@ -373,11 +363,11 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
         <PropertySummary square={square} />
         <PrimaryButton
           disabled={!canAfford || loading}
-          onClick={() => void act({ type: 'buyProperty' })}
+          onClick={() => void act(multiplayerActions.propertyManagement.buyProperty())}
         >
           {canAfford ? `Buy for ${formatMoney(square?.price ?? 0)}` : `Need ${formatMoney(square?.price ?? 0)}`}
         </PrimaryButton>
-        <SecondaryButton onClick={() => void act({ type: 'declineProperty' })} disabled={loading}>Send to auction</SecondaryButton>
+        <SecondaryButton onClick={() => void act(multiplayerActions.propertyManagement.declineProperty())} disabled={loading}>Send to auction</SecondaryButton>
       </div>
     )
   }
@@ -385,6 +375,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
   function AuctionBlock({ auction }: { auction: PMAuctionState }) {
     const highBidder = auction.highBidderUserId ? state.playerStates[auction.highBidderUserId]?.username : null
     const isBidder = auction.activeUserIds[auction.currentBidderIndex] === myId
+    const bidValidation = validatePropertyAuctionBid(auctionBidAmount, auction.currentBid, myPlayer?.money ?? 0)
 
     return (
       <div className="space-y-3">
@@ -398,19 +389,27 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
             <input
               id="property-auction-bid"
               type="number"
+              step={1}
+              inputMode="numeric"
               min={auction.currentBid + 1}
               max={myPlayer?.money ?? 0}
               value={auctionBidAmount}
               onChange={(event) => setAuctionBidAmount(event.target.value)}
               placeholder={`Minimum ${formatMoney(auction.currentBid + 1)}`}
               className="pm-input"
+              aria-describedby="property-auction-bid-help"
             />
+            <p id="property-auction-bid-help" className={`text-xs ${auctionBidAmount && !bidValidation.valid ? 'text-danger-text' : 'text-text-muted'}`}>
+              {auctionBidAmount && !bidValidation.valid ? bidValidation.error : `Available cash: ${formatMoney(myPlayer?.money ?? 0)}`}
+            </p>
             <div className="grid grid-cols-2 gap-2">
               <button
-                disabled={!auctionBidAmount || Number(auctionBidAmount) <= auction.currentBid || loading}
+                disabled={!bidValidation.valid || loading}
                 onClick={() => {
-                  void act({ type: 'auctionBid', amount: Number(auctionBidAmount) })
-                  setAuctionBidAmount('')
+                  if (!bidValidation.valid) return
+                  void act(multiplayerActions.propertyManagement.auctionBid(bidValidation.amount)).then((success) => {
+                    if (success) setAuctionBidAmount('')
+                  })
                 }}
                 className="pm-primary-button mt-0"
               >
@@ -418,7 +417,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
               </button>
               <button
                 disabled={loading}
-                onClick={() => void act({ type: 'auctionPass' })}
+                onClick={() => void act(multiplayerActions.propertyManagement.auctionPass())}
                 className="pm-secondary-button mt-0"
               >
                 Pass
@@ -512,22 +511,22 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
                   {canManage && (
                     <div className="flex flex-wrap gap-2 border-t border-border/50 px-3 py-3">
                       {canBuildHouse(state, myId, square.index) && (
-                        <SmallButton onClick={() => void act({ type: 'buildHouse', squareIndex: square.index })} disabled={loading}>
+                        <SmallButton onClick={() => void act(multiplayerActions.propertyManagement.buildHouse(square.index))} disabled={loading}>
                           {getBuildActionLabel(ownership.houses)} · {formatMoney(square.houseCost ?? 0)}
                         </SmallButton>
                       )}
                       {canSellHouse(state, myId, square.index) && (
-                        <SmallButton onClick={() => void act({ type: 'sellHouse', squareIndex: square.index })} disabled={loading}>
+                        <SmallButton onClick={() => void act(multiplayerActions.propertyManagement.sellHouse(square.index))} disabled={loading}>
                           Sell · +{formatMoney(Math.floor((square.houseCost ?? 0) / 2))}
                         </SmallButton>
                       )}
                       {canMortgage(state, myId, square.index) && (
-                        <SmallButton onClick={() => void act({ type: 'mortgageProperty', squareIndex: square.index })} disabled={loading}>
+                        <SmallButton onClick={() => void act(multiplayerActions.propertyManagement.mortgageProperty(square.index))} disabled={loading}>
                           Mortgage · +{formatMoney(square.mortgageValue ?? 0)}
                         </SmallButton>
                       )}
                       {ownership.mortgaged && (
-                        <SmallButton onClick={() => void act({ type: 'unmortgageProperty', squareIndex: square.index })} disabled={loading || (myPlayer?.money ?? 0) < unmortgageCost}>
+                        <SmallButton onClick={() => void act(multiplayerActions.propertyManagement.unmortgageProperty(square.index))} disabled={loading || (myPlayer?.money ?? 0) < unmortgageCost}>
                           Unmortgage · {formatMoney(unmortgageCost)}
                         </SmallButton>
                       )}

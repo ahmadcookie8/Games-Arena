@@ -37,6 +37,8 @@ export interface ChatMessage {
 
 export interface Game {
   _id: string
+  /** Monotonic MongoDB document revision used to reject stale live snapshots. */
+  revision?: number
   gameType: GameType
   status: GameStatus
   gameCode: string
@@ -104,7 +106,7 @@ export interface ScrabbleScoreEvent {
 }
 
 export interface ScrabblePendingTrade {
-  offerId: string
+  offerId?: string
   fromUserId: string
   targetUserId: string
   offeredTileCount: number
@@ -155,6 +157,7 @@ export interface PMPlayerState {
   inJail: boolean
   jailRollCount: number
   getOutOfJailFreeCards: number
+  getOutOfJailFreeCardDecks?: Array<'chance' | 'communityChest' | 'legacy'>
   isBankrupt: boolean
 }
 
@@ -185,6 +188,7 @@ export interface PropertyManagementState {
   turnPhase: PMTurnPhase
   dice: [number, number] | null
   doublesCount: number
+  extraRollPending?: boolean
   playerOrder: string[]
   playerStates: Record<string, PMPlayerState>
   properties: Record<string, PMPropertyOwnership>

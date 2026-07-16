@@ -4,14 +4,17 @@ import { Game, Player, ScrabblePremium, ScrabbleScoreEvent, ScrabbleState, Scrab
 import { User } from '../types/user'
 import api from '../lib/api'
 import { isInteractiveKeyTarget } from '../lib/keyboard'
+import { multiplayerActions, type ScrabbleMove } from '../lib/multiplayerActions'
 import {
   SCRABBLE_BOARD_BASE_SIZE,
   SCRABBLE_BOARD_DIMENSION,
   SCRABBLE_BOARD_MAX_ZOOM,
   SCRABBLE_BOARD_MIN_ZOOM,
   captureScrabbleCameraCenter,
+  canExchangeScrabbleTiles,
   clampScrabbleZoom,
   fitScrabbleBoardZoom,
+  getEligibleScrabbleTradePlayers,
   getScrabbleCoordinate,
   getScrabbleLastPlayCenter,
   resolveScrabbleActionMode,
@@ -27,20 +30,12 @@ import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs, type TabletopTa
 import { Select } from './ui'
 import './scrabble-tabletop.css'
 
-type ScrabbleMove =
-  | { type: 'placeTiles'; placements: Array<{ rackTileId: string; row: number; col: number; blankLetter?: string }> }
-  | { type: 'exchangeWithBag'; rackTileIds: string[] }
-  | { type: 'offerTrade'; targetUserId: string; rackTileIds: string[] }
-  | { type: 'respondTrade'; accept: boolean; rackTileIds?: string[] }
-  | { type: 'pass' }
-  | { type: 'giveUp' }
-
 interface Props {
   game: Game
   user: User | null
   isMyTurn: boolean
-  onMove: (move: ScrabbleMove) => Promise<{ success: boolean; game?: Game; error?: string }>
-  onSendChat: (text: string) => Promise<{ success: boolean; error?: string }>
+  onMove: (move: ScrabbleMove) => Promise<{ success: boolean; game?: Game; error?: string; handledGlobally?: boolean }>
+  onSendChat: (text: string) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
 }
 
 interface PendingPlacement {
@@ -129,8 +124,22 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
   )
   const pendingTradeTiles = pendingTradeForMe?.offeredTiles ?? EMPTY_RACK
   const pendingTradeTileCount = pendingTradeForMe?.offeredTileCount ?? pendingTradeTiles.length
-  const incomingTradeId = pendingTradeForMe?.offerId ?? null
+  const incomingTradeKey = pendingTradeForMe
+    ? pendingTradeForMe.offerId ?? `legacy:${pendingTradeForMe.fromUserId}:${pendingTradeForMe.targetUserId}:${pendingTradeTileCount}`
+    : null
   const offeredByMe = state.pendingTrade?.fromUserId === myId
+  const canExchangeSelection = canExchangeScrabbleTiles(selectedRackIds.length, state.bagCount ?? 0, state.infiniteLetters)
+  const eligibleTradePlayers = useMemo(
+    () => getEligibleScrabbleTradePlayers(
+      game.players,
+      myId,
+      state.givenUpUserIds,
+      state.rackCounts ?? {},
+      selectedRackIds.length,
+    ),
+    [game.players, myId, selectedRackIds.length, state.givenUpUserIds, state.rackCounts],
+  )
+  const canOfferToTarget = eligibleTradePlayers.some((player) => player.userId === tradeTargetId)
   const activePlayers = useMemo(
     () => game.players.filter((player) => !state.givenUpUserIds.includes(player.userId)),
     [game.players, state.givenUpUserIds],
@@ -180,7 +189,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
   }, [state.lastScoreEvent?.moveNumber, game.currentTurnIndex, closeBlankLetterModal])
 
   useEffect(() => {
-    if (incomingTradeId) {
+    if (incomingTradeKey) {
       setSwapMode(true)
       setSelectedTileId(null)
       setSelectedRackIds([])
@@ -189,7 +198,11 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
     }
     setSelectedRackIds([])
     setSwapMode(false)
-  }, [incomingTradeId])
+  }, [incomingTradeKey])
+
+  useEffect(() => {
+    if (tradeTargetId && !canOfferToTarget) setTradeTargetId('')
+  }, [canOfferToTarget, tradeTargetId])
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -278,7 +291,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
     setActionError(null)
     try {
       const result = await onMove(move)
-      if (!result.success) setActionError(result.error ?? 'Action failed')
+      if (!result.success && !result.handledGlobally) setActionError(result.error ?? 'Action failed')
     } catch {
       setActionError('Network error. Try again.')
     } finally {
@@ -287,20 +300,26 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
   }
 
   function submitPlacements() {
-    if (placements.length > 0) void act({ type: 'placeTiles', placements }, 'play')
+    if (placements.length > 0) void act(multiplayerActions.scrabble.placeTiles(placements), 'play')
   }
 
   function exchangeSelected() {
-    if (selectedRackIds.length > 0) void act({ type: 'exchangeWithBag', rackTileIds: selectedRackIds }, 'exchange')
+    if (canExchangeSelection) void act(multiplayerActions.scrabble.exchangeWithBag(selectedRackIds), 'exchange')
   }
 
   function offerTrade() {
-    if (tradeTargetId && selectedRackIds.length > 0) void act({ type: 'offerTrade', targetUserId: tradeTargetId, rackTileIds: selectedRackIds }, 'offer')
+    if (tradeTargetId && selectedRackIds.length > 0) void act(multiplayerActions.scrabble.offerTrade(tradeTargetId, selectedRackIds), 'offer')
   }
 
   function acceptTrade() {
     if (pendingTradeForMe && selectedRackIds.length === pendingTradeTileCount) {
-      void act({ type: 'respondTrade', accept: true, rackTileIds: selectedRackIds }, 'accept')
+      void act(multiplayerActions.scrabble.acceptTrade(pendingTradeForMe.offerId, selectedRackIds), 'accept')
+    }
+  }
+
+  function cancelPendingTrade() {
+    if (state.pendingTrade && (offeredByMe || isHost)) {
+      void act(multiplayerActions.scrabble.cancelTrade(state.pendingTrade.offerId), 'cancelTrade')
     }
   }
 
@@ -394,7 +413,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
             <div className="scr-action-grid">
               <button type="button" className="scr-primary-button" onClick={submitPlacements} disabled={placements.length === 0 || Boolean(busyAction)}>Play tiles</button>
               <button type="button" className="scr-secondary-button" onClick={toggleSwapMode} disabled={Boolean(busyAction)}>Swap tiles</button>
-              <button type="button" className="scr-secondary-button" onClick={() => void act({ type: 'pass' }, 'pass')} disabled={Boolean(busyAction)}>Pass</button>
+              <button type="button" className="scr-secondary-button" onClick={() => void act(multiplayerActions.scrabble.pass(), 'pass')} disabled={Boolean(busyAction)}>Pass</button>
               <button type="button" className="scr-danger-button" onClick={() => setShowGiveUpModal(true)} disabled={Boolean(busyAction)}>Give up</button>
             </div>
           </>
@@ -402,11 +421,14 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
         {actionMode === 'exchange' && (
           <>
             <p className="scr-action-copy">Select tiles, then exchange them with the bag or offer them to another player.</p>
+            {!state.infiniteLetters && selectedRackIds.length > (state.bagCount ?? 0) && (
+              <p className="scr-inline-error" role="status">The bag has only {state.bagCount ?? 0} tile{state.bagCount === 1 ? '' : 's'}. Reduce the selection to exchange, or offer a player trade.</p>
+            )}
             <div className="scr-action-grid">
-              <button type="button" className="scr-primary-button" onClick={exchangeSelected} disabled={selectedRackIds.length === 0 || Boolean(busyAction)}>Exchange ({selectedRackIds.length})</button>
+              <button type="button" className="scr-primary-button" onClick={exchangeSelected} disabled={!canExchangeSelection || Boolean(busyAction)}>Exchange ({selectedRackIds.length})</button>
               <button type="button" className="scr-secondary-button" onClick={() => openInspector('trade')} disabled={selectedRackIds.length === 0}>Offer trade</button>
               <button type="button" className="scr-secondary-button" onClick={toggleSwapMode}>Cancel</button>
-              <button type="button" className="scr-secondary-button" onClick={() => void act({ type: 'pass' }, 'pass')} disabled={Boolean(busyAction)}>Pass</button>
+              <button type="button" className="scr-secondary-button" onClick={() => void act(multiplayerActions.scrabble.pass(), 'pass')} disabled={Boolean(busyAction)}>Pass</button>
               <button type="button" className="scr-danger-button" onClick={() => setShowGiveUpModal(true)} disabled={Boolean(busyAction)}>Give up</button>
             </div>
           </>
@@ -474,7 +496,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
           </div>
           <div className="scr-action-grid">
             <button type="button" className="scr-primary-button" onClick={acceptTrade} disabled={selectedRackIds.length !== required || Boolean(busyAction)}>Accept trade</button>
-            <button type="button" className="scr-secondary-button" onClick={() => void act({ type: 'respondTrade', accept: false }, 'decline')} disabled={Boolean(busyAction)}>Decline</button>
+            <button type="button" className="scr-secondary-button" onClick={() => void act(multiplayerActions.scrabble.declineTrade(pendingTradeForMe.offerId), 'decline')} disabled={Boolean(busyAction)}>Decline</button>
           </div>
         </div>
       )
@@ -486,6 +508,9 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
           <p className="scr-section-label">Trade pending</p>
           <h3>{offeredByMe ? 'Offer sent' : 'Players are negotiating'}</h3>
           <p>{offeredByMe ? `${playerName(game.players, state.pendingTrade.targetUserId)} is choosing a response.` : 'The board will unlock when the trade is accepted or declined.'}</p>
+          {(offeredByMe || isHost) && (
+            <button type="button" className="scr-secondary-button" onClick={cancelPendingTrade} disabled={Boolean(busyAction)}>Cancel trade</button>
+          )}
         </div>
       )
     }
@@ -506,16 +531,15 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
             placeholder="Choose a player"
             options={[
               { value: 'none', label: 'Choose a player' },
-              ...game.players
-                .filter((player) => player.userId !== myId && !state.givenUpUserIds.includes(player.userId))
+              ...eligibleTradePlayers
                 .map((player) => ({ value: player.userId, label: player.username })),
             ]}
           />
         </div>
-        <button type="button" className="scr-primary-button" onClick={offerTrade} disabled={!isMyTurn || !tradeTargetId || selectedRackIds.length === 0 || Boolean(busyAction)}>
+        <button type="button" className="scr-primary-button" onClick={offerTrade} disabled={!isMyTurn || !canOfferToTarget || selectedRackIds.length === 0 || Boolean(busyAction)}>
           {selectedRackIds.length ? `Offer ${selectedRackIds.length} tile${selectedRackIds.length === 1 ? '' : 's'}` : 'Offer trade'}
         </button>
-        <p className="scr-panel-copy">The other player must return the same number of tiles or decline.</p>
+        <p className="scr-panel-copy">Only connected players with enough tiles are shown. They must return the same number of tiles or decline.</p>
       </div>
     )
   }
@@ -620,7 +644,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
         variant="danger"
         primaryAction={{ label: 'Give up', onClick: () => {
           setShowGiveUpModal(false)
-          void act({ type: 'giveUp' }, 'give-up')
+          void act(multiplayerActions.scrabble.giveUp(), 'give-up')
         } }}
         secondaryAction={{ label: 'Keep playing', onClick: () => setShowGiveUpModal(false) }}
         onClose={() => setShowGiveUpModal(false)}
