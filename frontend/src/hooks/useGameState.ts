@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import axios from 'axios'
 import { create } from 'zustand'
-import { Game } from '../types/game'
+import type { Game } from '../types/game'
 import api from '../lib/api'
 
 interface GameStore {
@@ -21,18 +22,52 @@ export const useGameStore = create<GameStore>((set) => ({
 }))
 
 export function useGameState(gameId?: string) {
-  const { currentGame, setGame, updateGameState } = useGameStore()
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { currentGame, setGame, updateGameState, clearGame } = useGameStore()
+  const [loading, setLoading] = useState(Boolean(gameId))
+  const [errorState, setErrorState] = useState<{ gameId: string; message: string } | null>(null)
+  const [requestVersion, setRequestVersion] = useState(0)
+  const refetch = useCallback(() => setRequestVersion((version) => version + 1), [])
 
   useEffect(() => {
-    if (!gameId) return
+    let cancelled = false
+
+    clearGame()
+    setErrorState(null)
+
+    if (!gameId) {
+      setLoading(false)
+      return () => { cancelled = true }
+    }
+
     setLoading(true)
     api.get(`/api/games/${gameId}`)
-      .then((res) => setGame(res.data.game))
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false))
-  }, [gameId, setGame])
+      .then((res) => {
+        if (!cancelled) setGame(res.data.game)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        if (axios.isAxiosError(err)) {
+          const apiError = err.response?.data?.error
+          const message = typeof apiError === 'string'
+            ? apiError
+            : apiError && typeof apiError.message === 'string'
+              ? apiError.message
+              : err.message
+          setErrorState({ gameId, message })
+        } else {
+          setErrorState({ gameId, message: err instanceof Error ? err.message : 'The game could not be loaded.' })
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
 
-  return { game: currentGame, loading, error, setGame, updateGameState }
+    return () => { cancelled = true }
+  }, [clearGame, gameId, requestVersion, setGame])
+
+  const game = currentGame?._id === gameId ? currentGame : null
+  const error = errorState && errorState.gameId === gameId ? errorState.message : null
+  const isResolvingGame = Boolean(gameId) && !game && !error
+
+  return { game, loading: loading || isResolvingGame, error, refetch, setGame, updateGameState }
 }

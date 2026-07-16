@@ -1,6 +1,7 @@
-import { io, Socket } from 'socket.io-client'
+import { io, type Socket } from 'socket.io-client'
 
 let socket: Socket | null = null
+let socketConsumers = 0
 
 export function getSocket(): Socket {
   if (!socket) {
@@ -13,11 +14,13 @@ export function getSocket(): Socket {
 }
 
 export function connectSocket(): Socket {
+  socketConsumers += 1
   const s = getSocket()
   if (!s.connected) s.connect()
   return s
 }
 
 export function disconnectSocket(): void {
-  socket?.disconnect()
+  socketConsumers = Math.max(0, socketConsumers - 1)
+  if (socketConsumers === 0) socket?.disconnect()
 }

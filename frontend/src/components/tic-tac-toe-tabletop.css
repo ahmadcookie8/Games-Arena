@@ -389,19 +389,22 @@
   font: inherit;
   font-size: 0.82rem;
   font-weight: 760;
-  transition: transform 150ms ease, background-color 150ms ease, opacity 150ms ease;
+  transition: transform var(--motion-fast, 120ms) ease, background-color var(--motion-fast, 120ms) ease, opacity var(--motion-fast, 120ms) ease, box-shadow var(--motion-fast, 120ms) ease;
 }
 
 .ttt-button--primary {
-  border-color: color-mix(in oklch, var(--ttt-blue) 76%, black);
-  background: var(--ttt-blue);
-  color: white;
-  box-shadow: 0 0.35rem 0.8rem color-mix(in oklch, var(--ttt-blue) 28%, transparent);
+  background: linear-gradient(135deg, var(--action-primary-from), var(--action-primary-to));
+  color: var(--text-on-action);
+  box-shadow: var(--shadow-accent);
 }
 
-.ttt-button--primary:not(:disabled):hover {
-  transform: translateY(-1px);
-  filter: saturate(1.08) brightness(1.04);
+.ttt-button:not(:disabled):active { transform: translateY(1px) scale(0.985); }
+
+@media (hover: hover) and (pointer: fine) {
+  .ttt-button--primary:not(:disabled):hover {
+    background: linear-gradient(135deg, var(--action-primary-hover-from), var(--action-primary-hover-to));
+    transform: translateY(-1px);
+  }
 }
 
 .ttt-button:disabled {
@@ -481,7 +484,7 @@
   font-size: 0.75rem;
   font-weight: 720;
   text-transform: capitalize;
-  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
+  transition: border-color var(--motion-standard) ease, background-color var(--motion-standard) ease, color var(--motion-standard) ease;
 }
 
 .ttt-difficulty__option:not(:disabled):hover {
@@ -492,7 +495,7 @@
 .ttt-difficulty__option--selected {
   border-color: var(--ttt-blue);
   background: var(--ttt-blue-soft);
-  color: var(--ttt-blue);
+  color: var(--text-primary);
 }
 
 .ttt-difficulty:disabled {

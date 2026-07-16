@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Bot, Clock3, History, MessageCircle, Radio, Users } from 'lucide-react'
 import GameChat from './GameChat'
 import MoveHistory from './MoveHistory'
-import { TabletopBottomSheet, TabletopTabs } from './TabletopShell'
+import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs } from './TabletopShell'
 import type { TabletopTab } from './TabletopShell'
 import {
   formatTicTacToeMove,
@@ -69,6 +69,7 @@ export default function TicTacToeExperience({
   const isWaitingForPlayer = mode === 'multiplayer' && game.players.length < 2
   const isActive = game.status === 'active'
   const isMyTurn = isActive
+    && connected
     && !isWaitingForPlayer
     && !isMoving
     && (mode === 'singlePlayer'
@@ -259,13 +260,12 @@ export default function TicTacToeExperience({
       {!isDesktop && (
         <>
           <nav className="ttt-mobile-dock" aria-label="Tic Tac Toe table details">
-            <TabletopTabs
+            <TabletopDockButtons
               tabs={inspectorTabs}
               activeTab={activeTab}
               onSelect={selectMobileTab}
               ariaLabel="Open Tic Tac Toe table details"
-              idBase={mobileIdBase}
-              variant="dock"
+              isOpen={isSheetOpen}
             />
           </nav>
           <TabletopBottomSheet

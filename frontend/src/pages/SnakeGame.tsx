@@ -8,13 +8,14 @@ import {
   type SnakeBoardSize,
   type SnakeState,
 } from '@games-arena/game-engine'
-import Header from '../components/Header'
-import Modal, { ModalVariant } from '../components/Modal'
+import { GameRouteLoading, GameRouteUnavailable } from '../components/GameRouteState'
+import GameShell, { GameShellLayout } from '../components/GameShell'
+import Modal, { type ModalAction, type ModalVariant } from '../components/Modal'
 import MoveHistory from '../components/MoveHistory'
-import PageBackdrop from '../components/PageBackdrop'
 import PlayerCard from '../components/PlayerCard'
 import { useGameState } from '../hooks/useGameState'
 import api from '../lib/api'
+import { getGameMode } from '../lib/gameCatalog'
 import {
   buildReplayPayload,
   createReplayRecorder,
@@ -33,14 +34,8 @@ interface ModalState {
   title: string
   message: string
   variant: ModalVariant
-  primaryAction?: {
-    label: string
-    onClick: () => void
-  }
-  secondaryAction?: {
-    label: string
-    onClick: () => void
-  }
+  primaryAction?: ModalAction
+  secondaryAction?: ModalAction
 }
 
 interface ReplayCompletionResponse {
@@ -86,12 +81,13 @@ function normalizeLegacySnakeState(state: SnakeState): SnakeState {
 export default function SnakeGame() {
   const { gameId } = useParams<{ gameId: string }>()
   const navigate = useNavigate()
-  const { game, loading, setGame } = useGameState(gameId)
+  const { game, loading, error, refetch, setGame } = useGameState(gameId)
   const [snakeState, setSnakeState] = useState<SnakeState | null>(null)
   const [modal, setModal] = useState<ModalState | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [isStarting, setIsStarting] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
+  const [isClosing, setIsClosing] = useState(false)
   const [selectedBoardSize, setSelectedBoardSize] = useState<SnakeBoardSize>('medium')
   const [selectedWallLooping, setSelectedWallLooping] = useState(false)
   const latestStateRef = useRef<SnakeState | null>(null)
@@ -99,12 +95,18 @@ export default function SnakeGame() {
   const lastCheckpointAtRef = useRef(0)
   const completedRef = useRef(false)
   const sessionGameIdRef = useRef<string | null>(null)
+  const boardRef = useRef<HTMLDivElement>(null)
+  const closingRef = useRef(false)
   const startCheckpointConfirmedRef = useRef(false)
   const startPromiseRef = useRef<Promise<boolean> | null>(null)
   const replayRecorderRef = useRef(createReplayRecorder('right'))
   const replayEligibleRef = useRef(false)
   const [replayStatus, setReplayStatus] = useState<ReplayRunStatus>('unranked')
   const [unrankedReason, setUnrankedReason] = useState<ReplayUnrankedReason>('legacy')
+
+  useEffect(() => {
+    setSnakeState(null)
+  }, [gameId])
 
   const wallLooping = Boolean(game?.metadata?.wallLooping)
   const boardSize = game?.metadata?.boardSize || 'medium'
@@ -114,7 +116,7 @@ export default function SnakeGame() {
     : LEGACY_FALLBACK_SEED
 
   useEffect(() => {
-    if (!game) return
+    if (!game || game.gameType !== 'snake' || getGameMode(game) !== 'singlePlayer') return
     const rawState = game.gameState as unknown as SnakeState
     const state = normalizeLegacySnakeState(rawState)
     setSnakeState(state)
@@ -299,38 +301,49 @@ export default function SnakeGame() {
   const handleDirectionPress = useCallback((event: React.PointerEvent<HTMLButtonElement>, direction: Direction) => {
     event.preventDefault()
     setPendingDirection(direction)
+    boardRef.current?.focus({ preventScroll: true })
+  }, [setPendingDirection])
+
+  const handleDirectionClick = useCallback((event: React.MouseEvent<HTMLButtonElement>, direction: Direction) => {
+    if (event.detail !== 0) return
+    setPendingDirection(direction)
+    boardRef.current?.focus({ preventScroll: true })
   }, [setPendingDirection])
 
   const preventTouchContextMenu = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault()
   }, [])
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      const keyToDirection: Partial<Record<string, Direction>> = {
-        ArrowUp: 'up',
-        w: 'up',
-        W: 'up',
-        ArrowDown: 'down',
-        s: 'down',
-        S: 'down',
-        ArrowLeft: 'left',
-        a: 'left',
-        A: 'left',
-        ArrowRight: 'right',
-        d: 'right',
-        D: 'right',
-      }
-      const direction = keyToDirection[event.key]
-      if (!direction) return
-
+  function handleBoardKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
-      setPendingDirection(direction)
+      const current = latestStateRef.current
+      if (!current || current.isGameOver || game?.status !== 'active') return
+      if (!current.hasStarted) void startGame()
+      else setIsPlaying((value) => !value)
+      return
     }
 
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [setPendingDirection])
+    const keyToDirection: Partial<Record<string, Direction>> = {
+      ArrowUp: 'up',
+      w: 'up',
+      W: 'up',
+      ArrowDown: 'down',
+      s: 'down',
+      S: 'down',
+      ArrowLeft: 'left',
+      a: 'left',
+      A: 'left',
+      ArrowRight: 'right',
+      d: 'right',
+      D: 'right',
+    }
+    const direction = keyToDirection[event.key]
+    if (!direction) return
+
+    event.preventDefault()
+    setPendingDirection(direction)
+  }
 
   useEffect(() => {
     if (!latestStateRef.current || !isPlaying || game?.status !== 'active') return
@@ -388,8 +401,10 @@ export default function SnakeGame() {
   }, [game])
 
   async function confirmCloseGame() {
-    if (!game) return
+    if (!game || closingRef.current) return
 
+    closingRef.current = true
+    setIsClosing(true)
     try {
       const state = latestStateRef.current
       if (state && game.status === 'active') {
@@ -404,6 +419,9 @@ export default function SnakeGame() {
         message: getErrorMessage(err),
         variant: 'danger',
       })
+    } finally {
+      closingRef.current = false
+      setIsClosing(false)
     }
   }
 
@@ -437,6 +455,7 @@ export default function SnakeGame() {
       variant: 'warning',
       primaryAction: {
         label: 'Close game',
+        variant: 'danger',
         onClick: () => {
           void confirmCloseGame()
         },
@@ -450,8 +469,27 @@ export default function SnakeGame() {
 
   const snakeCells = useMemo(() => new Set((snakeState?.snake || []).map(getCellKey)), [snakeState])
 
-  if (loading || !snakeState) return <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">Loading game...</div>
-  if (!game) return <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">Game not found</div>
+  if (loading) return <GameRouteLoading label="Loading Snake arena" />
+  if (!game) {
+    return (
+      <GameRouteUnavailable
+        title={error === 'Game not found' ? 'Snake run not found' : 'This Snake run is unavailable'}
+        description={error}
+        onRetry={refetch}
+        onBack={() => navigate('/?tab=singlePlayer')}
+      />
+    )
+  }
+  if (game.gameType !== 'snake' || getGameMode(game) !== 'singlePlayer') {
+    return (
+      <GameRouteUnavailable
+        title="This is not a Snake run"
+        description="Return to Single Player and open the matching arena from your active games."
+        onBack={() => navigate('/?tab=singlePlayer')}
+      />
+    )
+  }
+  if (!snakeState) return <GameRouteLoading label="Preparing Snake board" />
 
   const isActive = game.status === 'active'
   const isCompleted = game.status === 'completed'
@@ -465,49 +503,34 @@ export default function SnakeGame() {
       ? 'border-warning/30 bg-warning-subtle text-warning-text'
       : 'border-accent/30 bg-accent-subtle text-accent'
 
-  return (
-    <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
-      <PageBackdrop intensity="quiet" />
-      <Header />
-      <main className="relative z-10 mx-auto max-w-7xl px-4 py-6 sm:px-6">
-        <div className="mb-6 flex flex-col gap-4 rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-5">
-          <button
-            onClick={() => navigate('/?tab=singlePlayer')}
-            className="w-fit cursor-pointer rounded-lg px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary"
-          >
-            Back
-          </button>
-          <div className="min-w-0 sm:text-center">
-            <h1 className="text-gradient truncate text-xl font-semibold">Snake</h1>
-            <p className="text-sm capitalize text-text-muted">{boardSize} grid - {wallLooping ? 'Looping walls' : 'Solid walls'}</p>
-          </div>
-          <div className="flex items-center gap-3">
-            {canStartNewRun && (
-              <button
-                type="button"
-                onClick={() => void retryGame()}
-                disabled={isRetrying}
-                className="cursor-pointer rounded-lg bg-accent px-3 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isRetrying ? 'Starting...' : 'Retry'}
-              </button>
-            )}
-            {isActive && (
-              <button
-                type="button"
-                onClick={promptCloseGame}
-                className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-2 text-sm font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
-              >
-                Close game
-              </button>
-            )}
-            <div className={`w-fit rounded-full px-3 py-1 text-sm font-medium ${isCompleted || snakeState.isGameOver ? 'bg-success-subtle text-success-text' : 'bg-accent-subtle text-accent'}`}>
-              Length {snakeState.score}
-            </div>
-          </div>
-        </div>
+  const routeStatus = snakeState.isGameOver || isCompleted
+    ? `Run complete · Length ${snakeState.score}`
+    : !snakeState.hasStarted
+      ? 'Ready to start'
+      : isPlaying
+        ? `Running · Length ${snakeState.score}`
+        : `Paused · Length ${snakeState.score}`
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+  return (
+    <>
+      <GameShell
+        eyebrow={`${boardSize} grid · ${wallLooping ? 'Looping walls' : 'Solid walls'}`}
+        title="Snake"
+        statusLabel={routeStatus}
+        statusTone={snakeState.isGameOver || isCompleted ? 'success' : !isPlaying && snakeState.hasStarted ? 'warning' : 'default'}
+        onBack={() => navigate('/?tab=singlePlayer')}
+        onClose={isActive ? promptCloseGame : undefined}
+        primaryAction={canStartNewRun ? {
+          label: isRetrying ? 'Starting…' : 'Retry',
+          onClick: () => void retryGame(),
+          disabled: isRetrying,
+        } : undefined}
+        width="standard"
+      >
+        <GameShellLayout
+          inspectorTitle="Snake details"
+          inspectorDescription="Review the player and this run's move history."
+          playfield={(
           <section className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl sm:p-5">
             <div className="mb-5 rounded-xl border border-border bg-page p-3">
               <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
@@ -526,7 +549,7 @@ export default function SnakeGame() {
                       onClick={() => void updateSettings(size, selectedWallLooping)}
                       disabled={settingsLocked}
                       className={`min-h-10 cursor-pointer rounded-lg px-3 py-2 text-sm font-medium capitalize transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-70 ${
-                        selectedBoardSize === size ? 'bg-accent text-text-on-accent shadow-accent' : 'bg-elevated text-text-secondary hover:bg-overlay hover:text-text-primary'
+                        selectedBoardSize === size ? 'ui-action-primary shadow-accent' : 'border border-border-control bg-elevated text-text-secondary hover:bg-overlay hover:text-text-primary'
                       }`}
                     >
                       {size}
@@ -565,7 +588,7 @@ export default function SnakeGame() {
                   type="button"
                   onClick={() => void retryGame()}
                   disabled={isRetrying}
-                  className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+                  className="ui-action-primary interactive-lift min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold shadow-accent disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isRetrying ? 'Starting...' : 'Retry'}
                 </button>}
@@ -573,10 +596,16 @@ export default function SnakeGame() {
             )}
             <div className="mx-auto w-full max-w-[min(86vw,70vh,38rem)]">
               <div
-                className="grid aspect-square gap-px rounded-xl border border-border bg-border p-1 shadow-sm outline-none"
+                ref={boardRef}
+                className="grid aspect-square gap-px rounded-xl border border-border bg-border p-1 shadow-sm outline-none focus-visible:ring-3 focus-visible:ring-border-focus focus-visible:ring-offset-4 focus-visible:ring-offset-page"
                 style={{ gridTemplateColumns: `repeat(${snakeState.width}, minmax(0, 1fr))` }}
                 tabIndex={0}
-                aria-label="Snake board"
+                role="button"
+                aria-pressed={isPlaying}
+                aria-disabled={!isActive || snakeState.isGameOver || undefined}
+                onKeyDown={handleBoardKeyDown}
+                aria-label={`Snake board. Head at row ${snakeState.snake[0].y + 1}, column ${snakeState.snake[0].x + 1}. Food at row ${snakeState.food.y + 1}, column ${snakeState.food.x + 1}. Use WASD or arrow keys to steer.`}
+                aria-describedby="snake-board-legend"
               >
                 {Array.from({ length: snakeState.width * snakeState.height }).map((_, index) => {
                   const x = index % snakeState.width
@@ -588,18 +617,24 @@ export default function SnakeGame() {
                   return (
                     <div
                       key={key}
-                      className={`aspect-square rounded-[3px] ${
+                      aria-hidden="true"
+                      className={`aspect-square ${
                         isHead
-                          ? 'bg-accent'
+                          ? 'rounded-[3px] bg-accent ring-2 ring-inset ring-white/70'
                           : isSnake
-                            ? 'bg-success'
+                            ? 'rounded-[3px] bg-success'
                             : isFood
-                              ? 'bg-danger'
-                              : 'bg-page'
+                              ? 'scale-[0.72] rounded-full bg-danger shadow-[0_0_0_2px_var(--bg-page)]'
+                              : 'rounded-[3px] bg-page'
                       }`}
                     />
                   )
                 })}
+              </div>
+              <div id="snake-board-legend" className="mt-3 flex flex-wrap justify-center gap-3 text-xs text-text-secondary">
+                <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 rounded-sm bg-accent ring-1 ring-current" aria-hidden="true" /> Head</span>
+                <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 rounded-sm bg-success" aria-hidden="true" /> Body</span>
+                <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 rounded-full bg-danger" aria-hidden="true" /> Food</span>
               </div>
               <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
                 <button
@@ -607,12 +642,14 @@ export default function SnakeGame() {
                   onClick={() => {
                     if (!snakeState.hasStarted) {
                       void startGame()
+                      window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                       return
                     }
                     setIsPlaying((value) => !value)
+                    window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                   }}
                   disabled={!isActive || snakeState.isGameOver || isStarting}
-                  className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+                  className="ui-action-primary interactive-lift min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold shadow-accent disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isStarting ? 'Starting...' : !snakeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
@@ -623,6 +660,7 @@ export default function SnakeGame() {
                 <button
                   type="button"
                   onPointerDown={(event) => handleDirectionPress(event, 'up')}
+                  onClick={(event) => handleDirectionClick(event, 'up')}
                   onContextMenu={preventTouchContextMenu}
                   className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
                 >
@@ -632,6 +670,7 @@ export default function SnakeGame() {
                 <button
                   type="button"
                   onPointerDown={(event) => handleDirectionPress(event, 'left')}
+                  onClick={(event) => handleDirectionClick(event, 'left')}
                   onContextMenu={preventTouchContextMenu}
                   className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
                 >
@@ -642,18 +681,21 @@ export default function SnakeGame() {
                   onClick={() => {
                     if (!snakeState.hasStarted) {
                       void startGame()
+                      window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                       return
                     }
                     setIsPlaying((value) => !value)
+                    window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                   }}
                   disabled={!isActive || snakeState.isGameOver || isStarting}
-                  className="min-h-12 rounded-lg bg-accent text-xs font-bold text-text-on-accent disabled:opacity-60"
+                  className="ui-action-primary min-h-12 rounded-xl text-xs font-bold shadow-accent disabled:opacity-60"
                 >
                   {isStarting ? 'Starting' : !snakeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
                 <button
                   type="button"
                   onPointerDown={(event) => handleDirectionPress(event, 'right')}
+                  onClick={(event) => handleDirectionClick(event, 'right')}
                   onContextMenu={preventTouchContextMenu}
                   className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
                 >
@@ -663,6 +705,7 @@ export default function SnakeGame() {
                 <button
                   type="button"
                   onPointerDown={(event) => handleDirectionPress(event, 'down')}
+                  onClick={(event) => handleDirectionClick(event, 'down')}
                   onContextMenu={preventTouchContextMenu}
                   className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
                 >
@@ -672,8 +715,9 @@ export default function SnakeGame() {
               </div>
             </div>
           </section>
-
-          <aside className="min-w-0 space-y-4">
+          )}
+          desktopInspector={(
+          <div className="min-w-0 space-y-4">
             <div className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl">
               <h3 className="mb-3 text-base font-semibold text-text-primary">Player</h3>
               <div className="space-y-2">
@@ -683,20 +727,25 @@ export default function SnakeGame() {
               </div>
             </div>
             <MoveHistory moves={game.moveHistory} />
-          </aside>
-        </div>
-      </main>
+          </div>
+          )}
+        />
+      </GameShell>
 
       <Modal
         isOpen={Boolean(modal)}
         title={modal?.title || ''}
         variant={modal?.variant}
-        primaryAction={modal?.primaryAction}
+        primaryAction={modal?.primaryAction ? {
+          ...modal.primaryAction,
+          loading: isClosing && modal.primaryAction.variant === 'danger',
+          loadingText: 'Closing game…',
+        } : undefined}
         secondaryAction={modal?.secondaryAction}
-        onClose={() => setModal(null)}
+        onClose={() => { if (!isClosing) setModal(null) }}
       >
         {modal?.message}
       </Modal>
-    </div>
+    </>
   )
 }

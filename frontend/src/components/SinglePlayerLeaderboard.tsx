@@ -1,12 +1,28 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Bot, Crown, RefreshCw, Trophy } from 'lucide-react'
 import { useAuth } from '../hooks/useAuth'
+import { useSocket } from '../hooks/useSocket'
 import api from '../lib/api'
-import { TicTacToeDifficulty } from '../types/game'
+import type { TicTacToeDifficulty } from '../types/game'
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  EmptyState,
+  SegmentedControl,
+  Skeleton,
+} from './ui'
+
+type SoloLeaderboardGame = 'ticTacToe' | 'snake' | 'mazeChase'
 
 interface SinglePlayerLeaderboardEntry {
   rank: number
   username: string
-  gameType?: 'ticTacToe' | 'snake' | 'mazeChase'
+  gameType?: SoloLeaderboardGame
   difficulty?: TicTacToeDifficulty
   boardSize?: 'small' | 'medium' | 'large'
   wallLooping?: boolean
@@ -18,98 +34,165 @@ interface SinglePlayerLeaderboardEntry {
   winRate: number
 }
 
-function getDifficultyClass(difficulty: TicTacToeDifficulty): string {
-  switch (difficulty) {
-    case 'hard': return 'bg-danger-subtle text-danger-text'
-    case 'medium': return 'bg-warning-subtle text-warning-text'
-    case 'easy': return 'bg-success-subtle text-success-text'
-  }
+const EMPTY_ENTRIES: Record<SoloLeaderboardGame, SinglePlayerLeaderboardEntry[]> = {
+  ticTacToe: [],
+  snake: [],
+  mazeChase: [],
 }
 
 export default function SinglePlayerLeaderboard() {
   const { user } = useAuth()
-  const [ticTacToeEntries, setTicTacToeEntries] = useState<SinglePlayerLeaderboardEntry[]>([])
-  const [snakeEntries, setSnakeEntries] = useState<SinglePlayerLeaderboardEntry[]>([])
-  const [mazeEntries, setMazeEntries] = useState<SinglePlayerLeaderboardEntry[]>([])
+  const { on } = useSocket()
+  const [activeGame, setActiveGame] = useState<SoloLeaderboardGame>('ticTacToe')
+  const [entries, setEntries] = useState<Record<SoloLeaderboardGame, SinglePlayerLeaderboardEntry[]>>(EMPTY_ENTRIES)
+  const [failedGames, setFailedGames] = useState<Set<SoloLeaderboardGame>>(() => new Set())
+  const [isLoading, setIsLoading] = useState(true)
 
-  const fetchLeaderboard = useCallback(() => {
-    void Promise.allSettled([
-      api.get('/api/leaderboards/single-player/ticTacToe'),
-      api.get('/api/leaderboards/single-player/snake'),
-      api.get('/api/leaderboards/single-player/mazeChase'),
-    ]).then(([ticTacToe, snake, maze]) => {
-      setTicTacToeEntries(ticTacToe.status === 'fulfilled' ? ticTacToe.value.data.leaderboard || [] : [])
-      setSnakeEntries(snake.status === 'fulfilled' ? snake.value.data.leaderboard || [] : [])
-      setMazeEntries(maze.status === 'fulfilled' ? maze.value.data.leaderboard || [] : [])
+  const fetchLeaderboard = useCallback(async (background = false) => {
+    if (!background) setIsLoading(true)
+    const gameTypes: SoloLeaderboardGame[] = ['ticTacToe', 'snake', 'mazeChase']
+    const results = await Promise.allSettled(
+      gameTypes.map((gameType) => api.get<{ leaderboard?: SinglePlayerLeaderboardEntry[] }>(`/api/leaderboards/single-player/${gameType}`)),
+    )
+
+    const nextEntries = { ...EMPTY_ENTRIES }
+    const nextFailed = new Set<SoloLeaderboardGame>()
+    results.forEach((result, index) => {
+      const gameType = gameTypes[index]
+      if (result.status === 'fulfilled') nextEntries[gameType] = result.value.data.leaderboard || []
+      else nextFailed.add(gameType)
     })
+    setEntries(nextEntries)
+    setFailedGames(nextFailed)
+    if (!background) setIsLoading(false)
   }, [])
 
   useEffect(() => {
-    fetchLeaderboard()
+    void fetchLeaderboard()
   }, [fetchLeaderboard])
 
+  useEffect(() => on('gamesChanged', () => {
+    void fetchLeaderboard(true)
+  }), [fetchLeaderboard, on])
+
+  const activeEntries = entries[activeGame]
+  const activeFailed = failedGames.has(activeGame)
+
   return (
-    <div className="rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl">
-      <div className="mb-4">
-        <h3 className="text-base font-semibold text-text-primary">Solo High Scores</h3>
-        <p className="text-xs text-text-muted">Only server-verified results are ranked.</p>
-      </div>
-
-      <div className="mb-4">
-        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Tic Tac Toe</h4>
-        <div className="space-y-1">
-        {ticTacToeEntries.map((entry) => (
-          <div
-            key={`ttt-${entry.rank}-${entry.username}-${entry.difficulty}`}
-            className={`flex items-center gap-2 rounded-lg px-2 py-2 transition-colors duration-150 ${entry.username === user?.username ? 'bg-accent-subtle' : 'hover:bg-elevated'}`}
-          >
-            <span className="w-7 text-center text-sm text-text-muted">#{entry.rank}</span>
-            <span className="min-w-0 flex-1 truncate font-medium text-text-primary">{entry.username}</span>
-            <span className={`rounded-full px-2 py-0.5 text-xs font-medium capitalize ${getDifficultyClass(entry.difficulty || 'easy')}`}>{entry.difficulty || 'easy'}</span>
-            <span className="text-sm font-medium text-success">{entry.wins}W</span>
-            <span className="font-mono text-xs text-text-muted">{(entry.winRate * 100).toFixed(0)}%</span>
+    <Card>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Trophy size={17} aria-hidden="true" /> Solo high scores
+            </CardTitle>
+            <CardDescription>Only server-reproduced results rank</CardDescription>
           </div>
-        ))}
-        {ticTacToeEntries.length === 0 && <p className="rounded-lg bg-page px-3 py-4 text-center text-sm text-text-muted">No Tic Tac Toe scores yet</p>}
+          <Badge variant="success">Verified</Badge>
         </div>
-      </div>
+        <SegmentedControl
+          ariaLabel="Solo leaderboard game"
+          value={activeGame}
+          onValueChange={(value) => {
+            if (value === 'ticTacToe' || value === 'snake' || value === 'mazeChase') setActiveGame(value)
+          }}
+          items={[
+            { value: 'ticTacToe', label: 'Tic Tac Toe' },
+            { value: 'snake', label: 'Snake' },
+            { value: 'mazeChase', label: 'Maze' },
+          ]}
+        />
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <LeaderboardSkeleton />
+        ) : activeFailed ? (
+          <EmptyState
+            title="Scores unavailable"
+            description="This ranking could not refresh."
+            action={(
+              <Button variant="secondary" size="sm" onClick={() => { void fetchLeaderboard() }}>
+                <RefreshCw size={14} aria-hidden="true" /> Retry
+              </Button>
+            )}
+            className="min-h-48 bg-elevated/60"
+          />
+        ) : activeEntries.length === 0 ? (
+          <EmptyState
+            icon={<Bot aria-hidden="true" />}
+            title="No verified scores yet"
+            description="Complete a fresh verified run to take the first spot."
+            className="min-h-48 bg-elevated/60"
+          />
+        ) : (
+          <ol className="space-y-1.5" aria-label={`${getGameLabel(activeGame)} rankings`}>
+            {activeEntries.map((entry) => (
+              <li
+                key={`${activeGame}:${entry.rank}:${entry.username}:${entry.difficulty || entry.boardSize || ''}:${entry.wallLooping || false}`}
+                className={`flex min-h-11 items-center gap-2 rounded-xl border px-2.5 py-2 transition-colors duration-180 ${entry.username === user?.username ? 'border-accent-muted bg-accent-subtle' : 'border-transparent hover:border-border hover:bg-elevated'}`}
+              >
+                <Rank rank={entry.rank} />
+                <span className="min-w-0 flex-1 truncate text-sm font-semibold text-text-primary">
+                  {entry.username}{entry.username === user?.username && <span className="sr-only"> (you)</span>}
+                </span>
+                <EntryMetric entry={entry} gameType={activeGame} />
+              </li>
+            ))}
+          </ol>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
 
-      <div className="mb-4">
-        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Snake</h4>
-        <div className="space-y-1">
-          {snakeEntries.map((entry) => (
-            <div
-              key={`snake-${entry.rank}-${entry.username}-${entry.boardSize}-${entry.wallLooping}`}
-              className={`flex items-center gap-2 rounded-lg px-2 py-2 transition-colors duration-150 ${entry.username === user?.username ? 'bg-accent-subtle' : 'hover:bg-elevated'}`}
-            >
-              <span className="w-7 text-center text-sm text-text-muted">#{entry.rank}</span>
-              <span className="min-w-0 flex-1 truncate font-medium text-text-primary">{entry.username}</span>
-              <span className="rounded-full bg-overlay px-2 py-0.5 text-xs font-medium capitalize text-text-secondary">
-                {entry.boardSize || 'medium'} · {entry.wallLooping ? 'loop' : 'solid'}
-              </span>
-              <span className="font-mono text-sm font-semibold text-success">{entry.score || 0}</span>
-            </div>
-          ))}
-          {snakeEntries.length === 0 && <p className="rounded-lg bg-page px-3 py-4 text-center text-sm text-text-muted">No verified Snake scores yet</p>}
-        </div>
+function EntryMetric({ entry, gameType }: { entry: SinglePlayerLeaderboardEntry; gameType: SoloLeaderboardGame }) {
+  if (gameType === 'ticTacToe') {
+    return (
+      <div className="flex items-center gap-1.5">
+        <DifficultyBadge difficulty={entry.difficulty || 'easy'} />
+        <span className="font-mono text-xs font-semibold text-success-text">{entry.wins}W</span>
+        <span className="w-9 text-right font-mono text-[0.7rem] text-text-muted">{Math.round((entry.winRate || 0) * 100)}%</span>
       </div>
+    )
+  }
 
-      <div>
-        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Maze Chase</h4>
-        <div className="space-y-1">
-          {mazeEntries.map((entry) => (
-            <div
-              key={`maze-${entry.rank}-${entry.username}`}
-              className={`flex items-center gap-2 rounded-lg px-2 py-2 transition-colors duration-150 ${entry.username === user?.username ? 'bg-accent-subtle' : 'hover:bg-elevated'}`}
-            >
-              <span className="w-7 text-center text-sm text-text-muted">#{entry.rank}</span>
-              <span className="min-w-0 flex-1 truncate font-medium text-text-primary">{entry.username}</span>
-              <span className="font-mono text-sm font-semibold text-success">{entry.score || 0}</span>
-            </div>
-          ))}
-          {mazeEntries.length === 0 && <p className="rounded-lg bg-page px-3 py-4 text-center text-sm text-text-muted">No verified Maze Chase scores yet</p>}
-        </div>
-      </div>
+  return (
+    <div className="flex items-center gap-2">
+      {gameType === 'snake' && (
+        <span className="hidden text-[0.68rem] font-medium capitalize text-text-muted sm:inline">
+          {entry.boardSize || 'medium'} · {entry.wallLooping ? 'loop' : 'solid'}
+        </span>
+      )}
+      <span className="font-mono text-sm font-bold text-success-text">{entry.score || 0}</span>
+    </div>
+  )
+}
+
+function DifficultyBadge({ difficulty }: { difficulty: TicTacToeDifficulty }) {
+  const variant = difficulty === 'hard' ? 'danger' : difficulty === 'medium' ? 'warning' : 'success'
+  return <Badge variant={variant} className="capitalize">{difficulty}</Badge>
+}
+
+function Rank({ rank }: { rank: number }) {
+  if (rank === 1) {
+    return (
+      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-warning-subtle text-warning-text" aria-label="Rank 1">
+        <Crown size={15} aria-hidden="true" />
+      </span>
+    )
+  }
+  return <span className="w-7 shrink-0 text-center font-mono text-xs font-semibold text-text-muted" aria-label={`Rank ${rank}`}>#{rank}</span>
+}
+
+function getGameLabel(gameType: SoloLeaderboardGame): string {
+  if (gameType === 'ticTacToe') return 'Tic Tac Toe'
+  return gameType === 'mazeChase' ? 'Maze Chase' : 'Snake'
+}
+
+function LeaderboardSkeleton() {
+  return (
+    <div className="space-y-2" aria-label="Loading solo rankings" aria-busy="true">
+      {Array.from({ length: 6 }).map((_, index) => <Skeleton key={index} className="h-11 rounded-xl" />)}
     </div>
   )
 }

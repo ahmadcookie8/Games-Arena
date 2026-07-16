@@ -1,28 +1,22 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import axios from 'axios'
-import Header from '../components/Header'
-import Modal, { ModalVariant } from '../components/Modal'
-import PageBackdrop from '../components/PageBackdrop'
-import { TabletopRouteMasthead } from '../components/TabletopShell'
+import { GameRouteLoading, GameRouteUnavailable } from '../components/GameRouteState'
+import GameShell from '../components/GameShell'
+import Modal, { type ModalAction, type ModalVariant } from '../components/Modal'
 import TicTacToeExperience from '../components/TicTacToeExperience'
 import { useAuth } from '../hooks/useAuth'
 import { useGameState } from '../hooks/useGameState'
 import api from '../lib/api'
+import { getGameMode } from '../lib/gameCatalog'
 import { TicTacToeDifficulty } from '../types/game'
 
 interface ModalState {
   title: string
   message: string
   variant: ModalVariant
-  primaryAction?: {
-    label: string
-    onClick: () => void
-  }
-  secondaryAction?: {
-    label: string
-    onClick: () => void
-  }
+  primaryAction?: ModalAction
+  secondaryAction?: ModalAction
 }
 
 function getErrorMessage(err: unknown): string {
@@ -36,10 +30,12 @@ export default function SinglePlayerGame() {
   const { gameId } = useParams<{ gameId: string }>()
   const navigate = useNavigate()
   const { user } = useAuth()
-  const { game, loading, setGame } = useGameState(gameId)
+  const { game, loading, error, refetch, setGame } = useGameState(gameId)
   const [modal, setModal] = useState<ModalState | null>(null)
   const [isMoving, setIsMoving] = useState(false)
   const [isReplaying, setIsReplaying] = useState(false)
+  const [isClosing, setIsClosing] = useState(false)
+  const closingRef = useRef(false)
 
   const closeModal = useCallback(() => setModal(null), [])
 
@@ -77,8 +73,10 @@ export default function SinglePlayerGame() {
   }
 
   async function confirmCloseGame() {
-    if (!game) return
+    if (!game || closingRef.current) return
 
+    closingRef.current = true
+    setIsClosing(true)
     try {
       await api.post(`/api/games/${game._id}/close`)
       closeModal()
@@ -89,6 +87,9 @@ export default function SinglePlayerGame() {
         message: getErrorMessage(err),
         variant: 'danger',
       })
+    } finally {
+      closingRef.current = false
+      setIsClosing(false)
     }
   }
 
@@ -121,6 +122,7 @@ export default function SinglePlayerGame() {
       variant: 'warning',
       primaryAction: {
         label: 'Close game',
+        variant: 'danger',
         onClick: () => {
           void confirmCloseGame()
         },
@@ -132,8 +134,26 @@ export default function SinglePlayerGame() {
     })
   }
 
-  if (loading) return <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">Loading game...</div>
-  if (!game) return <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">Game not found</div>
+  if (loading) return <GameRouteLoading label="Loading solo arena" />
+  if (!game) {
+    return (
+      <GameRouteUnavailable
+        title={error === 'Game not found' ? 'Game not found' : 'This solo arena is unavailable'}
+        description={error}
+        onRetry={refetch}
+        onBack={() => navigate('/?tab=singlePlayer')}
+      />
+    )
+  }
+  if (game.gameType !== 'ticTacToe' || getGameMode(game) !== 'singlePlayer') {
+    return (
+      <GameRouteUnavailable
+        title="This is not a solo Tic Tac Toe game"
+        description="Return to Single Player and open the matching arena from your active games."
+        onBack={() => navigate('/?tab=singlePlayer')}
+      />
+    )
+  }
 
   const isCompleted = game.status === 'completed'
   const isActive = game.status === 'active'
@@ -148,19 +168,16 @@ export default function SinglePlayerGame() {
   const statusLabel = isCompleted ? resultText ?? 'Complete' : isActive ? 'Your turn' : 'Game closed'
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
-      <PageBackdrop intensity="quiet" />
-      <Header />
-      <main className="relative z-10 mx-auto max-w-[92rem] px-4 py-4 sm:px-6">
-        <TabletopRouteMasthead
-          eyebrow={`${difficulty} difficulty`}
-          title="Solo Tic Tac Toe"
-          statusLabel={statusLabel}
-          statusTone={isCompleted ? 'success' : isActive ? 'default' : 'warning'}
-          onBack={() => navigate('/?tab=singlePlayer')}
-          onClose={isActive ? promptCloseGame : undefined}
-        />
-
+    <>
+      <GameShell
+        eyebrow={`${difficulty} difficulty`}
+        title="Solo Tic Tac Toe"
+        statusLabel={statusLabel}
+        announceStatus
+        statusTone={isCompleted ? 'success' : isActive ? 'default' : 'warning'}
+        onBack={() => navigate('/?tab=singlePlayer')}
+        onClose={isActive ? promptCloseGame : undefined}
+      >
         <TicTacToeExperience
           game={game}
           currentUserId={user?._id}
@@ -170,18 +187,22 @@ export default function SinglePlayerGame() {
           onPlayAgain={playAgain}
           onDifficultyChange={updateDifficulty}
         />
-      </main>
+      </GameShell>
 
       <Modal
         isOpen={Boolean(modal)}
         title={modal?.title || ''}
         variant={modal?.variant}
-        primaryAction={modal?.primaryAction}
+        primaryAction={modal?.primaryAction ? {
+          ...modal.primaryAction,
+          loading: isClosing && modal.primaryAction.variant === 'danger',
+          loadingText: 'Closing game…',
+        } : undefined}
         secondaryAction={modal?.secondaryAction}
-        onClose={closeModal}
+        onClose={() => { if (!isClosing) closeModal() }}
       >
         {modal?.message}
       </Modal>
-    </div>
+    </>
   )
 }

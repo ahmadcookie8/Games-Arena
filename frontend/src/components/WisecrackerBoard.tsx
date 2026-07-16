@@ -26,7 +26,7 @@ import {
 } from '../lib/wisecrackerUi'
 import GameChat from './GameChat'
 import MoveHistory from './MoveHistory'
-import { TabletopBottomSheet, TabletopTab, TabletopTabs } from './TabletopShell'
+import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs, type TabletopTab } from './TabletopShell'
 import './wisecracker-tabletop.css'
 
 type WisecrackerMove =
@@ -489,7 +489,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
       </section>
 
       <div className="wc-game-layout">
-        <main className="wc-stage" aria-labelledby="wc-stage-title">
+        <section className="wc-stage" aria-labelledby="wc-stage-title">
           <header className="wc-stage__header">
             <div>
               <p className="wc-kicker">Current action</p>
@@ -504,7 +504,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
             </div>
           )}
           {renderRoundStage()}
-        </main>
+        </section>
 
         <aside className="wc-desktop-rail" aria-label="Wisecracker information">
           <div className="wc-inspector">
@@ -528,14 +528,12 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
       </div>
 
       <div className="wc-mobile-dock">
-        <TabletopTabs
+        <TabletopDockButtons
           tabs={INSPECTOR_TABS}
           activeTab={activeTab}
           onSelect={openInspector}
           ariaLabel="Open Wisecracker information"
-          idBase="wisecracker-mobile"
-          controlsIdBase="wisecracker-sheet"
-          variant="dock"
+          isOpen={sheetOpen}
         />
       </div>
 

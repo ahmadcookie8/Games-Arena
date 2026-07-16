@@ -1,25 +1,28 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import axios from 'axios'
+import BrandMascot from '../components/BrandMascot'
 import GameChat from '../components/GameChat'
+import { GameRouteLoading, GameRouteUnavailable } from '../components/GameRouteState'
+import GameShell from '../components/GameShell'
 import GameInvite from '../components/GameInvite'
-import Header from '../components/Header'
-import Modal, { ModalVariant } from '../components/Modal'
+import Modal, { type ModalAction, type ModalVariant } from '../components/Modal'
 import MoveHistory from '../components/MoveHistory'
-import PageBackdrop from '../components/PageBackdrop'
 import PlayerCard from '../components/PlayerCard'
-import PropertyManagementBoard from '../components/PropertyManagementBoard'
-import ScrabbleBoard from '../components/ScrabbleBoard'
-import { TabletopRouteMasthead } from '../components/TabletopShell'
-import TicTacToeExperience from '../components/TicTacToeExperience'
-import WisecrackerBoard from '../components/WisecrackerBoard'
+import { Button, RouteState } from '../components/ui'
 import { useAuth } from '../hooks/useAuth'
 import { useGameState } from '../hooks/useGameState'
 import { useSocket } from '../hooks/useSocket'
 import api from '../lib/api'
 import { canHostCloseGame, getCloseGamePrompt } from '../lib/gameClose'
 import { getGameLabel } from '../lib/gameRules'
+import { getGameMode } from '../lib/gameCatalog'
 import { ChatMessage, Game } from '../types/game'
+
+const PropertyManagementBoard = lazy(() => import('../components/PropertyManagementBoard'))
+const ScrabbleBoard = lazy(() => import('../components/ScrabbleBoard'))
+const TicTacToeExperience = lazy(() => import('../components/TicTacToeExperience'))
+const WisecrackerBoard = lazy(() => import('../components/WisecrackerBoard'))
 
 interface MoveResponse {
   success: boolean
@@ -37,14 +40,8 @@ interface ModalState {
   title: string
   message: string
   variant: ModalVariant
-  primaryAction?: {
-    label: string
-    onClick: () => void
-  }
-  secondaryAction?: {
-    label: string
-    onClick: () => void
-  }
+  primaryAction?: ModalAction
+  secondaryAction?: ModalAction
 }
 
 function getCloseGameModal(game: Game, onConfirm: () => void, onCancel: () => void): ModalState {
@@ -55,6 +52,7 @@ function getCloseGameModal(game: Game, onConfirm: () => void, onCancel: () => vo
     primaryAction: {
       label: 'Close game',
       onClick: onConfirm,
+      variant: 'danger',
     },
     secondaryAction: {
       label: 'Cancel',
@@ -67,15 +65,22 @@ export default function GameBoard() {
   const { gameId } = useParams<{ gameId: string }>()
   const navigate = useNavigate()
   const { user } = useAuth()
-  const { game, loading, setGame } = useGameState(gameId)
+  const { game, loading, error, refetch, setGame } = useGameState(gameId)
   const { emitWithAck, on, connected } = useSocket()
   const [modal, setModal] = useState<ModalState | null>(null)
   const [isReplaying, setIsReplaying] = useState(false)
+  const [isClosing, setIsClosing] = useState(false)
   const latestGameRef = useRef<Game | null>(null)
+  const interactionRootRef = useRef<HTMLDivElement | null>(null)
+  const closingRef = useRef(false)
 
   useEffect(() => {
     latestGameRef.current = game
   }, [game])
+
+  useEffect(() => {
+    interactionRootRef.current?.toggleAttribute('inert', !connected)
+  }, [connected, game])
 
   const showGameErrorModal = useCallback((error: string) => {
     const modalByError: Record<string, ModalState> = {
@@ -164,6 +169,7 @@ export default function GameBoard() {
   }, [gameId, connected, emitWithAck, on, navigate, setGame, showGameErrorModal])
 
   async function handleMove(move: unknown): Promise<MoveResponse> {
+    if (!connected) return { success: false, error: 'Reconnecting to the game server.' }
     const acknowledgement = await emitWithAck<{ game: Game }>('makeMove', { gameId, move })
     if (acknowledgement.ok) {
       setGame(acknowledgement.data.game)
@@ -175,6 +181,7 @@ export default function GameBoard() {
   }
 
   async function handleSendChat(text: string): Promise<ChatResponse> {
+    if (!connected) return { success: false, error: 'Chat will be available after the room reconnects.' }
     const acknowledgement = await emitWithAck<{ message: ChatMessage }>('sendChatMessage', { gameId, text })
     return acknowledgement.ok
       ? { success: true, message: acknowledgement.data.message }
@@ -186,8 +193,10 @@ export default function GameBoard() {
   }
 
   async function confirmCloseGame() {
-    if (!game) return
+    if (!game || closingRef.current) return
 
+    closingRef.current = true
+    setIsClosing(true)
     try {
       await api.post(`/api/games/${game._id}/close`)
       closeModal()
@@ -203,6 +212,9 @@ export default function GameBoard() {
         message,
         variant: 'danger',
       })
+    } finally {
+      closingRef.current = false
+      setIsClosing(false)
     }
   }
 
@@ -249,8 +261,26 @@ export default function GameBoard() {
     })
   }, [game, navigate])
 
-  if (loading) return <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">Loading game...</div>
-  if (!game) return <div className="flex min-h-screen items-center justify-center bg-page text-text-primary">Game not found</div>
+  if (loading) return <GameRouteLoading label="Loading multiplayer arena" />
+  if (!game) {
+    return (
+      <GameRouteUnavailable
+        title={error === 'Game not found' ? 'Game not found' : 'This multiplayer arena is unavailable'}
+        description={error}
+        onRetry={refetch}
+        onBack={() => navigate('/?tab=multiplayer')}
+      />
+    )
+  }
+  if (getGameMode(game) !== 'multiplayer') {
+    return (
+      <GameRouteUnavailable
+        title="This game belongs in the solo arcade"
+        description="Open it from Single Player so its controls and run verification load correctly."
+        onBack={() => navigate('/?tab=singlePlayer')}
+      />
+    )
+  }
 
   const myIndex = game.players.findIndex((p) => p.userId === user?._id)
   const minPlayers = game.gameType === 'wisecracker' ? 3 : 2
@@ -258,7 +288,7 @@ export default function GameBoard() {
   const isWaitingForPlayer = isActive && game.players.length < minPlayers && game.gameType !== 'wisecracker' && game.gameType !== 'propertyManagement'
   const isCompleted = game.status === 'completed'
   const canCurrentUserClose = canHostCloseGame(game, user?._id)
-  const isMyTurn = isActive && !isWaitingForPlayer && !isCompleted && game.currentTurnIndex === myIndex
+  const isMyTurn = connected && isActive && !isWaitingForPlayer && !isCompleted && game.currentTurnIndex === myIndex
   const currentPlayer = game.players[game.currentTurnIndex]
   const resultText = game.result?.isDraw
     ? 'Draw'
@@ -275,7 +305,9 @@ export default function GameBoard() {
       : game.gameType === 'ticTacToe'
         ? 'Classic table'
         : 'Private table'
-  const tabletopStatus = game.gameType === 'wisecracker' && gamePhase
+  const tabletopStatus = !connected
+    ? 'Reconnecting...'
+    : game.gameType === 'wisecracker' && gamePhase
     ? gamePhase.replace(/([A-Z])/g, ' $1').replace(/^./, (letter) => letter.toUpperCase())
     : isCompleted
       ? resultText ?? 'Complete'
@@ -290,117 +322,57 @@ export default function GameBoard() {
               : game.status
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-page text-text-primary">
-      <PageBackdrop intensity="quiet" />
-      <Header />
-      <main className={`relative z-10 mx-auto px-4 sm:px-6 ${isTabletopGame ? 'max-w-[92rem] py-4' : 'max-w-7xl py-6'}`}>
-        {isTabletopGame ? (
-          <TabletopRouteMasthead
-            eyebrow={`${tabletopEyebrow} · ${game.status}`}
-            title={getGameLabel(game.gameType)}
-            gameCode={game.gameCode}
-            statusLabel={tabletopStatus}
-            statusTone={isCompleted ? 'success' : isWaitingForPlayer ? 'warning' : 'default'}
-            onBack={() => navigate('/?tab=multiplayer')}
-            onClose={canCurrentUserClose ? promptCloseGame : undefined}
-            primaryAction={game.gameType === 'scrabble' && canPlayAgain ? {
-              label: isReplaying ? 'Starting…' : 'Play Again',
-              onClick: () => void playAgain(),
-              disabled: isReplaying,
-            } : undefined}
-          />
-        ) : (
-        <div className="mb-6 flex flex-col gap-4 rounded-2xl border border-border/90 bg-surface/92 p-4 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-5">
-          <button
-            onClick={() => navigate('/?tab=multiplayer')}
-            className="w-fit cursor-pointer rounded-lg px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-overlay hover:text-text-primary"
-          >
-            Back
-          </button>
-          <div className="min-w-0 sm:text-center">
-            <h1 className="text-gradient truncate text-xl font-semibold">{getGameLabel(game.gameType)}</h1>
-            <p className="text-sm text-text-muted">
-              Code: <span className="font-mono font-medium text-accent">{game.gameCode}</span>
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            {canPlayAgain && (
-              <button
-                type="button"
-                onClick={() => void playAgain()}
-                disabled={isReplaying}
-                className="cursor-pointer rounded-lg bg-accent px-3 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isReplaying ? 'Starting...' : 'Play Again'}
-              </button>
-            )}
-            {canCurrentUserClose && (
-              <button
-                type="button"
-                onClick={promptCloseGame}
-                className="cursor-pointer rounded-lg border border-danger/30 bg-danger-subtle px-3 py-2 text-sm font-medium text-danger-text transition-colors duration-150 hover:opacity-90"
-              >
-                Close game
-              </button>
-            )}
-            <div
-              aria-live="polite"
-              className={`w-fit rounded-full px-3 py-1 text-sm font-medium ${
-                isMyTurn
-                  ? 'bg-accent-subtle text-accent'
-                  : isCompleted
-                    ? 'bg-success-subtle text-success-text'
-                    : game.status === 'abandoned'
-                      ? 'bg-warning-subtle text-warning-text'
-                    : isWaitingForPlayer
-                      ? 'bg-warning-subtle text-warning-text'
-                      : 'bg-overlay text-text-secondary'
-              }`}
-            >
-              {game.gameType === 'wisecracker'
-                ? game.status
-                : isCompleted
-                  ? resultText
-                  : game.status === 'abandoned'
-                    ? 'Game closed'
-                  : isWaitingForPlayer
-                    ? 'Waiting for player'
-                    : isMyTurn
-                      ? 'Your turn'
-                      : `${currentPlayer?.username}'s turn`}
-            </div>
-          </div>
-        </div>
-        )}
-
-        {game.gameType === 'propertyManagement' ? (
-          <PropertyManagementBoard game={game} user={user} onMove={handleMove} onSendChat={handleSendChat} />
-        ) : game.gameType === 'scrabble' ? (
-          <ScrabbleBoard
-            game={game}
-            user={user}
-            isMyTurn={isMyTurn}
-            onMove={handleMove}
-            onSendChat={handleSendChat}
-          />
-        ) : game.gameType === 'ticTacToe' ? (
-          <TicTacToeExperience
-            game={game}
-            currentUserId={user?._id}
-            connected={connected}
-            isReplaying={isReplaying}
-            onMove={handleMove}
-            onPlayAgain={playAgain}
-            onSendChat={handleSendChat}
-          />
-        ) : game.gameType === 'wisecracker' ? (
-          <WisecrackerBoard
-            game={game}
-            user={user}
-            onMove={handleMove}
-            onSendChat={handleSendChat}
-          />
-        ) : (
+    <>
+      <GameShell
+        eyebrow={`${isTabletopGame ? tabletopEyebrow : 'Legacy table'} · ${game.status}`}
+        title={getGameLabel(game.gameType)}
+        gameCode={game.gameCode}
+        statusLabel={tabletopStatus}
+        announceStatus
+        statusTone={!connected || isWaitingForPlayer ? 'warning' : isCompleted ? 'success' : 'default'}
+        onBack={() => navigate('/?tab=multiplayer')}
+        onClose={canCurrentUserClose ? promptCloseGame : undefined}
+        width={isTabletopGame ? 'wide' : 'standard'}
+        primaryAction={canPlayAgain ? {
+          label: isReplaying ? 'Starting…' : 'Play Again',
+          onClick: () => void playAgain(),
+          disabled: isReplaying,
+        } : undefined}
+      >
+        <div
+          ref={interactionRootRef}
+          aria-disabled={!connected || undefined}
+          className={`transition-opacity duration-180 ${connected ? '' : 'opacity-70'}`}
+        >
+        <Suspense fallback={<div className="grid min-h-72 place-items-center rounded-2xl border border-border bg-surface/80 text-sm text-text-secondary" role="status">Preparing game table…</div>}>
+          {game.gameType === 'propertyManagement' ? (
+            <PropertyManagementBoard game={game} user={user} onMove={handleMove} onSendChat={handleSendChat} />
+          ) : game.gameType === 'scrabble' ? (
+            <ScrabbleBoard
+              game={game}
+              user={user}
+              isMyTurn={isMyTurn}
+              onMove={handleMove}
+              onSendChat={handleSendChat}
+            />
+          ) : game.gameType === 'ticTacToe' ? (
+            <TicTacToeExperience
+              game={game}
+              currentUserId={user?._id}
+              connected={connected}
+              isReplaying={isReplaying}
+              onMove={handleMove}
+              onPlayAgain={playAgain}
+              onSendChat={handleSendChat}
+            />
+          ) : game.gameType === 'wisecracker' ? (
+            <WisecrackerBoard
+              game={game}
+              user={user}
+              onMove={handleMove}
+              onSendChat={handleSendChat}
+            />
+          ) : (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
           <div className="min-w-0">
             {isWaitingForPlayer && (
@@ -416,16 +388,21 @@ export default function GameBoard() {
                     type="button"
                     onClick={() => void playAgain()}
                     disabled={isReplaying}
-                    className="min-h-10 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-text-on-accent shadow-accent transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+                    className="ui-action-primary interactive-lift min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold shadow-accent disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isReplaying ? 'Starting...' : 'Play Again'}
                   </button>
                 )}
               </div>
             )}
-            <section className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl sm:p-5">
-              <p className="text-sm text-text-secondary">This game does not have a tabletop presentation yet.</p>
-            </section>
+            <RouteState
+              tone="warning"
+              icon={<BrandMascot sizes="48px" className="h-12 w-12 object-contain" />}
+              title={`${getGameLabel(game.gameType)} is not currently available`}
+              description="This legacy game record is safe, but its arena is staying closed while the active arcade lineup is being supported."
+              action={<Button onClick={() => navigate('/?tab=multiplayer')}>Choose another arena</Button>}
+              className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl sm:p-5"
+            />
           </div>
           <aside className="min-w-0 space-y-4">
             <div className="rounded-2xl border border-border/90 bg-surface/94 p-4 shadow-sm backdrop-blur-xl">
@@ -440,19 +417,25 @@ export default function GameBoard() {
             {game.metadata?.mode !== 'singlePlayer' && <GameChat messages={game.chatMessages || []} currentUserId={user?._id} onSend={handleSendChat} />}
           </aside>
         </div>
-        )}
-      </main>
+          )}
+        </Suspense>
+        </div>
+      </GameShell>
 
       <Modal
         isOpen={Boolean(modal)}
         title={modal?.title || ''}
         variant={modal?.variant}
-        primaryAction={modal?.primaryAction}
+        primaryAction={modal?.primaryAction ? {
+          ...modal.primaryAction,
+          loading: isClosing && modal.primaryAction.variant === 'danger',
+          loadingText: 'Closing game…',
+        } : undefined}
         secondaryAction={modal?.secondaryAction}
-        onClose={closeModal}
+        onClose={() => { if (!isClosing) closeModal() }}
       >
         {modal?.message}
       </Modal>
-    </div>
+    </>
   )
 }

@@ -3,6 +3,7 @@ import { ArrowLeftRight, Crosshair, History, Maximize2, MessageSquare, Minus, Pl
 import { Game, Player, ScrabblePremium, ScrabbleScoreEvent, ScrabbleState, ScrabbleTile } from '../types/game'
 import { User } from '../types/user'
 import api from '../lib/api'
+import { isInteractiveKeyTarget } from '../lib/keyboard'
 import {
   SCRABBLE_BOARD_BASE_SIZE,
   SCRABBLE_BOARD_DIMENSION,
@@ -22,7 +23,8 @@ import GameChat from './GameChat'
 import GameInvite from './GameInvite'
 import Modal from './Modal'
 import MoveHistory from './MoveHistory'
-import { TabletopBottomSheet, TabletopTabs, type TabletopTab } from './TabletopShell'
+import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs, type TabletopTab } from './TabletopShell'
+import { Select } from './ui'
 import './scrabble-tabletop.css'
 
 type ScrabbleMove =
@@ -191,9 +193,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      const target = event.target as HTMLElement | null
-      const tagName = target?.tagName.toLowerCase()
-      if (!isMyTurn || swapMode || state.pendingTrade || tagName === 'input' || tagName === 'textarea' || tagName === 'select' || event.ctrlKey || event.metaKey || event.altKey) return
+      if (!isMyTurn || swapMode || state.pendingTrade || isInteractiveKeyTarget(event.target) || event.ctrlKey || event.metaKey || event.altKey) return
       const key = event.key === '?' ? '?' : event.key.toUpperCase()
       if (!/^[A-Z?]$/.test(key)) return
       const availableTiles = myRack.filter((tile) => !placements.some((placement) => placement.rackTileId === tile.id))
@@ -444,6 +444,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
           <label className={isHost && !settingsLocked ? 'is-enabled' : ''}>
             <input
               type="checkbox"
+              aria-label="Infinite letters"
               checked={state.infiniteLetters}
               disabled={!isHost || settingsLocked || isSavingSettings}
               onChange={(event) => void updateInfiniteLetters(event.target.checked)}
@@ -495,15 +496,22 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
           <p className="scr-panel-copy">Select tiles here or turn on Swap in the action panel. Your selection stays synchronized.</p>
           <RackTiles mirrored />
         </div>
-        <label className="scr-field-label">
-          Trade with
-          <select value={tradeTargetId} onChange={(event) => setTradeTargetId(event.target.value)} disabled={!isMyTurn || Boolean(busyAction)}>
-            <option value="">Choose a player</option>
-            {game.players.filter((player) => player.userId !== myId && !state.givenUpUserIds.includes(player.userId)).map((player) => (
-              <option key={player.userId} value={player.userId}>{player.username}</option>
-            ))}
-          </select>
-        </label>
+        <div className="scr-field-label">
+          <span>Trade with</span>
+          <Select
+            label="Trade with"
+            value={tradeTargetId || 'none'}
+            onValueChange={(value) => setTradeTargetId(value === 'none' ? '' : value)}
+            disabled={!isMyTurn || Boolean(busyAction)}
+            placeholder="Choose a player"
+            options={[
+              { value: 'none', label: 'Choose a player' },
+              ...game.players
+                .filter((player) => player.userId !== myId && !state.givenUpUserIds.includes(player.userId))
+                .map((player) => ({ value: player.userId, label: player.username })),
+            ]}
+          />
+        </div>
         <button type="button" className="scr-primary-button" onClick={offerTrade} disabled={!isMyTurn || !tradeTargetId || selectedRackIds.length === 0 || Boolean(busyAction)}>
           {selectedRackIds.length ? `Offer ${selectedRackIds.length} tile${selectedRackIds.length === 1 ? '' : 's'}` : 'Offer trade'}
         </button>
@@ -563,7 +571,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
 
       <div className="scr-mobile-dock">
         <ActionPanel compact />
-        <TabletopTabs tabs={inspectorTabs} activeTab={activeTab} onSelect={openInspector} ariaLabel="Open Scrabble information" idBase="scrabble-mobile-dock" controlsIdBase="scrabble-sheet" variant="dock" />
+        <TabletopDockButtons tabs={inspectorTabs} activeTab={activeTab} onSelect={openInspector} ariaLabel="Open Scrabble information" isOpen={sheetOpen} />
       </div>
 
       <TabletopBottomSheet isOpen={sheetOpen} title={activeTabLabel} onClose={() => setSheetOpen(false)} idBase="scrabble-info-sheet">
@@ -600,9 +608,10 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
               }
             }}
             aria-describedby={blankLetterError ? 'scrabble-blank-error' : undefined}
+            aria-invalid={Boolean(blankLetterError) || undefined}
           />
         </label>
-        {blankLetterError && <p id="scrabble-blank-error" className="scr-inline-error">{blankLetterError}</p>}
+        {blankLetterError && <p id="scrabble-blank-error" role="alert" className="scr-inline-error">{blankLetterError}</p>}
       </Modal>
 
       <Modal
@@ -883,10 +892,11 @@ function ScoreAnimation({ event, onHighlight }: { event: ScrabbleScoreEvent | nu
   }
 
   return (
-    <div className="scr-hud-event" aria-live="polite">
+    <div className="scr-hud-event">
       <span><strong>{event.playerName}</strong> scored</span>
       <span className="scr-score-count">{displayTotal}</span>
       <span><strong>{steps[step]?.label}</strong> · {steps[step]?.detail}</span>
+      <span className="sr-only" aria-live="polite">{event.playerName} scored {event.total} points.</span>
     </div>
   )
 }

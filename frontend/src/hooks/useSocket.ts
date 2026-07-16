@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { Socket } from 'socket.io-client'
+import type { Socket } from 'socket.io-client'
 import { connectSocket, disconnectSocket } from '../lib/socket'
 
 export interface SocketAcknowledgementError {

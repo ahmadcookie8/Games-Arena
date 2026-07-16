@@ -44,7 +44,7 @@ import {
 } from '../lib/propertyManagementBoard'
 import GameChat from './GameChat'
 import Modal from './Modal'
-import { TabletopBottomSheet, TabletopTab, TabletopTabs } from './TabletopShell'
+import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs, type TabletopTab } from './TabletopShell'
 import './property-management.css'
 
 type PropertyManagementMove =
@@ -251,6 +251,12 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
     setSelectedSquareIndex(squareIndex)
     setActiveTab('tile')
     if (window.matchMedia('(max-width: 1119px)').matches) setSheetOpen(true)
+  }
+
+  function focusSquare(squareIndex: number) {
+    setSelectedSquareIndex(squareIndex)
+    setActiveTab('tile')
+    setFocusRequest((current) => current + 1)
   }
 
   function openInspector(tab: InspectorTab) {
@@ -552,7 +558,12 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
                   <span className="break-words text-sm font-bold text-text-primary">{player.username}</span>
                   {player.userId === myId && <span className="pm-mini-label">You</span>}
                   {player.userId === state.hostUserId && <span className="pm-mini-label">Host</span>}
-                  {!connected && <span className="h-2 w-2 rounded-full bg-danger" title="Offline" />}
+                  {!connected && (
+                    <span className="pm-mini-label inline-flex items-center gap-1 text-danger-text">
+                      <span className="h-2 w-2 rounded-full bg-danger" aria-hidden="true" />
+                      Offline
+                    </span>
+                  )}
                 </div>
                 {!compact && (
                   <p className="mt-0.5 text-xs leading-5 text-text-muted">
@@ -631,6 +642,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
           myPosition={myPlayer?.position ?? null}
           focusRequest={focusRequest}
           onSelectSquare={selectSquare}
+          onFocusSquare={focusSquare}
         />
 
         <aside className="pm-desktop-rail" aria-label="Game controls and information">
@@ -644,7 +656,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
 
       <div className="pm-mobile-dock">
         <ActionPanel compact />
-        <TabletopTabs tabs={INSPECTOR_TABS} activeTab={activeTab} onSelect={openInspector} ariaLabel="Game information" idBase="pm-mobile-dock" controlsIdBase="pm-sheet-tabs" variant="dock" />
+        <TabletopDockButtons tabs={INSPECTOR_TABS} activeTab={activeTab} onSelect={openInspector} ariaLabel="Open game information" isOpen={sheetOpen} />
       </div>
 
       <TabletopBottomSheet
@@ -669,6 +681,7 @@ function GameMap({
   myPosition,
   focusRequest,
   onSelectSquare,
+  onFocusSquare,
 }: {
   state: PropertyManagementState
   playerOrder: string[]
@@ -676,6 +689,7 @@ function GameMap({
   myPosition: number | null
   focusRequest: number
   onSelectSquare: (squareIndex: number) => void
+  onFocusSquare: (squareIndex: number) => void
 }) {
   const [zoom, setZoom] = useState(() => window.matchMedia('(max-width: 519px)').matches ? 0.75 : 1)
   const cameraRef = useRef<HTMLDivElement>(null)
@@ -736,6 +750,21 @@ function GameMap({
     changeZoom(fitPropertyBoardZoom(camera.clientWidth, camera.clientHeight, 12))
   }
 
+  function handleTileKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, squareIndex: number) {
+    let nextIndex: number | null = null
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (squareIndex + 1) % BOARD_SQUARES.length
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (squareIndex - 1 + BOARD_SQUARES.length) % BOARD_SQUARES.length
+    if (event.key === 'Home') nextIndex = 0
+    if (event.key === 'End') nextIndex = BOARD_SQUARES.length - 1
+    if (nextIndex === null) return
+
+    event.preventDefault()
+    onFocusSquare(nextIndex)
+    window.requestAnimationFrame(() => {
+      cameraRef.current?.querySelector<HTMLButtonElement>(`[data-square-index="${nextIndex}"]`)?.focus({ preventScroll: true })
+    })
+  }
+
   return (
     <section className="pm-board-surface" aria-label="Property Management board">
       <div className="pm-camera-toolbar">
@@ -781,6 +810,7 @@ function GameMap({
                   playerOrder={playerOrder}
                   selected={selectedSquareIndex === square.index}
                   onSelect={() => onSelectSquare(square.index)}
+                  onKeyDown={(event) => handleTileKeyDown(event, square.index)}
                   style={{ gridRow: row, gridColumn: col }}
                 />
               )
@@ -809,6 +839,7 @@ function MapTile({
   playerOrder,
   selected,
   onSelect,
+  onKeyDown,
   style,
 }: {
   square: PMSquareDef
@@ -816,6 +847,7 @@ function MapTile({
   playerOrder: string[]
   selected: boolean
   onSelect: () => void
+  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void
   style: React.CSSProperties
 }) {
   const ownership = state.properties[String(square.index)]
@@ -823,20 +855,39 @@ function MapTile({
   const side = getPropertyBoardSide(square.index)
   const stripClass = square.colorGroup ? GROUP_STRIP_CLASSES[square.colorGroup] ?? 'bg-slate-500' : ''
   const buildLabel = ownership?.houses ? (ownership.houses >= 5 ? 'Hotel' : `${ownership.houses}H`) : null
+  const ownerName = ownership?.ownerId ? state.playerStates[ownership.ownerId]?.username : null
+  const occupants = playerOrder.flatMap((id) => {
+    const player = state.playerStates[id]
+    return player && !player.isBankrupt && player.position === square.index
+      ? [player.username]
+      : []
+  })
+  const accessibleLabel = [
+    square.name,
+    square.price != null ? formatMoney(square.price) : null,
+    ownerName ? `owned by ${ownerName}` : square.price != null ? 'unowned' : null,
+    ownership?.mortgaged ? 'mortgaged' : null,
+    ownership?.houses ? ownership.houses >= 5 ? 'hotel' : `${ownership.houses} houses` : null,
+    occupants.length ? `players here: ${occupants.join(', ')}` : 'no players here',
+    selected ? 'selected' : null,
+  ].filter(Boolean).join(', ')
 
   return (
     <button
       type="button"
       data-square-index={square.index}
-      aria-label={`${square.name}${square.price != null ? `, ${formatMoney(square.price)}` : ''}${ownership?.mortgaged ? ', mortgaged' : ''}`}
+      tabIndex={selected ? 0 : -1}
+      aria-pressed={selected}
+      aria-label={accessibleLabel}
       title={square.name}
       onClick={onSelect}
+      onKeyDown={onKeyDown}
       className={`pm-board-tile pm-board-tile--${side} ${selected ? 'pm-board-tile--selected' : ''} ${ownership?.mortgaged ? 'pm-board-tile--mortgaged' : ''}`}
       style={style}
     >
       {square.colorGroup && <span className={`pm-property-band ${stripClass}`} aria-hidden="true" />}
       {ownerIndex >= 0 && (
-        <span className="pm-owner-marker" style={{ backgroundColor: PLAYER_COLORS[ownerIndex % PLAYER_COLORS.length] }} title={`Owned by ${state.playerStates[ownership?.ownerId ?? '']?.username ?? 'player'}`} />
+        <span className="pm-owner-marker" style={{ backgroundColor: PLAYER_COLORS[ownerIndex % PLAYER_COLORS.length] }} title={`Owned by ${state.playerStates[ownership?.ownerId ?? '']?.username ?? 'player'}`} aria-hidden="true" />
       )}
       {ownership?.mortgaged && <span className="pm-mortgage-stamp">M</span>}
       {buildLabel && <span className="pm-building-marker">{buildLabel}</span>}

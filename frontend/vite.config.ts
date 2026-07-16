@@ -4,6 +4,13 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  build: {
+    // Theme and card artwork must remain separate requests so the browser only
+    // downloads the resolved-theme source selected by each <picture> element.
+    assetsInlineLimit(filePath) {
+      return /assets[\\/]optimized[\\/]hero-/.test(filePath) ? false : undefined
+    },
+  },
   server: {
     host: '127.0.0.1',
     port: 5173,
