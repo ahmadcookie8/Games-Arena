@@ -1,4 +1,5 @@
 import { Player } from '../types/game'
+import PlayerAvatar from './PlayerAvatar'
 
 interface Props {
   player: Player
@@ -8,9 +9,11 @@ interface Props {
 export default function PlayerCard({ player, isCurrentTurn }: Props) {
   return (
     <div className={`flex items-center gap-3 rounded-xl border p-3 transition-all duration-150 ${isCurrentTurn ? 'border-accent bg-accent-subtle shadow-accent' : 'border-border bg-elevated'}`}>
-      <div className="ui-action-primary flex h-9 w-9 items-center justify-center rounded-full text-sm font-bold">
-        {player.username[0].toUpperCase()}
-      </div>
+      <PlayerAvatar
+        name={player.username}
+        size="md"
+        status={isCurrentTurn ? 'turn' : player.isConnected ? 'online' : 'offline'}
+      />
       <div className="min-w-0">
         <p className="truncate font-medium text-text-primary">{player.username}</p>
         <p className={`text-xs ${player.isConnected ? 'text-success' : 'text-text-muted'}`}>

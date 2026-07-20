@@ -48,10 +48,64 @@ function makeState(overrides: Partial<WisecrackerState> = {}): WisecrackerState 
 }
 
 describe('Wisecracker input reliability', () => {
+  it('mounts only one mobile inspector and chat draft tree', async () => {
+    const actor = userEvent.setup()
+    render(
+      <WisecrackerBoard
+        game={makeGame(makeState({ phase: 'lobby' }))}
+        user={user}
+        onMove={vi.fn()}
+        onSendChat={vi.fn().mockResolvedValue({ success: true })}
+      />,
+    )
+
+    await actor.click(screen.getByRole('button', { name: 'Chat' }))
+    expect(await screen.findAllByRole('textbox', { name: 'Message this lobby' })).toHaveLength(1)
+  })
+
+  it('keeps the host score target as a digit draft and submits the parsed integer', async () => {
+    const actor = userEvent.setup()
+    const state = makeState({ phase: 'lobby', maxScore: 3 })
+    const game = makeGame(state)
+    const onMove = vi.fn().mockResolvedValue({ success: true })
+    const onSendChat = vi.fn()
+    const view = render(<WisecrackerBoard game={game} user={user} onMove={onMove} onSendChat={onSendChat} />)
+    const target = screen.getByRole('textbox', { name: 'Points to win' })
+
+    expect(target).toHaveAttribute('inputmode', 'numeric')
+    expect(target).toHaveAttribute('pattern', '[0-9]*')
+    expect(target).toHaveAttribute('enterkeyhint', 'done')
+
+    await actor.clear(target)
+    expect(screen.getByRole('button', { name: 'Start match' })).toBeDisabled()
+    await actor.type(target, '12')
+    expect(target).toHaveValue('12')
+    expect(target).toHaveFocus()
+
+    view.rerender(
+      <WisecrackerBoard
+        game={{
+          ...game,
+          revision: 2,
+          players: game.players.map((player) => player.userId === 'writer-1' ? { ...player, isConnected: false } : player),
+        }}
+        user={user}
+        onMove={onMove}
+        onSendChat={onSendChat}
+      />,
+    )
+    expect(target).toHaveValue('12')
+    expect(target).toHaveFocus()
+
+    await actor.click(screen.getByRole('button', { name: 'Start match' }))
+    expect(onMove).toHaveBeenCalledWith({ type: 'startMatch', maxScore: 12 })
+  })
+
   it('enforces the server prompt and blank limits without resetting a draft on presence updates', async () => {
     const onMove = vi.fn().mockResolvedValue({ success: true })
+    const onActionError = vi.fn()
     const game = makeGame(makeState())
-    const view = render(<WisecrackerBoard game={game} user={user} onMove={onMove} onSendChat={vi.fn()} />)
+    const view = render(<WisecrackerBoard game={game} user={user} onMove={onMove} onSendChat={vi.fn()} onActionError={onActionError} />)
     const prompt = screen.getByLabelText('Your prompt')
 
     expect(prompt).toHaveAttribute('maxlength', '240')
@@ -63,12 +117,13 @@ describe('Wisecracker input reliability', () => {
       user={user}
       onMove={onMove}
       onSendChat={vi.fn()}
+      onActionError={onActionError}
     />)
     expect(prompt).toHaveValue('My ___________ prompt')
 
     await userEvent.clear(prompt)
     await userEvent.type(prompt, '_ _ _ _ _ _ _ _ _ _ _')
-    expect(screen.getByRole('alert')).toHaveTextContent('Use no more than 10 blanks.')
+    expect(screen.getByRole('status')).toHaveTextContent('Use no more than 10 blanks.')
     expect(screen.getByRole('button', { name: 'Use prompt' })).toBeDisabled()
   })
 
@@ -123,14 +178,15 @@ describe('Wisecracker input reliability', () => {
     const onMove = vi.fn()
       .mockResolvedValueOnce({ success: false, error: 'The round changed. Try again.' })
       .mockResolvedValueOnce({ success: true })
+    const onActionError = vi.fn()
     const view = render(
-      <WisecrackerBoard game={game} user={writer} onMove={onMove} onSendChat={vi.fn()} />,
+      <WisecrackerBoard game={game} user={writer} onMove={onMove} onSendChat={vi.fn()} onActionError={onActionError} />,
     )
     const answer = screen.getByLabelText('Your answer 160 left')
     await userEvent.type(answer, 'Keep this draft')
     await userEvent.click(screen.getByRole('button', { name: 'Lock in answers' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('The round changed. Try again.')
+    await waitFor(() => expect(onActionError).toHaveBeenCalledWith('The round changed. Try again.', expect.any(HTMLElement)))
     expect(answer).toHaveValue('Keep this draft')
     await userEvent.click(screen.getByRole('button', { name: 'Lock in answers' }))
     expect(await screen.findByText('Answers locked in')).toBeInTheDocument()
@@ -150,6 +206,7 @@ describe('Wisecracker input reliability', () => {
         user={writer}
         onMove={onMove}
         onSendChat={vi.fn()}
+        onActionError={onActionError}
       />,
     )
 

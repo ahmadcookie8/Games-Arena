@@ -12,6 +12,7 @@ import { useState } from 'react'
 import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import BrandMascot from './BrandMascot'
+import PlayerAvatar from './PlayerAvatar'
 import type { ThemePreference } from './ThemeProvider'
 import { useTheme } from './ThemeProvider'
 import { ThemeToggle } from './ThemeToggle'
@@ -82,7 +83,6 @@ export default function Header() {
     }
   }
 
-  const initials = user?.username.slice(0, 2).toUpperCase() || 'GA'
 
   return (
     <>
@@ -119,20 +119,19 @@ export default function Header() {
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button
+                <Button
                   type="button"
-                  className="group flex min-h-11 max-w-[11.5rem] items-center gap-2 rounded-xl border border-transparent px-1.5 py-1 text-left transition-[background-color,border-color,transform] duration-180 hover:border-border hover:bg-overlay active:scale-[0.98] sm:px-2"
+                  variant="ghost"
+                  className="tactile-button tactile-button--ghost group flex min-h-11 max-w-[11.5rem] items-center gap-2 rounded-xl border border-transparent px-1.5 py-1 text-left transition-[background-color,border-color,box-shadow,transform] duration-180 hover:border-border hover:bg-overlay sm:px-2"
                   aria-label={`Open account menu for ${user?.username || 'player'}`}
                 >
-                  <span className="ui-action-primary grid h-9 w-9 shrink-0 place-items-center rounded-lg text-xs font-bold tracking-wide shadow-accent">
-                    {initials}
-                  </span>
+                  <PlayerAvatar name={user?.username || 'Games Arena'} size="md" />
                   <span className="hidden min-w-0 flex-1 sm:block">
                     <span className="block truncate text-sm font-semibold text-text-primary">{user?.username}</span>
                     <span className="block text-xs text-text-muted">Player menu</span>
                   </span>
                   <ChevronDown className="hidden h-4 w-4 shrink-0 text-text-muted transition-transform duration-180 group-data-[state=open]:rotate-180 sm:block" aria-hidden="true" />
-                </button>
+                </Button>
               </DropdownMenuTrigger>
 
               <DropdownMenuContent

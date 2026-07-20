@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { PanelRightOpen } from 'lucide-react'
 import PageBackdrop from './PageBackdrop'
 import { TabletopRouteMasthead, type TabletopAction } from './TabletopShell'
+import type { GameActionErrorReporter } from '../types/gameFeedback'
 import {
   BottomSheet,
   BottomSheetContent,
@@ -15,6 +16,8 @@ interface GameShellProps {
   eyebrow: string
   title: string
   gameCode?: string
+  gameCodeCopyable?: boolean
+  onInviteCopyError?: GameActionErrorReporter
   statusLabel: string
   statusTone?: 'default' | 'success' | 'warning'
   onBack: () => void
@@ -34,6 +37,8 @@ export default function GameShell({
   eyebrow,
   title,
   gameCode,
+  gameCodeCopyable = false,
+  onInviteCopyError,
   statusLabel,
   statusTone = 'default',
   onBack,
@@ -57,6 +62,8 @@ export default function GameShell({
           eyebrow={eyebrow}
           title={title}
           gameCode={gameCode}
+          gameCodeCopyable={gameCodeCopyable}
+          onInviteCopyError={onInviteCopyError}
           statusLabel={statusLabel}
           statusTone={statusTone}
           onBack={onBack}
@@ -130,7 +137,7 @@ export function GameShellLayout({
       )}
 
       <BottomSheet open={isInspectorOpen} onOpenChange={setIsInspectorOpen}>
-        <BottomSheetContent>
+        <BottomSheetContent onSwipeDismiss={() => setIsInspectorOpen(false)}>
           <BottomSheetHeader>
             <BottomSheetTitle>{inspectorTitle}</BottomSheetTitle>
             <BottomSheetDescription>{inspectorDescription}</BottomSheetDescription>

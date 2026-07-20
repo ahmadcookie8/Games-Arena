@@ -1,0 +1,74 @@
+.player-avatar {
+  --player-avatar-accent: var(--action-primary-from);
+  position: relative;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 2px solid color-mix(in oklch, var(--player-avatar-accent) 78%, white);
+  border-radius: 0.72rem;
+  background:
+    linear-gradient(180deg, oklch(100% 0 0 / 0.24), transparent 42%),
+    linear-gradient(
+      145deg,
+      var(--action-primary-from),
+      var(--action-primary-to)
+    );
+  box-shadow:
+    inset 0 1px 0 oklch(100% 0 0 / 0.48),
+    0 0.2rem 0 color-mix(in oklch, var(--player-avatar-accent) 72%, black),
+    0 0.48rem 1rem color-mix(in oklch, var(--player-avatar-accent) 22%, transparent);
+  color: white;
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1;
+  text-shadow: 0 1px 1px oklch(0% 0 0 / 0.2);
+}
+
+.player-avatar--sm {
+  width: 1.85rem;
+  height: 1.85rem;
+  border-radius: 0.58rem;
+  font-size: 0.62rem;
+}
+
+.player-avatar--md {
+  width: 2.35rem;
+  height: 2.35rem;
+  font-size: 0.72rem;
+}
+
+.player-avatar--lg {
+  width: 3rem;
+  height: 3rem;
+  border-radius: 0.9rem;
+  font-size: 0.88rem;
+}
+
+.player-avatar__initials {
+  transform: translateY(-0.02rem);
+}
+
+.player-avatar__status {
+  position: absolute;
+  right: -0.18rem;
+  bottom: -0.22rem;
+  width: 0.68rem;
+  height: 0.68rem;
+  border: 2px solid var(--bg-surface);
+  border-radius: 999px;
+  background: var(--text-disabled);
+  box-shadow: 0 1px 3px oklch(0% 0 0 / 0.28);
+}
+
+.player-avatar__status--online {
+  background: var(--success);
+}
+
+.player-avatar__status--turn {
+  background: var(--warning);
+}
+
+.player-avatar__status--offline {
+  background: var(--text-disabled);
+}

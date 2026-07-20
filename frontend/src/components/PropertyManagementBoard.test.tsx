@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { Game, PropertyManagementState } from '../types/game'
 import type { User } from '../types/user'
@@ -77,37 +77,91 @@ function makeGame(): Game {
 }
 
 describe('Property Management rendered auction reliability', () => {
-  it('blocks malformed bids and preserves a valid bid when the server rejects it', async () => {
+  it('accepts a multi-digit bid without remounting and preserves it when the server rejects it', async () => {
     const user = userEvent.setup()
     const onMove = vi.fn().mockResolvedValue({ success: false, error: 'The auction changed. Bid again.' })
-    render(
+    const onSendChat = vi.fn().mockResolvedValue({ success: true })
+    const onActionError = vi.fn()
+    const game = makeGame()
+    const view = render(
       <PropertyManagementBoard
-        game={makeGame()}
+        game={game}
         user={host}
         onMove={onMove}
-        onSendChat={vi.fn().mockResolvedValue({ success: true })}
+        onSendChat={onSendChat}
+        onActionError={onActionError}
       />,
     )
 
-    const getBidInput = () => screen.getAllByRole('spinbutton', { name: /Your bid/ })[0]
-    const getBidButton = () => screen.getAllByRole('button', { name: 'Bid' })[0]
+    const bidInput = screen.getByRole('textbox', { name: /Your bid/ })
+    const bidButton = screen.getByRole('button', { name: 'Bid' })
 
-    fireEvent.change(getBidInput(), { target: { value: '100.5' } })
-    expect(getBidButton()).toBeDisabled()
-    expect(screen.getAllByText('Your bid must be a whole dollar amount.')[0]).toBeInTheDocument()
-    expect(onMove).not.toHaveBeenCalled()
+    expect(view.container.querySelectorAll('.pm-map-token.player-avatar')).toHaveLength(2)
+    expect(screen.getAllByRole('textbox', { name: /Your bid/ })).toHaveLength(1)
+    expect(bidInput).toHaveAttribute('inputmode', 'numeric')
+    expect(bidInput).toHaveAttribute('pattern', '[0-9]*')
+    expect(bidInput).toHaveAttribute('enterkeyhint', 'done')
 
-    fireEvent.change(getBidInput(), { target: { value: '501' } })
-    expect(getBidButton()).toBeDisabled()
-    expect(screen.getAllByText('You do not have enough cash for that bid.')[0]).toBeInTheDocument()
-    expect(onMove).not.toHaveBeenCalled()
+    await user.type(bidInput, '125')
+    expect(bidInput).toHaveValue('125')
+    expect(bidInput).toHaveFocus()
+    expect(bidButton).toBeEnabled()
 
-    fireEvent.change(getBidInput(), { target: { value: '125' } })
-    expect(getBidButton()).toBeEnabled()
-    await user.click(getBidButton())
+    view.rerender(
+      <PropertyManagementBoard
+        game={{ ...game, revision: (game.revision ?? 0) + 1 }}
+        user={host}
+        onMove={onMove}
+        onSendChat={onSendChat}
+        onActionError={onActionError}
+      />,
+    )
+    expect(bidInput).toHaveValue('125')
+    expect(bidInput).toHaveFocus()
+
+    await user.click(bidButton)
 
     await waitFor(() => expect(onMove).toHaveBeenCalledWith({ type: 'auctionBid', amount: 125 }))
-    expect(screen.getAllByRole('alert')[0]).toHaveTextContent('The auction changed. Bid again.')
-    expect(getBidInput()).toHaveValue(125)
+    expect(onActionError).toHaveBeenCalledWith('The auction changed. Bid again.', bidButton)
+    expect(bidInput).toHaveValue('125')
+  })
+
+  it('clears a bid after a successful pass and when the active bidder changes', async () => {
+    const user = userEvent.setup()
+    const onMove = vi.fn().mockResolvedValue({ success: true })
+    const onSendChat = vi.fn().mockResolvedValue({ success: true })
+    const game = makeGame()
+    const view = render(
+      <PropertyManagementBoard game={game} user={host} onMove={onMove} onSendChat={onSendChat} />,
+    )
+
+    const bidInput = screen.getByRole('textbox', { name: /Your bid/ })
+    await user.type(bidInput, '125')
+    await user.click(screen.getByRole('button', { name: 'Pass' }))
+    await waitFor(() => expect(bidInput).toHaveValue(''))
+
+    await user.type(bidInput, '140')
+    const guestTurn = makeAuctionState()
+    if (guestTurn.pendingAction?.type !== 'auction') throw new Error('Expected auction state')
+    guestTurn.pendingAction.auction.currentBidderIndex = 1
+    view.rerender(
+      <PropertyManagementBoard
+        game={{ ...game, revision: (game.revision ?? 0) + 1, gameState: guestTurn as unknown as Record<string, unknown> }}
+        user={host}
+        onMove={onMove}
+        onSendChat={onSendChat}
+      />,
+    )
+
+    const hostTurn = makeAuctionState()
+    view.rerender(
+      <PropertyManagementBoard
+        game={{ ...game, revision: (game.revision ?? 0) + 2, gameState: hostTurn as unknown as Record<string, unknown> }}
+        user={host}
+        onMove={onMove}
+        onSendChat={onSendChat}
+      />,
+    )
+    expect(screen.getByRole('textbox', { name: /Your bid/ })).toHaveValue('')
   })
 })

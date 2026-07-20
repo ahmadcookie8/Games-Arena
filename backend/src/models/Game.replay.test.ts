@@ -29,3 +29,18 @@ describe('Game replay descriptor', () => {
     expect(replayGame(undefined).toObject().replay).toBeUndefined()
   })
 })
+
+describe('Game coordinated rematch link', () => {
+  it('enforces at most one rematch for documents that define rematchOf', () => {
+    const rematchIndex = Game.schema.indexes().find(([fields]) => fields.rematchOf === 1)
+
+    expect(rematchIndex).toEqual([
+      { rematchOf: 1 },
+      {
+        unique: true,
+        partialFilterExpression: { rematchOf: { $type: 'objectId' } },
+        background: true,
+      },
+    ])
+  })
+})

@@ -39,7 +39,7 @@ import {
 import { useAuth } from '../hooks/useAuth'
 import { useSocket } from '../hooks/useSocket'
 import api from '../lib/api'
-import { canHostCloseGame, getCloseGamePrompt } from '../lib/gameClose'
+import { canParticipantCloseGame, getCloseGamePrompt } from '../lib/gameClose'
 import {
   MULTIPLAYER_GAMES,
   SINGLE_PLAYER_GAMES,
@@ -254,7 +254,7 @@ export default function Dashboard() {
   }
 
   function promptCloseGame(game: Game) {
-    if (!canHostCloseGame(game, user?._id)) return
+    if (!canParticipantCloseGame(game, user?._id)) return
     setModal(getCloseGameModal(game, () => {
       void confirmCloseGame(game)
     }, closeModal))
@@ -414,7 +414,7 @@ export default function Dashboard() {
                       <ActiveGameCard
                         key={game._id}
                         game={game}
-                        canClose={canHostCloseGame(game, user?._id)}
+                        canClose={canParticipantCloseGame(game, user?._id)}
                         closePending={pendingActions.has(`close:${game._id}`)}
                         onResume={() => {
                           const path = getGamePath(game)

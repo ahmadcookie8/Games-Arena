@@ -1,5 +1,4 @@
 import express from 'express'
-import { randomUUID } from 'crypto'
 import helmet from 'helmet'
 import { createServer, IncomingMessage } from 'http'
 import { isIP } from 'net'
@@ -11,9 +10,7 @@ import { errorHandler } from './middleware/errorHandler'
 import { isAllowedRequestOrigin, originMiddleware } from './middleware/origin'
 import {
   RATE_LIMIT_POLICIES,
-  acquireRedisConcurrencySlot,
   consumeRedisRateLimit,
-  releaseRedisConcurrencySlot,
 } from './middleware/rateLimit'
 import { connectMongoDB } from './utils/mongoose'
 import { getRedisClient } from './utils/redis'
@@ -21,13 +18,23 @@ import { gameService } from './services/gameService'
 import { getLeaderboard, getLeaderboardByType, getSinglePlayerLeaderboard } from './controllers/userController'
 import { getAuthTokenFromCookie, VerifiedAuthPayload } from './utils/authToken'
 import { authenticateSessionPayload, authenticateSessionToken } from './services/sessionAuthService'
-import { createGameStateEnvelope, setSocketServer } from './services/socketNotifier'
+import {
+  createGameStateEnvelope,
+  releaseActiveGameConnectionLeases,
+  setSocketServer,
+} from './services/socketNotifier'
 import { AuthPayload } from './types/api'
 import { AppError, NotFoundError } from './utils/errors'
-import { joinRoomEventSchema, makeMoveEventSchema, sendChatMessageEventSchema } from './utils/validators'
+import {
+  joinRoomEventSchema,
+  leaveRoomEventSchema,
+  makeMoveEventSchema,
+  sendChatMessageEventSchema,
+} from './utils/validators'
 import { logSecurityEvent, startResourcePressureMonitor } from './utils/securityLogger'
 import { startStatsReconciliationWorker } from './services/statsReconciliationWorker'
 import { gameUserRoom, userRoom } from './utils/socketRooms'
+import { activeGameConnectionLeases } from './services/activeGameConnectionLeases'
 
 import authRoutes from './routes/auth'
 import gameRoutes from './routes/games'
@@ -36,10 +43,8 @@ import healthRoutes from './routes/health'
 
 interface AuthenticatedHandshakeRequest extends IncomingMessage {
   gamesArenaUser?: VerifiedAuthPayload
-  gamesArenaSlotId?: string
 }
 
-const SOCKET_SLOT_TTL_SECONDS = 2 * 60
 const presenceTransitionTails = new Map<string, Promise<void>>()
 
 export interface SocketSuccess<T> {
@@ -82,8 +87,7 @@ setSocketServer(io)
 io.engine.on('connection', (engineSocket) => {
   const request = engineSocket.request as AuthenticatedHandshakeRequest
   const user = request.gamesArenaUser
-  const slotId = request.gamesArenaSlotId
-  if (!user || !slotId) {
+  if (!user) {
     engineSocket.close(true)
     return
   }
@@ -98,29 +102,15 @@ io.engine.on('connection', (engineSocket) => {
   const heartbeat = setInterval(() => {
     if (heartbeatRunning || closed) return
     heartbeatRunning = true
-    void Promise.allSettled([
-      acquireRedisConcurrencySlot('socket-user', user.userId, slotId, 5, SOCKET_SLOT_TTL_SECONDS),
-      authenticateSessionPayload(user),
-    ])
-      .then(([slotResult, sessionResult]) => {
-        if (closed) {
-          if (slotResult.status === 'fulfilled' && slotResult.value.allowed) {
-            void releaseRedisConcurrencySlot('socket-user', user.userId, slotId)
-              .catch(() => logSecurityEvent('socket.connection_slot_release_failed', { userId: user.userId }, 'error'))
-          }
-          return
-        }
-        if (
-          slotResult.status === 'rejected'
-          || sessionResult.status === 'rejected'
-          || !slotResult.value.allowed
-          || !sessionResult.value
-        ) {
+    void authenticateSessionPayload(user)
+      .then((sessionUser) => {
+        if (closed) return
+        if (!sessionUser) {
           logSecurityEvent('socket.engine_session_rejected', { userId: user.userId, engineSocketId: engineSocket.id })
           engineSocket.close(true)
           return
         }
-        request.gamesArenaUser = sessionResult.value
+        request.gamesArenaUser = sessionUser
       })
       .catch(() => {
         logSecurityEvent('socket.engine_heartbeat_failed', { userId: user.userId, engineSocketId: engineSocket.id }, 'error')
@@ -134,8 +124,6 @@ io.engine.on('connection', (engineSocket) => {
     closed = true
     clearTimeout(expiryTimer)
     clearInterval(heartbeat)
-    void releaseRedisConcurrencySlot('socket-user', user.userId, slotId)
-      .catch(() => logSecurityEvent('socket.connection_slot_release_failed', { userId: user.userId }, 'error'))
   })
 })
 
@@ -178,21 +166,7 @@ async function authorizeHandshake(request: AuthenticatedHandshakeRequest): Promi
     throw new Error('Unauthorized')
   }
 
-  const slotId = randomUUID()
-  let slot
-  try {
-    slot = await acquireRedisConcurrencySlot('socket-user', user.userId, slotId, 5, SOCKET_SLOT_TTL_SECONDS)
-  } catch {
-    logSecurityEvent('socket.connection_limit_unavailable', { userId: user.userId }, 'error')
-    throw new Error('Service unavailable')
-  }
-  if (!slot.allowed) {
-    logSecurityEvent('socket.connection_limit_rejected', { userId: user.userId })
-    throw new Error('Too many active connections')
-  }
-
   request.gamesArenaUser = user
-  request.gamesArenaSlotId = slotId
 }
 
 io.use((socket, next) => {
@@ -205,19 +179,12 @@ io.use((socket, next) => {
     // are distinct steps. Revalidate here so logout, deactivation, revocation,
     // or token expiry in that gap cannot create a live namespace connection.
     const user = await authenticateSessionToken(token)
-    if (!user || !request.gamesArenaSlotId) throw new Error('Unauthorized')
+    if (!user) throw new Error('Unauthorized')
 
     socket.data.user = user
     next()
   })().catch(() => {
     logSecurityEvent('socket.connection_rejected', { socketId: socket.id })
-    const userId = request.gamesArenaUser?.userId
-    const slotId = request.gamesArenaSlotId
-    if (userId && slotId) {
-      void releaseRedisConcurrencySlot('socket-user', userId, slotId)
-        .catch(() => logSecurityEvent('socket.connection_slot_release_failed', { userId }, 'error'))
-      request.gamesArenaSlotId = undefined
-    }
     next(new Error('Unauthorized'))
   })
 })
@@ -245,17 +212,45 @@ io.on('connection', (socket) => {
   let joinedGameId: string | null = null
   let roomTransition: Promise<void> = Promise.resolve()
   let disconnecting = false
-  const clientEvents = new Set(['joinRoom', 'makeMove', 'sendChatMessage'])
+  let leaseHeartbeatRunning = false
+  const clientEvents = new Set(['joinRoom', 'leaveRoom', 'makeMove', 'sendChatMessage'])
   const sessionExpiryTimer = setTimeout(() => {
     logSecurityEvent('socket.session_expired', { userId: user.userId, socketId: socket.id })
     socket.disconnect(true)
   }, getSocketSessionExpiryDelay(user))
   sessionExpiryTimer.unref()
+  const leaseHeartbeat = setInterval(() => {
+    if (leaseHeartbeatRunning || disconnecting || !activeGameConnectionLeases.has(socket.id)) return
+    leaseHeartbeatRunning = true
+    void activeGameConnectionLeases.refresh(socket.id)
+      .then((retained) => {
+        if (retained || disconnecting) return
+        logSecurityEvent('socket.active_game_connection_limit_rejected', {
+          userId: user.userId,
+          socketId: socket.id,
+        })
+        socket.disconnect(true)
+      })
+      .catch(() => {
+        if (disconnecting) return
+        logSecurityEvent('socket.active_game_connection_heartbeat_failed', {
+          userId: user.userId,
+          socketId: socket.id,
+        }, 'error')
+        socket.disconnect(true)
+      })
+      .finally(() => { leaseHeartbeatRunning = false })
+  }, 60 * 1000)
+  leaseHeartbeat.unref()
 
   socket.use((packet, next) => {
     void (async () => {
-      await enforceSocketRateLimit(user.userId, RATE_LIMIT_POLICIES.socketEventUser)
       const event = packet[0]
+      // Cleanup must remain available after the general event budget is
+      // exhausted; otherwise an active Redis lease could be stranded until TTL.
+      if (event !== 'leaveRoom') {
+        await enforceSocketRateLimit(user.userId, RATE_LIMIT_POLICIES.socketEventUser)
+      }
       if (typeof event !== 'string' || !clientEvents.has(event)) {
         logSecurityEvent('socket.unknown_event', { socketEvent: typeof event === 'string' ? event : 'invalid', socketId: socket.id, userId: user.userId })
         const maybeCallback = packet[packet.length - 1]
@@ -298,23 +293,46 @@ io.on('connection', (socket) => {
         }
       }
 
-      await socket.join(gameUserRoom(gameId, user.userId))
-      joinedGameId = gameId
-      if (disconnecting || !socket.connected) {
-        joinedGameId = null
-        await socket.leave(gameUserRoom(gameId, user.userId))
-        throw new AppError('Connection closed', 400, 'CONNECTION_CLOSED')
-      }
-
       try {
+        if (authorizedGame.status === 'active') {
+          try {
+            await activeGameConnectionLeases.activate(socket.id, user.userId, gameId)
+          } catch (error) {
+            if (error instanceof AppError && error.code === 'SOCKET_CONNECTION_LIMIT') {
+              logSecurityEvent('socket.active_game_connection_limit_rejected', {
+                userId: user.userId,
+                socketId: socket.id,
+                gameId,
+              })
+            } else {
+              logSecurityEvent('socket.active_game_connection_limit_unavailable', {
+                userId: user.userId,
+                socketId: socket.id,
+                gameId,
+              }, 'error')
+            }
+            throw error
+          }
+        } else {
+          await releaseSocketActiveGameLease(socket.id, user.userId)
+        }
+
+        await socket.join(gameUserRoom(gameId, user.userId))
+        joinedGameId = gameId
+        if (disconnecting || !socket.connected) {
+          throw new AppError('Connection closed', 400, 'CONNECTION_CLOSED')
+        }
+
         const game = await withPresenceTransition(gameId, user.userId, () => (
           gameService.setPlayerConnection(gameId, user.userId, true)
         ))
         if (!game) throw new NotFoundError('Game')
+        if (game.status !== 'active') await releaseSocketActiveGameLease(socket.id, user.userId)
         return createGameStateEnvelope(game, user.userId)
       } catch (error) {
         joinedGameId = null
         await socket.leave(gameUserRoom(gameId, user.userId))
+        await releaseSocketActiveGameLease(socket.id, user.userId)
         try {
           await markPlayerDisconnectedIfLastSocket(gameId, user.userId)
         } catch {
@@ -327,11 +345,32 @@ io.on('connection', (socket) => {
     return transition
   })
 
+  registerSocketEvent(socket, 'leaveRoom', leaveRoomEventSchema, ({ gameId }) => {
+    const transition = roomTransition.then(async () => {
+      // Route cleanups can arrive after another navigation. A stale or repeated
+      // leave must never evict the socket from its newer room.
+      if (joinedGameId !== gameId) return { gameId, left: false }
+
+      joinedGameId = null
+      await socket.leave(gameUserRoom(gameId, user.userId))
+      await releaseSocketActiveGameLease(socket.id, user.userId)
+      try {
+        await markPlayerDisconnectedIfLastSocket(gameId, user.userId)
+      } catch {
+        logSecurityEvent('socket.explicit_leave_state_failed', { gameId, userId: user.userId }, 'error')
+      }
+      return { gameId, left: true }
+    })
+    roomTransition = transition.then(() => undefined, () => undefined)
+    return transition
+  })
+
   registerSocketEvent(socket, 'makeMove', makeMoveEventSchema, async ({ gameId, move }) => {
     await enforceSocketRateLimit(user.userId, RATE_LIMIT_POLICIES.socketMoveUser)
     if (joinedGameId !== gameId) throw new AppError('Join the game before making a move', 403, 'JOIN_GAME_FIRST')
 
     const game = await gameService.makeMove(gameId, user.userId, move)
+    if (game.status !== 'active') await releaseActiveGameConnectionLeases(gameId)
     return createGameStateEnvelope(game, user.userId)
   })
 
@@ -346,7 +385,9 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     disconnecting = true
     clearTimeout(sessionExpiryTimer)
+    clearInterval(leaseHeartbeat)
     void roomTransition.then(async () => {
+      await releaseSocketActiveGameLease(socket.id, user.userId)
       if (joinedGameId) await markPlayerDisconnectedIfLastSocket(joinedGameId, user.userId)
     })
       .catch(() => logSecurityEvent('socket.disconnect_state_failed', { userId: user.userId }, 'error'))
@@ -487,6 +528,16 @@ async function markPlayerDisconnectedIfLastSocket(gameId: string, userId: string
     if (hasLiveUserSocketInGame(gameId, userId)) return
     await gameService.setPlayerConnection(gameId, userId, false)
   })
+}
+
+async function releaseSocketActiveGameLease(socketId: string, userId: string): Promise<void> {
+  try {
+    await activeGameConnectionLeases.releaseSocket(socketId)
+  } catch {
+    // Local ownership is removed before Redis I/O. The Redis member remains
+    // bounded by its 120-second TTL if the backend is temporarily unavailable.
+    logSecurityEvent('socket.active_game_connection_release_failed', { userId, socketId }, 'error')
+  }
 }
 
 async function withPresenceTransition<T>(gameId: string, userId: string, operation: () => Promise<T>): Promise<T> {

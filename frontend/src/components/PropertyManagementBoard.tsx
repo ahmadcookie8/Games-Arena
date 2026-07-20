@@ -19,6 +19,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { Game, PMAuctionState, PropertyManagementState } from '../types/game'
+import type { GameActionErrorReporter } from '../types/gameFeedback'
 import { User } from '../types/user'
 import {
   BOARD_SQUARES,
@@ -46,7 +47,9 @@ import {
 import { multiplayerActions, type PropertyManagementMove } from '../lib/multiplayerActions'
 import GameChat from './GameChat'
 import Modal from './Modal'
+import PlayerAvatar from './PlayerAvatar'
 import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs, type TabletopTab } from './TabletopShell'
+import { Button } from './ui'
 import './property-management.css'
 
 type InspectorTab = 'tile' | 'portfolio' | 'players' | 'chat'
@@ -56,6 +59,7 @@ interface Props {
   user: User | null
   onMove: (move: PropertyManagementMove) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
   onSendChat: (text: string) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
+  onActionError?: GameActionErrorReporter
 }
 
 const EMPTY_PLAYER_ORDER: string[] = []
@@ -144,19 +148,13 @@ function getMapLabel(square: PMSquareDef): string {
   return labels[square.name] ?? square.name.replace(/\s+(Street|Avenue|Road|Lane|Drive|Way|Court|Square|Rise|Gate|Field|Junction|Close|Estate|Terrace|Boulevard|Crescent)$/i, '')
 }
 
-function getInitials(username: string): string {
-  const parts = username.trim().split(/[\s_-]+/).filter(Boolean)
-  if (parts.length > 1) return `${parts[0][0]}${parts[1][0]}`.toUpperCase()
-  return username.slice(0, 2).toUpperCase()
-}
-
-export default function PropertyManagementBoard({ game, user, onMove, onSendChat }: Props) {
+export default function PropertyManagementBoard({ game, user, onMove, onSendChat, onActionError }: Props) {
   const state = game.gameState as unknown as PropertyManagementState
+  const isDesktopLayout = useTabletopDesktopLayout()
   const [selectedSquareIndex, setSelectedSquareIndex] = useState<number | null>(null)
   const [activeTab, setActiveTab] = useState<InspectorTab>('tile')
   const [sheetOpen, setSheetOpen] = useState(false)
   const [auctionBidAmount, setAuctionBidAmount] = useState('')
-  const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [showBankruptcyModal, setShowBankruptcyModal] = useState(false)
   const [displayDice, setDisplayDice] = useState<[number, number] | null>(state.dice ?? null)
@@ -165,6 +163,11 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
   const lastDiceKeyRef = useRef(getDiceKey(state.dice))
   const hasProcessedInitialDiceRef = useRef(false)
   const previousPositionsRef = useRef<Record<string, number>>({})
+  const activeAuction = state.pendingAction?.type === 'auction' ? state.pendingAction.auction : null
+  const auctionDraftKey = activeAuction
+    ? `${activeAuction.squareIndex}:${activeAuction.activeUserIds[activeAuction.currentBidderIndex] ?? 'none'}`
+    : 'none'
+  const previousAuctionDraftKeyRef = useRef(auctionDraftKey)
 
   const myId = user?._id ?? ''
   const playerOrder = state.playerOrder ?? EMPTY_PLAYER_ORDER
@@ -175,6 +178,15 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
   const currentPlayer = state.playerStates[state.currentPlayerUserId]
   const currentPlayerName = currentPlayer?.username ?? 'Unknown'
   const focusedSquareIndex = selectedSquareIndex ?? myPlayer?.position ?? currentPlayer?.position ?? 0
+
+  useEffect(() => {
+    if (previousAuctionDraftKeyRef.current !== auctionDraftKey) setAuctionBidAmount('')
+    previousAuctionDraftKeyRef.current = auctionDraftKey
+  }, [auctionDraftKey])
+
+  useEffect(() => {
+    if (isDesktopLayout) setSheetOpen(false)
+  }, [isDesktopLayout])
 
   useEffect(() => {
     const nextDiceKey = getDiceKey(state.dice)
@@ -215,17 +227,17 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
 
   async function act(move: PropertyManagementMove): Promise<boolean> {
     if (loading) return false
-    setError(null)
+    const restoreFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setLoading(true)
     try {
       const result = await onMove(move)
       if (!result.success) {
-        if (!result.handledGlobally) setError(result.error ?? 'Action failed')
+        if (!result.handledGlobally) onActionError?.(result.error ?? 'Action failed', restoreFocusTo)
         return false
       }
       return true
     } catch {
-      setError('Network error')
+      onActionError?.('The action could not reach the game server. Try again.', restoreFocusTo)
       return false
     } finally {
       setLoading(false)
@@ -254,7 +266,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
     setSheetOpen(true)
   }
 
-  function ActionPanel({ compact = false }: { compact?: boolean }) {
+  function renderActionPanel(compact = false) {
     const mode = resolvePropertyActionMode(state.phase, state.turnPhase, isMyTurn)
     const pending = state.pendingAction
 
@@ -272,9 +284,9 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
       return (
         <ActionSurface compact={compact} eyebrow="Private table" title="Waiting room">
           <p className="text-sm leading-6 text-text-secondary">
-            Invite up to eight players with code <span className="font-mono font-bold text-accent">{game.gameCode}</span>.
+            Invite up to eight players with the code shown above the board.
           </p>
-          <div className="mt-4"><PlayerList compact /></div>
+          <div className="mt-4">{renderPlayerList(true)}</div>
           {isHost ? (
             <PrimaryButton
               disabled={playerOrder.length < 2 || loading}
@@ -285,7 +297,6 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
           ) : (
             <p className="mt-4 text-sm text-text-muted">The host will start when everyone is ready.</p>
           )}
-          {error && <ErrorBanner message={error} />}
         </ActionSurface>
       )
     }
@@ -294,7 +305,6 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
       return (
         <ActionSurface compact={compact} eyebrow="Current action" title={`${currentPlayerName} is deciding`}>
           <p className="text-sm text-text-secondary">The table will update as soon as their move is complete.</p>
-          {error && <ErrorBanner message={error} />}
         </ActionSurface>
       )
     }
@@ -302,8 +312,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
     if (mode === 'auction' && pending?.type === 'auction') {
       return (
         <ActionSurface compact={compact} eyebrow="Live auction" title={BOARD_SQUARES[pending.auction.squareIndex]?.name ?? 'Property'} tone="warning">
-          <AuctionBlock auction={pending.auction} />
-          {error && <ErrorBanner message={error} />}
+          {renderAuctionBlock(pending.auction, compact)}
         </ActionSurface>
       )
     }
@@ -321,7 +330,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
             </>
           )}
 
-          {mode === 'buyOrAuction' && pending?.type === 'buyOrAuction' && <BuyOrAuction squareIndex={pending.squareIndex} />}
+          {mode === 'buyOrAuction' && pending?.type === 'buyOrAuction' && renderBuyOrAuction(pending.squareIndex)}
 
           {(mode === 'preRoll' || mode === 'postRoll') && (
             <>
@@ -338,23 +347,18 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
               )}
               {mode === 'preRoll' && <PrimaryButton onClick={() => void act(multiplayerActions.propertyManagement.rollDice())} disabled={loading}>Roll the dice</PrimaryButton>}
               {mode === 'postRoll' && <PrimaryButton onClick={() => void act(multiplayerActions.propertyManagement.endTurn())} disabled={loading}>End turn</PrimaryButton>}
-              <button
-                disabled={loading}
-                onClick={() => setShowBankruptcyModal(true)}
-                className="pm-danger-link"
-              >
+              <Button variant="danger" fullWidth disabled={loading} onClick={() => setShowBankruptcyModal(true)} className="mt-3">
                 Declare bankruptcy
-              </button>
+              </Button>
             </>
           )}
 
-          {error && <ErrorBanner message={error} />}
         </div>
       </ActionSurface>
     )
   }
 
-  function BuyOrAuction({ squareIndex }: { squareIndex: number }) {
+  function renderBuyOrAuction(squareIndex: number) {
     const square = BOARD_SQUARES[squareIndex]
     const canAfford = (myPlayer?.money ?? 0) >= (square?.price ?? 0)
 
@@ -372,10 +376,12 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
     )
   }
 
-  function AuctionBlock({ auction }: { auction: PMAuctionState }) {
+  function renderAuctionBlock(auction: PMAuctionState, compact: boolean) {
     const highBidder = auction.highBidderUserId ? state.playerStates[auction.highBidderUserId]?.username : null
     const isBidder = auction.activeUserIds[auction.currentBidderIndex] === myId
     const bidValidation = validatePropertyAuctionBid(auctionBidAmount, auction.currentBid, myPlayer?.money ?? 0)
+    const bidInputId = `property-auction-bid-${compact ? 'mobile' : 'desktop'}`
+    const bidHelpId = `${bidInputId}-help`
 
     return (
       <div className="space-y-3">
@@ -385,25 +391,27 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
         </p>
         {isBidder ? (
           <div className="space-y-2">
-            <label className="sr-only" htmlFor="property-auction-bid">Your bid</label>
+            <label className="sr-only" htmlFor={bidInputId}>Your bid</label>
             <input
-              id="property-auction-bid"
-              type="number"
-              step={1}
+              id={bidInputId}
+              type="text"
               inputMode="numeric"
-              min={auction.currentBid + 1}
-              max={myPlayer?.money ?? 0}
+              pattern="[0-9]*"
+              enterKeyHint="done"
               value={auctionBidAmount}
-              onChange={(event) => setAuctionBidAmount(event.target.value)}
+              onChange={(event) => {
+                if (/^\d*$/.test(event.target.value)) setAuctionBidAmount(event.target.value)
+              }}
               placeholder={`Minimum ${formatMoney(auction.currentBid + 1)}`}
               className="pm-input"
-              aria-describedby="property-auction-bid-help"
+              aria-invalid={Boolean(auctionBidAmount && !bidValidation.valid) || undefined}
+              aria-describedby={bidHelpId}
             />
-            <p id="property-auction-bid-help" className={`text-xs ${auctionBidAmount && !bidValidation.valid ? 'text-danger-text' : 'text-text-muted'}`}>
+            <p id={bidHelpId} className={`text-xs ${auctionBidAmount && !bidValidation.valid ? 'text-danger-text' : 'text-text-muted'}`}>
               {auctionBidAmount && !bidValidation.valid ? bidValidation.error : `Available cash: ${formatMoney(myPlayer?.money ?? 0)}`}
             </p>
             <div className="grid grid-cols-2 gap-2">
-              <button
+              <Button
                 disabled={!bidValidation.valid || loading}
                 onClick={() => {
                   if (!bidValidation.valid) return
@@ -414,14 +422,19 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
                 className="pm-primary-button mt-0"
               >
                 Bid
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="secondary"
                 disabled={loading}
-                onClick={() => void act(multiplayerActions.propertyManagement.auctionPass())}
+                onClick={() => {
+                  void act(multiplayerActions.propertyManagement.auctionPass()).then((success) => {
+                    if (success) setAuctionBidAmount('')
+                  })
+                }}
                 className="pm-secondary-button mt-0"
               >
                 Pass
-              </button>
+              </Button>
             </div>
           </div>
         ) : (
@@ -433,7 +446,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
     )
   }
 
-  function TileInspector() {
+  function renderTileInspector() {
     const square = BOARD_SQUARES[focusedSquareIndex] ?? BOARD_SQUARES[0]
     const ownership = state.properties[String(square.index)]
     const playersHere = playerOrder
@@ -465,7 +478,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
     )
   }
 
-  function PortfolioInspector() {
+  function renderPortfolioInspector() {
     const jailCards = myPlayer?.getOutOfJailFreeCards ?? 0
     const properties = Object.entries(state.properties)
       .filter(([, ownership]) => ownership.ownerId === myId)
@@ -541,7 +554,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
     )
   }
 
-  function PlayerList({ compact = false }: { compact?: boolean }) {
+  function renderPlayerList(compact = false) {
     return (
       <div className="divide-y divide-border/50">
         {playerSummary.map((player, index) => {
@@ -578,12 +591,12 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
     )
   }
 
-  function InspectorContent() {
+  function renderInspectorContent() {
     switch (activeTab) {
-      case 'portfolio': return <PortfolioInspector />
-      case 'players': return <PlayerList />
-      case 'chat': return <GameChat messages={game.chatMessages || []} currentUserId={myId} onSend={onSendChat} variant="embedded" />
-      default: return <TileInspector />
+      case 'portfolio': return renderPortfolioInspector()
+      case 'players': return renderPlayerList()
+      case 'chat': return <GameChat messages={game.chatMessages || []} currentUserId={myId} onSend={onSendChat} onError={onActionError} variant="embedded" />
+      default: return renderTileInspector()
     }
   }
 
@@ -596,7 +609,7 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
             <h2 className="pm-display-title mt-2 text-3xl text-text-primary">Gather around the table</h2>
             <p className="mt-3 text-sm leading-6 text-text-secondary">Build a portfolio, collect rent, and stay solvent until the final deed changes hands.</p>
           </div>
-          <div className="mt-6"><ActionPanel /></div>
+          <div className="mt-6">{renderActionPanel()}</div>
         </div>
         <BankruptcyModal isOpen={showBankruptcyModal} onClose={() => setShowBankruptcyModal(false)} onConfirm={confirmBankruptcy} />
       </div>
@@ -644,29 +657,36 @@ export default function PropertyManagementBoard({ game, user, onMove, onSendChat
           onFocusSquare={focusSquare}
         />
 
-        <aside className="pm-desktop-rail" aria-label="Game controls and information">
-          <ActionPanel />
-          <div className="pm-inspector-surface">
-            <TabletopTabs tabs={INSPECTOR_TABS} activeTab={activeTab} onSelect={setActiveTab} ariaLabel="Game information" idBase="pm-desktop-inspector" />
-            <div id="pm-desktop-inspector-panel" role="tabpanel" aria-labelledby={`pm-desktop-inspector-tab-${activeTab}`} className="pm-inspector-content"><InspectorContent /></div>
+        {isDesktopLayout && (
+          <aside className="pm-desktop-rail" aria-label="Game controls and information">
+            {renderActionPanel()}
+            <div className="pm-inspector-surface">
+              <TabletopTabs tabs={INSPECTOR_TABS} activeTab={activeTab} onSelect={setActiveTab} ariaLabel="Game information" idBase="pm-desktop-inspector" />
+              <div id="pm-desktop-inspector-panel" role="tabpanel" aria-labelledby={`pm-desktop-inspector-tab-${activeTab}`} className="pm-inspector-content">{renderInspectorContent()}</div>
+            </div>
+          </aside>
+        )}
+      </div>
+
+      {!isDesktopLayout && (
+        <>
+          <div className="pm-mobile-dock">
+            {renderActionPanel(true)}
+            <TabletopDockButtons tabs={INSPECTOR_TABS} activeTab={activeTab} onSelect={openInspector} ariaLabel="Open game information" isOpen={sheetOpen} />
           </div>
-        </aside>
-      </div>
 
-      <div className="pm-mobile-dock">
-        <ActionPanel compact />
-        <TabletopDockButtons tabs={INSPECTOR_TABS} activeTab={activeTab} onSelect={openInspector} ariaLabel="Open game information" isOpen={sheetOpen} />
-      </div>
-
-      <TabletopBottomSheet
-        isOpen={sheetOpen}
-        title={INSPECTOR_TABS.find((tab) => tab.id === activeTab)?.label ?? 'Game details'}
-        onClose={() => setSheetOpen(false)}
-        idBase="pm-inspector-sheet"
-      >
-        <TabletopTabs tabs={INSPECTOR_TABS} activeTab={activeTab} onSelect={setActiveTab} ariaLabel="Game information" idBase="pm-sheet-tabs" />
-        <div id="pm-sheet-tabs-panel" role="tabpanel" aria-labelledby={`pm-sheet-tabs-tab-${activeTab}`} className="mt-5"><InspectorContent /></div>
-      </TabletopBottomSheet>
+          <TabletopBottomSheet
+            isOpen={sheetOpen}
+            title={INSPECTOR_TABS.find((tab) => tab.id === activeTab)?.label ?? 'Game details'}
+            onClose={() => setSheetOpen(false)}
+            idBase="pm-inspector-sheet"
+            contentKey={activeTab}
+          >
+            <TabletopTabs tabs={INSPECTOR_TABS} activeTab={activeTab} onSelect={setActiveTab} ariaLabel="Game information" idBase="pm-sheet-tabs" />
+            <div id="pm-sheet-tabs-panel" role="tabpanel" aria-labelledby={`pm-sheet-tabs-tab-${activeTab}`} className="mt-5">{renderInspectorContent()}</div>
+          </TabletopBottomSheet>
+        </>
+      )}
 
       <BankruptcyModal isOpen={showBankruptcyModal} onClose={() => setShowBankruptcyModal(false)} onConfirm={confirmBankruptcy} />
     </div>
@@ -772,16 +792,16 @@ function GameMap({
           <p className="text-sm font-bold text-text-primary" aria-live="polite">{Math.round(zoom * 100)}% zoom</p>
         </div>
         <div className="pm-camera-controls">
-          <button type="button" onClick={() => changeZoom(stepPropertyBoardZoom(zoom, -1))} disabled={zoom <= PROPERTY_BOARD_MIN_ZOOM} aria-label="Zoom out">
+          <button type="button" className="tactile-button tactile-button--secondary" onClick={() => changeZoom(stepPropertyBoardZoom(zoom, -1))} disabled={zoom <= PROPERTY_BOARD_MIN_ZOOM} aria-label="Zoom out">
             <Minus className="h-4 w-4" />
           </button>
-          <button type="button" onClick={() => changeZoom(stepPropertyBoardZoom(zoom, 1))} disabled={zoom >= PROPERTY_BOARD_MAX_ZOOM} aria-label="Zoom in">
+          <button type="button" className="tactile-button tactile-button--secondary" onClick={() => changeZoom(stepPropertyBoardZoom(zoom, 1))} disabled={zoom >= PROPERTY_BOARD_MAX_ZOOM} aria-label="Zoom in">
             <Plus className="h-4 w-4" />
           </button>
-          <button type="button" className="pm-camera-action-button" onClick={fitBoard} aria-label="Fit whole board">
+          <button type="button" className="tactile-button tactile-button--secondary pm-camera-action-button" onClick={fitBoard} aria-label="Fit whole board">
             <Maximize2 className="h-4 w-4" /><span>Fit</span>
           </button>
-          <button type="button" className="pm-camera-action-button" onClick={() => centerSquare(myPosition ?? selectedSquareIndex)} aria-label="Center on my tile">
+          <button type="button" className="tactile-button tactile-button--secondary pm-camera-action-button" onClick={() => centerSquare(myPosition ?? selectedSquareIndex)} aria-label="Center on my tile">
             <MapPin className="h-4 w-4" /><span>My tile</span>
           </button>
         </div>
@@ -917,14 +937,15 @@ function TokenCluster({ squareIndex, state, playerOrder }: {
       {tokens.slice(0, 3).map((id) => {
         const player = state.playerStates[id]
         return (
-          <span
+          <PlayerAvatar
             key={id}
+            name={player?.username ?? '?'}
+            accent={PLAYER_COLORS[playerOrder.indexOf(id) % PLAYER_COLORS.length]}
+            size="sm"
             className="pm-map-token"
-            style={{ backgroundColor: PLAYER_COLORS[playerOrder.indexOf(id) % PLAYER_COLORS.length] }}
+            ariaLabel={`${player?.username ?? 'Player'} token`}
             title={player?.username}
-          >
-            {getInitials(player?.username ?? '?')}
-          </span>
+          />
         )
       })}
       {tokens.length > 3 && <span className="pm-map-token pm-map-token--more">+{tokens.length - 3}</span>}
@@ -1008,18 +1029,14 @@ function DetailItem({ label, value }: { label: string; value: string }) {
 }
 
 function PlayerToken({ username, color, size = 'md' }: { username: string; color: string; size?: 'sm' | 'md' | 'lg' }) {
-  return (
-    <span className={`pm-player-token pm-player-token--${size}`} style={{ '--pm-player-color': color } as React.CSSProperties} aria-hidden="true">
-      {getInitials(username)}
-    </span>
-  )
+  return <PlayerAvatar name={username} accent={color} size={size} />
 }
 
 function PlayerPill({ playerId, username, playerOrder }: { playerId: string; username: string; playerOrder: string[] }) {
   const color = PLAYER_COLORS[Math.max(0, playerOrder.indexOf(playerId)) % PLAYER_COLORS.length]
   return (
     <span className="pm-player-pill">
-      <span style={{ backgroundColor: color }} />
+      <PlayerAvatar name={username} accent={color} size="sm" />
       {username}
     </span>
   )
@@ -1030,19 +1047,15 @@ function DeedBadge({ children }: { children: React.ReactNode }) {
 }
 
 function PrimaryButton({ children, disabled, onClick }: { children: React.ReactNode; disabled?: boolean; onClick: () => void }) {
-  return <button disabled={disabled} onClick={onClick} className="pm-primary-button">{children}</button>
+  return <Button fullWidth disabled={disabled} onClick={onClick} className="pm-primary-button">{children}</Button>
 }
 
 function SecondaryButton({ children, disabled, onClick }: { children: React.ReactNode; disabled?: boolean; onClick: () => void }) {
-  return <button disabled={disabled} onClick={onClick} className="pm-secondary-button">{children}</button>
+  return <Button fullWidth variant="secondary" disabled={disabled} onClick={onClick} className="pm-secondary-button">{children}</Button>
 }
 
 function SmallButton({ children, disabled, onClick }: { children: React.ReactNode; disabled?: boolean; onClick: () => void }) {
-  return <button disabled={disabled} onClick={onClick} className="pm-small-button">{children}</button>
-}
-
-function ErrorBanner({ message }: { message: string }) {
-  return <div className="pm-inline-notice pm-inline-notice--danger mt-3" role="alert">{message}</div>
+  return <Button size="sm" variant="secondary" disabled={disabled} onClick={onClick} className="pm-small-button">{children}</Button>
 }
 
 function BankruptcyModal({ isOpen, onClose, onConfirm }: { isOpen: boolean; onClose: () => void; onConfirm: () => void }) {
@@ -1135,6 +1148,22 @@ function usePrefersReducedMotion(): boolean {
   }, [])
 
   return prefersReducedMotion
+}
+
+function useTabletopDesktopLayout(): boolean {
+  const [isDesktop, setIsDesktop] = useState(() => (
+    typeof window !== 'undefined' && window.matchMedia('(min-width: 1120px)').matches
+  ))
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(min-width: 1120px)')
+    const handleChange = (event: MediaQueryListEvent) => setIsDesktop(event.matches)
+    setIsDesktop(mediaQuery.matches)
+    mediaQuery.addEventListener('change', handleChange)
+    return () => mediaQuery.removeEventListener('change', handleChange)
+  }, [])
+
+  return isDesktop
 }
 
 const DIE_TRANSFORMS: Record<number, string> = {

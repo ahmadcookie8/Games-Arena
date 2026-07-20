@@ -6,11 +6,11 @@ export interface CloseGamePrompt {
   message: string
 }
 
-export function canHostCloseGame(game: Game, currentUserId?: string): boolean {
+export function canParticipantCloseGame(game: Game, currentUserId?: string): boolean {
   return Boolean(
     currentUserId
       && game.status === 'active'
-      && game.players[0]?.userId === currentUserId,
+      && game.players.some((player) => player.userId === currentUserId),
   )
 }
 

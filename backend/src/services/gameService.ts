@@ -25,6 +25,7 @@ import {
   emitGamesChanged,
   emitMoveMade,
   emitPlayerPresenceChanged,
+  releaseActiveGameConnectionLeases,
 } from './socketNotifier'
 import { userService } from './userService'
 import { logSecurityEvent } from '../utils/securityLogger'
@@ -48,6 +49,8 @@ const GAME_ID_PATTERN = /^[a-f0-9]{24}$/
 const MAX_PERSISTED_MOVE_HISTORY = 500
 const REPLAY_CLOCK_SKEW_MS = 2_000
 const GAMEPLAY_SAVE_ATTEMPTS = 4
+const REMATCH_LOCK_ATTEMPTS = 20
+const MAX_ACTIVE_GAMES_PER_USER = 20
 const PUBLISHED_MULTIPLAYER_GAME_TYPES = new Set<GameType>([
   'ticTacToe',
   'wisecracker',
@@ -72,6 +75,16 @@ async function createGameWithUniqueCode(attributes: Record<string, unknown>): Pr
     }
   }
   throw new AppError('Could not allocate a game code', 503, 'GAME_CODE_UNAVAILABLE')
+}
+
+async function assertActiveGameCapacity(userId: string, message: string): Promise<void> {
+  const activeGames = await Game.countDocuments({
+    'players.userId': userId,
+    status: 'active',
+  })
+  if (activeGames >= MAX_ACTIVE_GAMES_PER_USER) {
+    throw new AppError(message, 429, 'ACTIVE_GAME_LIMIT')
+  }
 }
 
 function getInitialState(gameType: GameType, hostUserId: string, hostUsername?: string): unknown {
@@ -426,7 +439,7 @@ class GameService {
     }
     // Minimal model mocks used by unit tests do not expose countDocuments. The
     // production branch serializes count + create so concurrent requests cannot
-    // both pass the 20-active-game guard.
+    // both pass the active-game membership guard.
     if (typeof (Game as unknown as { countDocuments?: unknown }).countDocuments !== 'function') {
       return this.createMultiplayerGame(userId, username, gameType)
     }
@@ -442,11 +455,7 @@ class GameService {
     if (!slot.allowed) throw new AppError('Another game is being created; try again', 409, 'GAME_CREATION_IN_PROGRESS')
 
     try {
-      const activeGames = await Game.countDocuments({
-        'players.userId': userId,
-        status: 'active',
-      })
-      if (activeGames >= 20) throw new AppError('Close an active game before creating another', 429, 'ACTIVE_GAME_LIMIT')
+      await assertActiveGameCapacity(userId, 'Close an active game before creating another')
       return await this.createMultiplayerGame(userId, username, gameType)
     } finally {
       try {
@@ -673,11 +682,7 @@ class GameService {
     if (!slot.allowed) throw new AppError('Another room membership is being changed; try again', 409, 'MEMBERSHIP_CHANGE_IN_PROGRESS')
 
     try {
-      const activeGames = await Game.countDocuments({
-        'players.userId': userId,
-        status: 'active',
-      })
-      if (activeGames >= 20) throw new AppError('Close an active game before joining another', 429, 'ACTIVE_GAME_LIMIT')
+      await assertActiveGameCapacity(userId, 'Close an active game before joining another')
       return await this.joinGameWithValidatedCode(gameCode, userId, username)
     } finally {
       try {
@@ -1452,9 +1457,6 @@ class GameService {
     if (game.status !== 'active') throw new BadRequestError('Only active games can be closed')
 
     const host = game.players[0]
-    if (!host || host.userId.toString() !== userId) {
-      throw new ForbiddenError('Only the room host can close this game')
-    }
 
     const isStartedMultiplayer = getGameMode(game) === 'multiplayer' && game.players.length > 1
 
@@ -1466,11 +1468,13 @@ class GameService {
     game.statsParticipantIds = undefined
 
     await this.saveGame(game)
+    await releaseActiveGameConnectionLeases(String(game._id))
     if (isStartedMultiplayer) {
-      logSecurityEvent('game.host_closed_in_progress', {
+      logSecurityEvent('game.participant_closed_in_progress', {
         gameId: String(game._id),
         gameType: game.gameType,
-        hostUserId: userId,
+        closedByUserId: userId,
+        hostUserId: host?.userId.toString(),
         playerCount: game.players.length,
       })
     }
@@ -1485,44 +1489,119 @@ class GameService {
     const sourceGame = await this.findParticipantGame(gameId, userId)
     if (!sourceGame) throw new NotFoundError('Game')
 
-    const replayHost = sourceGame.players.find((player) => player.userId.toString() === userId)
-    if (!replayHost) throw new NotFoundError('Game')
+    const isParticipant = sourceGame.players.some((player) => player.userId.toString() === userId)
+    if (!isParticipant) throw new NotFoundError('Game')
+    const replayHost = sourceGame.players[0]
+    if (!replayHost || replayHost.userId.toString() !== userId) {
+      throw new ForbiddenError('Only the room host can start another match')
+    }
     if (getGameMode(sourceGame) !== 'multiplayer') throw new BadRequestError('Replay is only available for multiplayer games')
     if (!PUBLISHED_MULTIPLAYER_GAME_TYPES.has(sourceGame.gameType)) {
       throw new AppError('This game type is not available for live play', 409, 'GAME_TYPE_UNAVAILABLE')
     }
     if (sourceGame.status !== 'completed') throw new BadRequestError('Only completed games can be replayed')
-    if (sourceGame.gameType !== 'ticTacToe' && sourceGame.gameType !== 'scrabble') {
-      throw new BadRequestError('Replay is not available for this game')
-    }
-    if (sourceGame.players.length < 2) throw new BadRequestError('Replay needs at least two players')
+    this.validateRematchRoster(sourceGame)
 
-    return this.withMembershipCapacity([userId], () => this.createReplayGame(sourceGame, userId))
+    const playerIds = sourceGame.players.map((player) => player.userId.toString())
+    for (let attempt = 1; attempt <= REMATCH_LOCK_ATTEMPTS; attempt += 1) {
+      const existingRematch = await this.findExistingRematch(sourceGame._id)
+      if (existingRematch) return existingRematch
+
+      try {
+        return await this.withMembershipCapacity(playerIds, async () => {
+          const rematchCreatedWhileLocking = await this.findExistingRematch(sourceGame._id)
+          return rematchCreatedWhileLocking ?? this.createReplayGame(sourceGame)
+        })
+      } catch (error) {
+        // A concurrent request can create the unique linked rematch while this
+        // request waits for membership locks or checks the active-game limit.
+        const concurrentRematch = await this.findExistingRematch(sourceGame._id)
+        if (concurrentRematch) return concurrentRematch
+
+        const isMembershipConflict = error instanceof AppError && error.code === 'MEMBERSHIP_CHANGE_IN_PROGRESS'
+        if (!isMembershipConflict || attempt === REMATCH_LOCK_ATTEMPTS) throw error
+        await waitForGameplayRetry(attempt)
+      }
+    }
+
+    throw new AppError('Another match is being created; try again', 409, 'MEMBERSHIP_CHANGE_IN_PROGRESS')
   }
 
-  private async createReplayGame(sourceGame: IGameDocument, userId: string): Promise<IGameDocument> {
-    const replayHost = sourceGame.players.find((player) => player.userId.toString() === userId)
-    if (!replayHost) throw new NotFoundError('Game')
-    const players = [{
-      userId: replayHost.userId,
-      username: replayHost.username,
-      index: 0,
-      color: replayHost.color,
-      rank: replayHost.rank,
+  private validateRematchRoster(sourceGame: IGameDocument): void {
+    const playerCount = sourceGame.players.length
+    const validCount = sourceGame.gameType === 'ticTacToe'
+      ? playerCount === 2
+      : sourceGame.gameType === 'scrabble'
+        ? playerCount >= 2 && playerCount <= 4
+        : sourceGame.gameType === 'wisecracker'
+          ? playerCount >= 3 && playerCount <= 4
+          : sourceGame.gameType === 'propertyManagement'
+            ? playerCount >= 2 && playerCount <= 8
+            : false
+    if (!validCount) throw new BadRequestError('The completed game has an invalid player roster')
+
+    const playerIds = sourceGame.players.map((player) => player.userId.toString())
+    if (new Set(playerIds).size !== playerIds.length) {
+      throw new BadRequestError('The completed game has an invalid player roster')
+    }
+  }
+
+  private async findExistingRematch(sourceGameId: unknown): Promise<IGameDocument | null> {
+    if (typeof (Game as unknown as { findOne?: unknown }).findOne !== 'function') return null
+    const candidate = await Game.findOne({ rematchOf: sourceGameId })
+    return candidate?.rematchOf?.toString() === String(sourceGameId) ? candidate : null
+  }
+
+  private createRematchInitialState(sourceGame: IGameDocument): Record<string, unknown> {
+    const [host, ...guests] = sourceGame.players
+    const hostUserId = host.userId.toString()
+
+    if (sourceGame.gameType === 'ticTacToe') {
+      return TicTacToe.createInitialState() as unknown as Record<string, unknown>
+    }
+
+    if (sourceGame.gameType === 'scrabble') {
+      let state = Scrabble.createInitialState(hostUserId, Boolean(sourceGame.metadata?.infiniteLetters))
+      for (const guest of guests) state = Scrabble.addPlayer(state, guest.userId.toString())
+      return state as unknown as Record<string, unknown>
+    }
+
+    if (sourceGame.gameType === 'wisecracker') {
+      let state = Wisecracker.createInitialState(hostUserId)
+      for (const guest of guests) state = Wisecracker.addPlayer(state, guest.userId.toString())
+      return state as unknown as Record<string, unknown>
+    }
+
+    if (sourceGame.gameType === 'propertyManagement') {
+      let state = PropertyManagement.createInitialState(hostUserId, host.username)
+      for (const guest of guests) {
+        state = PropertyManagement.addPlayer(state, guest.userId.toString(), guest.username)
+      }
+      return state as unknown as Record<string, unknown>
+    }
+
+    throw new BadRequestError('Replay is not available for this game')
+  }
+
+  private async createReplayGame(sourceGame: IGameDocument): Promise<IGameDocument> {
+    const replayHost = sourceGame.players[0]
+    const players = sourceGame.players.map((player, index) => ({
+      userId: player.userId,
+      username: player.username,
+      index,
+      color: player.color,
+      rank: player.rank,
       isConnected: false,
       disconnectCount: 0,
-    }]
-
-    const initialState: unknown = sourceGame.gameType === 'ticTacToe'
-      ? TicTacToe.createInitialState()
-      : Scrabble.createInitialState(userId, Boolean(sourceGame.metadata?.infiniteLetters))
-
-    const replayGame = await createGameWithUniqueCode({
+    }))
+    const attributes = {
       gameType: sourceGame.gameType,
+      status: 'active',
+      rematchOf: sourceGame._id,
       players,
       currentTurnIndex: 0,
       currentTurn: replayHost.userId,
-      gameState: initialState,
+      gameState: this.createRematchInitialState(sourceGame),
       moveHistory: [],
       chatMessages: [],
       startedAt: new Date(),
@@ -1533,12 +1612,24 @@ class GameService {
         mode: 'multiplayer',
         infiniteLetters: sourceGame.gameType === 'scrabble' ? Boolean(sourceGame.metadata?.infiniteLetters) : undefined,
       },
-    })
+    }
 
-    emitGameReplayCreated(sourceGame, replayGame, userId)
-    emitGamesChanged(replayGame)
+    for (let attempt = 0; attempt < GAME_CODE_CREATE_ATTEMPTS; attempt += 1) {
+      try {
+        const replayGame = await Game.create({ ...attributes, gameCode: generateGameCode() })
+        emitGameReplayCreated(sourceGame, replayGame)
+        emitGamesChanged(replayGame)
+        return replayGame
+      } catch (error) {
+        if (!isDuplicateKeyError(error)) throw error
 
-    return replayGame
+        const concurrentRematch = await this.findExistingRematch(sourceGame._id)
+        if (concurrentRematch) return concurrentRematch
+        if (attempt === GAME_CODE_CREATE_ATTEMPTS - 1) throw error
+      }
+    }
+
+    throw new AppError('Could not allocate a game code', 503, 'GAME_CODE_UNAVAILABLE')
   }
 
   /**
@@ -1586,11 +1677,10 @@ class GameService {
       }
 
       for (const membershipUserId of uniqueUserIds) {
-        const activeGames = await Game.countDocuments({
-          'players.userId': membershipUserId,
-          status: 'active',
-        })
-        if (activeGames >= 20) throw new AppError('A player must close an active game before creating or joining another', 429, 'ACTIVE_GAME_LIMIT')
+        await assertActiveGameCapacity(
+          membershipUserId,
+          'A player must close an active game before creating or joining another'
+        )
       }
 
       return await operation()

@@ -21,7 +21,7 @@ export const DropdownMenuContent = forwardRef<
         sideOffset={sideOffset}
         collisionPadding={collisionPadding}
         className={cn(
-          'z-[70] min-w-48 overflow-hidden rounded-xl border border-border bg-surface p-1.5 text-text-primary shadow-lg outline-none data-[state=open]:animate-pop-in',
+          'z-[70] min-w-48 overflow-hidden rounded-xl border border-border bg-surface p-1.5 text-text-primary shadow-lg outline-none data-[state=closed]:animate-pop-out data-[state=open]:animate-pop-in',
           className,
         )}
         {...props}
@@ -43,7 +43,7 @@ export const DropdownMenuItem = forwardRef<
     <DropdownPrimitive.Item
       ref={ref}
       className={cn(
-        'relative flex min-h-11 select-none items-center gap-2 rounded-lg px-2.5 py-2 text-sm outline-none transition-colors duration-120 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-accent-subtle data-[highlighted]:text-text-primary data-[highlighted]:outline data-[highlighted]:outline-2 data-[highlighted]:outline-border-focus data-[highlighted]:outline-offset-[-2px]',
+        'relative flex min-h-11 select-none items-center gap-2 rounded-lg px-2.5 py-2 text-sm outline-none transition-[color,background-color,transform] duration-120 active:translate-y-px active:scale-[0.99] data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-accent-subtle data-[highlighted]:text-text-primary data-[highlighted]:outline data-[highlighted]:outline-2 data-[highlighted]:outline-border-focus data-[highlighted]:outline-offset-[-2px]',
         inset && 'pl-8',
         tone === 'danger' && 'text-danger-text data-[highlighted]:bg-danger-subtle data-[highlighted]:text-danger-text',
         className,
@@ -62,7 +62,7 @@ export const DropdownMenuCheckboxItem = forwardRef<
       ref={ref}
       checked={checked}
       className={cn(
-        'relative flex min-h-11 select-none items-center rounded-lg py-2 pl-8 pr-2.5 text-sm outline-none transition-colors duration-120 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-accent-subtle data-[highlighted]:outline data-[highlighted]:outline-2 data-[highlighted]:outline-border-focus data-[highlighted]:outline-offset-[-2px]',
+        'relative flex min-h-11 select-none items-center rounded-lg py-2 pl-8 pr-2.5 text-sm outline-none transition-[color,background-color,transform] duration-120 active:translate-y-px active:scale-[0.99] data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-accent-subtle data-[highlighted]:outline data-[highlighted]:outline-2 data-[highlighted]:outline-border-focus data-[highlighted]:outline-offset-[-2px]',
         className,
       )}
       {...props}
@@ -83,7 +83,7 @@ export const DropdownMenuRadioItem = forwardRef<
     <DropdownPrimitive.RadioItem
       ref={ref}
       className={cn(
-        'relative flex min-h-11 select-none items-center rounded-lg py-2 pl-8 pr-2.5 text-sm outline-none transition-colors duration-120 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-accent-subtle data-[highlighted]:outline data-[highlighted]:outline-2 data-[highlighted]:outline-border-focus data-[highlighted]:outline-offset-[-2px]',
+        'relative flex min-h-11 select-none items-center rounded-lg py-2 pl-8 pr-2.5 text-sm outline-none transition-[color,background-color,transform] duration-120 active:translate-y-px active:scale-[0.99] data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-accent-subtle data-[highlighted]:outline data-[highlighted]:outline-2 data-[highlighted]:outline-border-focus data-[highlighted]:outline-offset-[-2px]',
         className,
       )}
       {...props}
@@ -123,7 +123,7 @@ export const DropdownMenuSubTrigger = forwardRef<
   return (
     <DropdownPrimitive.SubTrigger
       ref={ref}
-      className={cn('flex min-h-11 select-none items-center gap-2 rounded-lg px-2.5 py-2 text-sm outline-none data-[state=open]:bg-accent-subtle data-[highlighted]:bg-accent-subtle data-[highlighted]:outline data-[highlighted]:outline-2 data-[highlighted]:outline-border-focus data-[highlighted]:outline-offset-[-2px]', inset && 'pl-8', className)}
+      className={cn('flex min-h-11 select-none items-center gap-2 rounded-lg px-2.5 py-2 text-sm outline-none transition-[color,background-color,transform] duration-120 active:translate-y-px active:scale-[0.99] data-[state=open]:bg-accent-subtle data-[highlighted]:bg-accent-subtle data-[highlighted]:outline data-[highlighted]:outline-2 data-[highlighted]:outline-border-focus data-[highlighted]:outline-offset-[-2px]', inset && 'pl-8', className)}
       {...props}
     >
       {children}
@@ -139,7 +139,7 @@ export const DropdownMenuSubContent = forwardRef<
   return (
     <DropdownPrimitive.SubContent
       ref={ref}
-      className={cn('z-[70] min-w-44 overflow-hidden rounded-xl border border-border bg-surface p-1.5 text-text-primary shadow-lg data-[state=open]:animate-pop-in', className)}
+      className={cn('z-[70] min-w-44 overflow-hidden rounded-xl border border-border bg-surface p-1.5 text-text-primary shadow-lg data-[state=closed]:animate-pop-out data-[state=open]:animate-pop-in', className)}
       {...props}
     />
   )

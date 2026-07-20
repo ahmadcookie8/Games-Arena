@@ -1,40 +1,47 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ChatMessage } from '../types/game'
+import PlayerAvatar from './PlayerAvatar'
+import { Button } from './ui'
 
 interface Props {
   messages: ChatMessage[]
   currentUserId?: string
   onSend: (text: string) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
+  onError?: (message: string, trigger?: HTMLElement | null) => void
   variant?: 'card' | 'embedded'
 }
 
-export default function GameChat({ messages, currentUserId, onSend, variant = 'card' }: Props) {
+export default function GameChat({ messages, currentUserId, onSend, onError, variant = 'card' }: Props) {
   const [text, setText] = useState('')
-  const [error, setError] = useState<string | null>(null)
   const [isSending, setIsSending] = useState(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLInputElement | null>(null)
   const inputId = useId()
-  const errorId = `${inputId}-error`
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+    const scroller = scrollRef.current
+    if (!scroller) return
+    if (typeof scroller.scrollTo === 'function') scroller.scrollTo({ top: scroller.scrollHeight })
+    else scroller.scrollTop = scroller.scrollHeight
   }, [messages.length])
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
     const trimmed = text.trim()
-    if (!trimmed) return
+    if (!trimmed) {
+      onError?.('Enter a message before sending.', inputRef.current)
+      return
+    }
     setIsSending(true)
-    setError(null)
     try {
       const result = await onSend(trimmed)
       if (result.success) {
         setText('')
       } else if (!result.handledGlobally) {
-        setError(result.error || 'Message failed')
+        onError?.(result.error || 'Message failed', inputRef.current)
       }
     } catch {
-      setError('Message failed. Check your connection and try again.')
+      onError?.('Message failed. Check your connection and try again.', inputRef.current)
     } finally {
       setIsSending(false)
     }
@@ -55,12 +62,15 @@ export default function GameChat({ messages, currentUserId, onSend, variant = 'c
         {messages.map((message) => {
           const isMine = message.userId === currentUserId
           return (
-            <div key={message.messageId} className={`rounded-lg border px-3 py-2 text-sm ${isMine ? 'border-accent/30 bg-accent-subtle text-accent' : 'border-border bg-elevated text-text-primary'}`}>
-              <div className="mb-1 flex items-center justify-between gap-2">
-                <span className="truncate text-xs font-semibold">{message.username}</span>
-                <time className="shrink-0 text-[0.65rem] text-text-muted">{formatTime(message.timestamp)}</time>
+            <div key={message.messageId} className={`flex gap-2 rounded-lg border px-3 py-2 text-sm ${isMine ? 'border-accent/30 bg-accent-subtle text-accent' : 'border-border bg-elevated text-text-primary'}`}>
+              <PlayerAvatar name={message.username} size="sm" />
+              <div className="min-w-0 flex-1">
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <span className="truncate text-xs font-semibold">{message.username}</span>
+                  <time className="shrink-0 text-[0.65rem] text-text-muted">{formatTime(message.timestamp)}</time>
+                </div>
+                <p className="whitespace-pre-wrap break-words">{message.text}</p>
               </div>
-              <p className="whitespace-pre-wrap break-words">{message.text}</p>
             </div>
           )
         })}
@@ -68,22 +78,20 @@ export default function GameChat({ messages, currentUserId, onSend, variant = 'c
       <form onSubmit={submit} className="mt-3 flex gap-2">
         <label htmlFor={inputId} className="sr-only">Message this lobby</label>
         <input
+          ref={inputRef}
           id={inputId}
           name="game-chat-message"
           value={text}
           maxLength={500}
           onChange={(event) => setText(event.target.value)}
           placeholder="Message this lobby"
-          aria-invalid={Boolean(error) || undefined}
-          aria-describedby={error ? errorId : undefined}
           autoComplete="off"
           className="min-h-11 min-w-0 flex-1 rounded-lg border border-border bg-overlay px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-[var(--border-focus)]/20"
         />
-        <button type="submit" disabled={isSending || !text.trim()} className="ui-action-primary interactive-lift min-h-11 rounded-xl px-3 py-2 text-sm font-semibold shadow-accent disabled:cursor-not-allowed disabled:opacity-50">
+        <Button type="submit" loading={isSending} loadingText="Sending" disabled={!text.trim()} size="md">
           Send
-        </button>
+        </Button>
       </form>
-      {error && <p id={errorId} role="alert" className="mt-2 text-xs text-danger-text">{error}</p>}
     </div>
   )
 }

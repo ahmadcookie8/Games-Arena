@@ -33,7 +33,7 @@ test.describe('published multiplayer games against real services', () => {
     }
   })
 
-  test('Tic Tac Toe completes a two-browser match through live turns', async ({ browser }) => {
+  test('Tic Tac Toe completes and coordinates a two-browser rematch', async ({ browser }) => {
     const players = await openPlayers(browser, [accounts.tttHost, accounts.tttGuest])
     const [host, guest] = players.map(({ page }) => page)
 
@@ -50,12 +50,41 @@ test.describe('published multiplayer games against real services', () => {
       await expect(host.getByRole('heading', { name: 'You won' })).toBeVisible()
       await expect(guest.getByRole('heading', { name: `${accounts.tttHost.username} won` })).toBeVisible()
       await expect(host.getByRole('group', { name: 'Tic Tac Toe final board.' })).toBeVisible()
+
+      await startCoordinatedRematch(host, [host, guest])
+      await expect(host.getByRole('button', { name: /empty/ })).toHaveCount(9)
+      await expect(guest.getByRole('button', { name: /empty/ })).toHaveCount(9)
+
+      await guest.goto('/history')
+      await expect(guest.getByText(code, { exact: true })).toBeVisible()
     } finally {
       await closePlayers(players)
     }
   })
 
-  test('Wisecracker completes a three-browser one-point match', async ({ browser }) => {
+  test('a Tic Tac Toe guest can close an active room for every participant', async ({ browser }) => {
+    const players = await openPlayers(browser, [accounts.tttHost, accounts.tttGuest])
+    const [host, guest] = players.map(({ page }) => page)
+
+    try {
+      const code = await createRoom(host, 'Tic Tac Toe')
+      await joinRoom(guest, code, 'Tic Tac Toe')
+
+      await guest.getByRole('button', { name: 'Close game', exact: true }).click()
+      const confirmation = guest.getByRole('dialog', { name: 'Close this game for everyone?' })
+      await expect(confirmation).toBeVisible()
+      await confirmation.getByRole('button', { name: 'Close game', exact: true }).click()
+
+      await expect(guest).toHaveURL(`${frontendURL}/?tab=multiplayer`)
+      const closedDialog = host.getByRole('dialog', { name: 'Game closed' })
+      await expect(closedDialog).toBeVisible()
+      await expect(closedDialog).toContainText('no longer available')
+    } finally {
+      await closePlayers(players)
+    }
+  })
+
+  test('Wisecracker completes and returns three browsers to one fresh lobby', async ({ browser }) => {
     const players = await openPlayers(browser, [accounts.wiseHost, accounts.wiseGuest, accounts.wiseThird])
     const [host, guest, third] = players.map(({ page }) => page)
 
@@ -91,12 +120,17 @@ test.describe('published multiplayer games against real services', () => {
       await expect(host.getByText('First to 1 takes the spotlight.')).toBeVisible()
       await expect(guest.getByText('Match complete', { exact: true }).first()).toBeVisible()
       await expect(third.getByText('Match complete', { exact: true }).first()).toBeVisible()
+
+      await startCoordinatedRematch(host, [host, guest, third])
+      await expect(host.getByLabel('Points to win')).toHaveValue('3')
+      await expect(host.getByRole('button', { name: 'Start match' })).toBeEnabled()
+      await expect(guest.getByText('Waiting for the host', { exact: true })).toBeVisible()
     } finally {
       await closePlayers(players)
     }
   })
 
-  test('Scrabble exchanges a live rack tile and completes after a rendered give-up', async ({ browser }) => {
+  test('Scrabble completes after a live exchange and coordinates a fresh table', async ({ browser }) => {
     const players = await openPlayers(browser, [accounts.scrabbleHost, accounts.scrabbleGuest])
     const [host, guest] = players.map(({ page }) => page)
 
@@ -127,12 +161,17 @@ test.describe('published multiplayer games against real services', () => {
       await expect(guest.getByText('Game complete', { exact: true }).first()).toBeVisible()
       await host.getByRole('tab', { name: 'History' }).click()
       await expect(host.getByText(`${accounts.scrabbleHost.username} exchanged 1 tile`)).toBeVisible()
+
+      await startCoordinatedRematch(host, [host, guest])
+      await expect(host.getByLabel('Your tile rack')).toBeVisible()
+      await expect(guest.getByLabel('Your tile rack')).toBeVisible()
+      await expect(host.getByRole('button', { name: 'Play tiles' })).toBeDisabled()
     } finally {
       await closePlayers(players)
     }
   })
 
-  test('Property Management starts for two browsers and resolves bankruptcy', async ({ browser }) => {
+  test('Property Management resolves bankruptcy and coordinates a fresh lobby', async ({ browser }) => {
     const players = await openPlayers(browser, [accounts.propertyHost, accounts.propertyGuest])
     const [host, guest] = players.map(({ page }) => page)
 
@@ -154,6 +193,10 @@ test.describe('published multiplayer games against real services', () => {
       await expect(host.getByRole('heading', { name: `${accounts.propertyGuest.username} wins` })).toBeVisible()
       await expect(guest.getByRole('heading', { name: `${accounts.propertyGuest.username} wins` })).toBeVisible()
       await expect(host.getByText('Game complete', { exact: true }).first()).toBeVisible()
+
+      await startCoordinatedRematch(host, [host, guest])
+      await expect(host.getByRole('button', { name: 'Start the game' })).toBeEnabled()
+      await expect(guest.getByText('The host will start when everyone is ready.', { exact: true })).toBeVisible()
     } finally {
       await closePlayers(players)
     }
@@ -230,9 +273,24 @@ async function createRoom(page: Page, gameName: string): Promise<string> {
   await card.getByRole('button', { name: 'Create room' }).click()
   await expect(page).toHaveURL(/\/game\/[a-f\d]{24}$/)
   await expect(page.locator('main h1')).toHaveText(gameName)
-  const code = (await page.locator('.tabletop-route-masthead__code span').textContent())?.trim() || ''
+  const inviteLabel = await page.getByRole('button', { name: /Copy invite code/ }).getAttribute('aria-label')
+  const code = inviteLabel?.match(/[A-Z0-9]{8}/)?.[0] || ''
   expect(code).toMatch(/^[A-Z0-9]{8}$/)
   return code
+}
+
+async function startCoordinatedRematch(host: Page, players: Page[]): Promise<string> {
+  const oldPath = new URL(host.url()).pathname
+  await host.getByRole('button', { name: 'Play Again', exact: true }).click()
+  await expect.poll(() => new URL(host.url()).pathname).not.toBe(oldPath)
+
+  const newPath = new URL(host.url()).pathname
+  expect(newPath).toMatch(/^\/game\/[a-f\d]{24}$/)
+  await Promise.all(players.map(async (page) => {
+    await expect(page).toHaveURL(`${frontendURL}${newPath}`)
+    await expect(page.getByText('Joining game...', { exact: true })).toBeHidden()
+  }))
+  return newPath
 }
 
 async function joinRoom(page: Page, code: string, gameName: string): Promise<void> {

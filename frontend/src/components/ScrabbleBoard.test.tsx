@@ -27,6 +27,19 @@ beforeAll(() => {
   })
 })
 
+function useDesktopLayoutForTest() {
+  vi.mocked(window.matchMedia).mockImplementation((query: string): MediaQueryList => ({
+    matches: query === '(min-width: 1120px)',
+    media: query,
+    onchange: null,
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  }))
+}
+
 function makeState(overrides: Partial<ScrabbleState> = {}): ScrabbleState {
   return {
     board: Array.from({ length: 15 }, () => Array(15).fill(null)),
@@ -67,7 +80,11 @@ function makeGame(state = makeState()): Game {
   }
 }
 
-function renderBoard(onMove: ComponentProps<typeof ScrabbleBoard>['onMove'], state = makeState()) {
+function renderBoard(
+  onMove: ComponentProps<typeof ScrabbleBoard>['onMove'],
+  state = makeState(),
+  onActionError = vi.fn(),
+) {
   return render(
     <ScrabbleBoard
       game={makeGame(state)}
@@ -75,6 +92,7 @@ function renderBoard(onMove: ComponentProps<typeof ScrabbleBoard>['onMove'], sta
       isMyTurn
       onMove={onMove}
       onSendChat={vi.fn().mockResolvedValue({ success: true })}
+      onActionError={onActionError}
     />,
   )
 }
@@ -83,7 +101,8 @@ describe('Scrabble rendered action reliability', () => {
   it('submits a legacy blank-tile placement and preserves it after a failed action', async () => {
     const user = userEvent.setup()
     const onMove = vi.fn().mockResolvedValue({ success: false, error: 'That word is not valid.' })
-    renderBoard(onMove)
+    const onActionError = vi.fn()
+    renderBoard(onMove, makeState(), onActionError)
 
     await user.click(screen.getAllByRole('button', { name: 'Blank tile' })[0])
     await user.click(screen.getByRole('button', { name: /^H8, center star; activate to place/ }))
@@ -97,7 +116,7 @@ describe('Scrabble rendered action reliability', () => {
       type: 'placeTiles',
       placements: [{ rackTileId: blankTile.id, row: 7, col: 7, blankLetter: 'Q' }],
     }))
-    expect(screen.getAllByRole('alert')[0]).toHaveTextContent('That word is not valid.')
+    expect(onActionError).toHaveBeenCalledWith('That word is not valid.', expect.any(HTMLElement))
     expect(screen.getByRole('button', { name: /^H8, pending Q/ })).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Play tiles' })[0]).toBeEnabled()
   })
@@ -105,7 +124,8 @@ describe('Scrabble rendered action reliability', () => {
   it('keeps a selected legacy blank tile after a rejected bag exchange', async () => {
     const user = userEvent.setup()
     const onMove = vi.fn().mockResolvedValue({ success: false, error: 'The bag changed. Try again.' })
-    renderBoard(onMove)
+    const onActionError = vi.fn()
+    renderBoard(onMove, makeState(), onActionError)
 
     await user.click(screen.getAllByRole('button', { name: 'Swap tiles' })[0])
     await user.click(screen.getAllByRole('button', { name: 'Blank tile' })[0])
@@ -115,12 +135,13 @@ describe('Scrabble rendered action reliability', () => {
       type: 'exchangeWithBag',
       rackTileIds: [blankTile.id],
     }))
-    expect(screen.getAllByRole('alert')[0]).toHaveTextContent('The bag changed. Try again.')
+    expect(onActionError).toHaveBeenCalledWith('The bag changed. Try again.', expect.any(HTMLElement))
     expect(screen.getAllByRole('button', { name: 'Blank tile, selected' })[0]).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getAllByRole('button', { name: 'Exchange (1)' })[0]).toBeEnabled()
   })
 
   it('includes the current offer id and a blank tile id when accepting a trade', async () => {
+    useDesktopLayoutForTest()
     const user = userEvent.setup()
     const onMove = vi.fn().mockResolvedValue({ success: true })
     renderBoard(onMove, makeState({
@@ -133,6 +154,7 @@ describe('Scrabble rendered action reliability', () => {
       },
     }))
 
+    await user.click(screen.getByRole('button', { name: 'Review trade' }))
     await user.click(screen.getAllByRole('button', { name: 'Blank tile' })[0])
     await user.click(await screen.findByRole('button', { name: 'Accept trade' }))
 
@@ -142,5 +164,39 @@ describe('Scrabble rendered action reliability', () => {
       accept: true,
       rackTileIds: [blankTile.id],
     })
+  })
+
+  it('keeps a chat draft and focus through an unrelated game rerender', async () => {
+    useDesktopLayoutForTest()
+    const user = userEvent.setup()
+    const onMove = vi.fn().mockResolvedValue({ success: true })
+    const onSendChat = vi.fn().mockResolvedValue({ success: true })
+    const game = makeGame()
+    const view = render(
+      <ScrabbleBoard game={game} user={host} isMyTurn onMove={onMove} onSendChat={onSendChat} />,
+    )
+
+    expect(screen.getAllByRole('button', { name: 'Blank tile' })).toHaveLength(1)
+    await user.click(screen.getByRole('tab', { name: 'Chat' }))
+    const chatInput = await screen.findByRole('textbox', { name: 'Message this lobby' })
+    await user.type(chatInput, 'Keep this message')
+    expect(chatInput).toHaveFocus()
+
+    view.rerender(
+      <ScrabbleBoard
+        game={{
+          ...game,
+          revision: (game.revision ?? 0) + 1,
+          players: game.players.map((player) => player.userId === 'guest' ? { ...player, isConnected: false } : player),
+        }}
+        user={host}
+        isMyTurn
+        onMove={onMove}
+        onSendChat={onSendChat}
+      />,
+    )
+
+    expect(chatInput).toHaveValue('Keep this message')
+    expect(chatInput).toHaveFocus()
   })
 })

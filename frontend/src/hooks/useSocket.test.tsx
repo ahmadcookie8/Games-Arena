@@ -28,7 +28,7 @@ function createSocketDouble() {
     }),
     disconnect: vi.fn(() => socket),
     timeout: vi.fn(() => socket),
-    emit: vi.fn(() => socket),
+    emit: vi.fn((..._args: unknown[]) => socket),
   }
   return { socket, handlers }
 }
@@ -54,7 +54,7 @@ describe('live socket connection errors', () => {
 
     expect(normalizeConnectionError(error)).toEqual({
       code: 'SOCKET_CONNECTION_LIMIT',
-      message: 'This account already has the maximum number of live game connections. Close another game tab and reconnect.',
+      message: 'This account already has 10 active game connections. Leave another active game tab, then reconnect.',
     })
   })
 
@@ -84,5 +84,43 @@ describe('live socket connection errors', () => {
 
     unmount()
     expect(mocks.disconnectSocket).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns a room-limit acknowledgement without disconnecting the shared transport', async () => {
+    const { socket, handlers } = createSocketDouble()
+    socket.emit.mockImplementation((...args: unknown[]) => {
+      const callback = args[args.length - 1]
+      if (typeof callback === 'function') {
+        callback(null, {
+          ok: false,
+          error: {
+            code: 'SOCKET_CONNECTION_LIMIT',
+            message: 'This account already has 10 active game connections.',
+          },
+        })
+      }
+      return socket
+    })
+    mocks.connectSocket.mockReturnValue(socket)
+    const { result, unmount } = renderHook(() => useSocket())
+
+    act(() => {
+      socket.connected = true
+      handlers.get('connect')?.()
+    })
+
+    const acknowledgement = await result.current.emitWithAck('joinRoom', { gameId: 'game-11' })
+
+    expect(acknowledgement).toEqual({
+      ok: false,
+      error: {
+        code: 'SOCKET_CONNECTION_LIMIT',
+        message: 'This account already has 10 active game connections.',
+      },
+    })
+    expect(result.current.connected).toBe(true)
+    expect(socket.disconnect).not.toHaveBeenCalled()
+
+    unmount()
   })
 })

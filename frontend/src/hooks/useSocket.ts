@@ -117,7 +117,7 @@ export function normalizeConnectionError(error: Error): SocketAcknowledgementErr
   if (normalized.includes('too many active connections')) {
     return {
       code: 'SOCKET_CONNECTION_LIMIT',
-      message: 'This account already has the maximum number of live game connections. Close another game tab and reconnect.',
+      message: 'This account already has 10 active game connections. Leave another active game tab, then reconnect.',
     }
   }
   if (normalized.includes('rate limit')) {
