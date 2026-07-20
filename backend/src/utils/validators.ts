@@ -172,6 +172,7 @@ export const multiplayerMoveSchema = z.union([
 ])
 
 export const joinRoomEventSchema = z.object({ gameId: gameIdSchema }).strict()
+export const leaveRoomEventSchema = z.object({ gameId: gameIdSchema }).strict()
 export const makeMoveEventSchema = z.object({ gameId: gameIdSchema, move: multiplayerMoveSchema }).strict()
 export const sendChatMessageEventSchema = z.object({
   gameId: gameIdSchema,

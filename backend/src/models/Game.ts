@@ -4,6 +4,7 @@ export interface IGameDocument extends Document {
   gameType: 'chess' | 'checkers' | 'ticTacToe' | 'uno' | 'president' | 'wisecracker' | 'scrabble' | 'snake' | 'mazeChase' | 'propertyManagement'
   status: 'active' | 'paused' | 'completed' | 'abandoned'
   gameCode: string
+  rematchOf?: mongoose.Types.ObjectId
   players: Array<{
     userId: mongoose.Types.ObjectId
     username: string
@@ -90,6 +91,7 @@ const GameSchema = new Schema<IGameDocument>(
     gameType: { type: String, enum: ['chess', 'checkers', 'ticTacToe', 'uno', 'president', 'wisecracker', 'scrabble', 'snake', 'mazeChase', 'propertyManagement'], required: true },
     status: { type: String, enum: ['active', 'paused', 'completed', 'abandoned'], default: 'active' },
     gameCode: { type: String, required: true, unique: true },
+    rematchOf: { type: Schema.Types.ObjectId, ref: 'Game' },
     players: [
       {
         userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
@@ -148,6 +150,10 @@ GameSchema.index({ createdAt: -1 })
 GameSchema.index({ 'players.userId': 1 })
 GameSchema.index({ status: 1 })
 GameSchema.index({ gameCode: 1 }, { unique: true })
+GameSchema.index(
+  { rematchOf: 1 },
+  { unique: true, partialFilterExpression: { rematchOf: { $type: 'objectId' } } }
+)
 GameSchema.index({ inviteExpiresAt: 1 })
 
 export const Game = mongoose.model<IGameDocument>('Game', GameSchema)

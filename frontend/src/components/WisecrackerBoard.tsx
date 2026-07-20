@@ -1,7 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import {
   Check,
-  Clipboard,
   Clock3,
   Crown,
   History,
@@ -15,6 +14,7 @@ import {
   WifiOff,
 } from 'lucide-react'
 import { Game, WisecrackerState } from '../types/game'
+import type { GameActionErrorReporter } from '../types/gameFeedback'
 import { User } from '../types/user'
 import {
   WISECRACKER_ANSWER_MAX_LENGTH,
@@ -31,6 +31,7 @@ import {
 import { multiplayerActions, type WisecrackerMove } from '../lib/multiplayerActions'
 import GameChat from './GameChat'
 import MoveHistory from './MoveHistory'
+import PlayerAvatar from './PlayerAvatar'
 import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs, type TabletopTab } from './TabletopShell'
 import './wisecracker-tabletop.css'
 
@@ -41,6 +42,7 @@ interface Props {
   user: User | null
   onMove: (move: WisecrackerMove) => Promise<{ success: boolean; game?: Game; error?: string; handledGlobally?: boolean }>
   onSendChat: (text: string) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
+  onActionError?: GameActionErrorReporter
 }
 
 const INSPECTOR_TABS: TabletopTab<InspectorTab>[] = [
@@ -49,10 +51,10 @@ const INSPECTOR_TABS: TabletopTab<InspectorTab>[] = [
   { id: 'chat', label: 'Chat', icon: MessageCircle },
 ]
 
-export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Props) {
+export default function WisecrackerBoard({ game, user, onMove, onSendChat, onActionError }: Props) {
   const state = normalizeWisecrackerState(game.gameState, game.players.map((player) => player.userId))
   const myId = user?._id || ''
-  const [maxScore, setMaxScore] = useState(state.maxScore || 3)
+  const [maxScore, setMaxScore] = useState(() => String(state.maxScore || 3))
   const [prompt, setPrompt] = useState(state.prompt || '')
   const [answers, setAnswers] = useState<string[]>([])
   const [isSubmittingAnswers, setIsSubmittingAnswers] = useState(false)
@@ -63,10 +65,9 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
   const [isRevealing, setIsRevealing] = useState(false)
   const [selectingResponseId, setSelectingResponseId] = useState<string | null>(null)
   const [isAdvancingRound, setIsAdvancingRound] = useState(false)
-  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
   const [activeTab, setActiveTab] = useState<InspectorTab>('players')
   const [sheetOpen, setSheetOpen] = useState(false)
-  const [moveError, setMoveError] = useState<string | null>(null)
+  const isDesktopLayout = useTabletopDesktopLayout()
 
   const playersById = useMemo(
     () => Object.fromEntries(game.players.map((player) => [player.userId, player])),
@@ -88,7 +89,8 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
   const chooserIsConnected = chooser?.isConnected !== false
   const latestMove = game.moveHistory[game.moveHistory.length - 1]
   const myScore = state.scores[myId] ?? 0
-  const validMaxScore = Number.isInteger(maxScore) && maxScore >= 1 && maxScore <= 50
+  const parsedMaxScore = /^\d+$/.test(maxScore) ? Number(maxScore) : Number.NaN
+  const validMaxScore = Number.isSafeInteger(parsedMaxScore) && parsedMaxScore >= 1 && parsedMaxScore <= 50
   const promptBlankCount = countWisecrackerBlanks(prompt)
   const promptRemaining = WISECRACKER_PROMPT_MAX_LENGTH - prompt.length
   const promptIsValid = Boolean(prompt.trim()) && promptBlankCount <= WISECRACKER_MAX_BLANKS
@@ -99,11 +101,15 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
   const serverAnswersJson = JSON.stringify(state.myAnswers ?? [])
 
   useEffect(() => {
+    if (isDesktopLayout) setSheetOpen(false)
+  }, [isDesktopLayout])
+
+  useEffect(() => {
     setPrompt(state.prompt || '')
   }, [roundDraftKey, state.prompt])
 
   useEffect(() => {
-    if (state.phase === 'lobby') setMaxScore(state.maxScore || 3)
+    if (state.phase === 'lobby') setMaxScore(String(state.maxScore || 3))
   }, [state.maxScore, state.phase])
 
   useEffect(() => {
@@ -133,28 +139,17 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
     setIsRevealing(false)
     setSelectingResponseId(null)
     setIsAdvancingRound(false)
-    setMoveError(null)
   }, [roundDraftKey, state.phase, state.prompt, state.revealedResponses.length, state.roundWinnerResponseId])
 
   async function performMove(move: WisecrackerMove) {
-    setMoveError(null)
+    const restoreFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : null
     try {
       const result = await onMove(move)
-      if (!result.success && !result.handledGlobally) setMoveError(result.error ?? 'Action failed')
+      if (!result.success && !result.handledGlobally) onActionError?.(result.error ?? 'Action failed', restoreFocusTo)
       return result
     } catch {
-      setMoveError('The action could not reach the game server.')
+      onActionError?.('The action could not reach the game server.', restoreFocusTo)
       return { success: false, error: 'The action could not reach the game server.' }
-    }
-  }
-
-  async function copyGameCode() {
-    try {
-      await navigator.clipboard.writeText(game.gameCode)
-      setCopyStatus('copied')
-      window.setTimeout(() => setCopyStatus('idle'), 2000)
-    } catch {
-      setCopyStatus('failed')
     }
   }
 
@@ -177,7 +172,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
   async function startMatch() {
     if (isStartingMatch || !validMaxScore || state.activePlayerIds.length < 3) return
     setIsStartingMatch(true)
-    await performMove(multiplayerActions.wisecracker.startMatch(maxScore))
+    await performMove(multiplayerActions.wisecracker.startMatch(parsedMaxScore))
     setIsStartingMatch(false)
   }
 
@@ -223,7 +218,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
       case 'history':
         return <MoveHistory moves={game.moveHistory} variant="embedded" />
       case 'chat':
-        return <GameChat messages={game.chatMessages || []} currentUserId={myId} onSend={onSendChat} variant="embedded" />
+        return <GameChat messages={game.chatMessages || []} currentUserId={myId} onSend={onSendChat} onError={onActionError} variant="embedded" />
       default:
         return <PlayersInspector game={game} state={state} currentUserId={myId} />
     }
@@ -236,13 +231,8 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
         <div className="wc-invite">
           <div>
             <p className="wc-kicker">Private room</p>
-            <p className="wc-invite__code">{game.gameCode}</p>
-            <p className="wc-muted">Share the code. Wisecracker needs at least three players.</p>
+            <p className="wc-muted">Share the invite code shown above. Wisecracker needs at least three players.</p>
           </div>
-          <button type="button" className="wc-button wc-button--quiet" onClick={() => void copyGameCode()}>
-            {copyStatus === 'copied' ? <Check aria-hidden="true" /> : <Clipboard aria-hidden="true" />}
-            {copyStatus === 'copied' ? 'Copied' : copyStatus === 'failed' ? 'Copy failed' : 'Copy code'}
-          </button>
         </div>
 
         <div className="wc-lobby__count" aria-live="polite">
@@ -259,19 +249,22 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
               <span>Points to win</span>
               <input
                 id="wc-max-score"
-                type="number"
-                min={1}
-                max={50}
+                type="text"
                 inputMode="numeric"
+                pattern="[0-9]*"
+                enterKeyHint="done"
                 value={maxScore}
-                onChange={(event) => setMaxScore(Number(event.target.value))}
+                onChange={(event) => {
+                  if (/^\d*$/.test(event.target.value)) setMaxScore(event.target.value)
+                }}
                 aria-describedby="wc-max-score-help"
+                aria-invalid={Boolean(maxScore && !validMaxScore) || undefined}
               />
             </label>
             <p id="wc-max-score-help" className="wc-muted">Choose a target from 1 to 50.</p>
             <button
               type="button"
-              className="wc-button wc-button--primary"
+              className="tactile-button tactile-button--primary wc-button wc-button--primary"
               disabled={!canStart || isStartingMatch}
               onClick={() => void startMatch()}
             >
@@ -314,18 +307,18 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
           <p id="wc-prompt-count" className={`wc-input-count ${promptBlankCount > WISECRACKER_MAX_BLANKS ? 'is-invalid' : ''}`}>
             {promptRemaining} characters remaining · {promptBlankCount}/{WISECRACKER_MAX_BLANKS} blanks
           </p>
-          {promptBlankCount > WISECRACKER_MAX_BLANKS && <p className="wc-field-error" role="alert">Use no more than {WISECRACKER_MAX_BLANKS} blanks.</p>}
+          {promptBlankCount > WISECRACKER_MAX_BLANKS && <p className="wc-field-error" role="status">Use no more than {WISECRACKER_MAX_BLANKS} blanks.</p>}
         </div>
         <div className="wc-preview" aria-label="Prompt preview">
           <span className="wc-kicker">On the card</span>
           <PromptCard prompt={prompt || 'Your prompt will appear here.'} />
         </div>
         <div className="wc-action-row">
-          <button type="button" className="wc-button wc-button--quiet" disabled={isRefreshingPrompt} onClick={() => void refreshPrompt()}>
+          <button type="button" className="tactile-button tactile-button--secondary wc-button wc-button--quiet" disabled={isRefreshingPrompt} onClick={() => void refreshPrompt()}>
             <RefreshCw className={isRefreshingPrompt ? 'wc-spin' : ''} aria-hidden="true" />
             {isRefreshingPrompt ? 'Refreshing' : 'New prompt'}
           </button>
-          <button type="button" className="wc-button wc-button--primary" disabled={!promptIsValid || isUsingPrompt} onClick={() => void applyPrompt()}>
+          <button type="button" className="tactile-button tactile-button--primary wc-button wc-button--primary" disabled={!promptIsValid || isUsingPrompt} onClick={() => void applyPrompt()}>
             <Sparkles aria-hidden="true" />
             {isUsingPrompt ? 'Using prompt' : 'Use prompt'}
           </button>
@@ -362,7 +355,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
                 />
               </label>
             ))}
-            <button type="submit" className="wc-button wc-button--success wc-button--wide" disabled={!canSubmitAnswers || isSubmittingAnswers}>
+            <button type="submit" className="tactile-button tactile-button--success wc-button wc-button--success wc-button--wide" disabled={!canSubmitAnswers || isSubmittingAnswers}>
               <Check aria-hidden="true" />
               {isSubmittingAnswers ? 'Submitting' : 'Lock in answers'}
             </button>
@@ -426,7 +419,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
         </div>
 
         {actionMode === 'revealAnswer' && (
-          <button type="button" className="wc-button wc-button--primary wc-button--wide" disabled={isRevealing} onClick={() => void revealNextAnswer()}>
+          <button type="button" className="tactile-button tactile-button--primary wc-button wc-button--primary wc-button--wide" disabled={isRevealing} onClick={() => void revealNextAnswer()}>
             <Sparkles aria-hidden="true" />
             {isRevealing ? 'Revealing' : revealedResponses.length === 0 ? 'Reveal first answer' : 'Reveal next answer'}
           </button>
@@ -466,7 +459,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
         {isHostAction ? (
           <button
             type="button"
-            className="wc-button wc-button--primary wc-button--wide"
+            className="tactile-button tactile-button--primary wc-button wc-button--primary wc-button--wide"
             disabled={isAdvancingRound}
             onClick={() => void advanceRound()}
           >
@@ -477,7 +470,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
           <WaitingNotice
             icon={Clock3}
             title={isComplete ? 'Match complete' : 'Next round coming up'}
-            detail={isComplete ? 'Return to the dashboard to create or join another room.' : 'The host will start the next prompt when the room is ready.'}
+            detail={isComplete ? (isHost ? 'Use Play Again above to gather everyone in a fresh lobby.' : 'The host can gather everyone in a fresh lobby with Play Again.') : 'The host will start the next prompt when the room is ready.'}
           />
         )}
       </div>
@@ -499,7 +492,11 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
     <div className="wisecracker-theme">
       <section className={`wc-hud wc-tone--${phasePresentation.tone}`} aria-label="Wisecracker status">
         <div className="wc-hud__lead">
-          <div className="wc-hud__avatar" aria-hidden="true">{chooser?.username?.[0]?.toUpperCase() || <Mic2 />}</div>
+          {chooser?.username ? (
+            <PlayerAvatar name={chooser.username} size="lg" status={chooserIsConnected ? 'turn' : 'offline'} />
+          ) : (
+            <div className="wc-hud__avatar" aria-hidden="true"><Mic2 /></div>
+          )}
           <div>
             <p className="wc-kicker">{phasePresentation.eyebrow}</p>
             <strong>{phasePresentation.label}</strong>
@@ -524,7 +521,6 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
             </div>
             <span className={`wc-phase-pill wc-phase-pill--${phasePresentation.tone}`}>{phasePresentation.label}</span>
           </header>
-          {moveError && <div className="wc-move-error" role="alert">{moveError}</div>}
           {actionMode === 'waitingPlayer' && (
             <div className="wc-midround-banner">
               <Clock3 aria-hidden="true" />
@@ -534,7 +530,7 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
           {renderRoundStage()}
         </section>
 
-        <aside className="wc-desktop-rail" aria-label="Wisecracker information">
+        {isDesktopLayout && <aside className="wc-desktop-rail" aria-label="Wisecracker information">
           <div className="wc-inspector">
             <TabletopTabs
               tabs={INSPECTOR_TABS}
@@ -552,44 +548,63 @@ export default function WisecrackerBoard({ game, user, onMove, onSendChat }: Pro
               {renderInspectorContent()}
             </div>
           </div>
-        </aside>
+        </aside>}
       </div>
 
-      <div className="wc-mobile-dock">
-        <TabletopDockButtons
-          tabs={INSPECTOR_TABS}
-          activeTab={activeTab}
-          onSelect={openInspector}
-          ariaLabel="Open Wisecracker information"
-          isOpen={sheetOpen}
-        />
-      </div>
-
-      <TabletopBottomSheet
-        isOpen={sheetOpen}
-        title={INSPECTOR_TABS.find((tab) => tab.id === activeTab)?.label || 'Game information'}
-        onClose={() => setSheetOpen(false)}
-      >
-        <div className="wisecracker-theme wc-sheet-content">
-          <TabletopTabs
+      {!isDesktopLayout && <>
+        <div className="wc-mobile-dock">
+          <TabletopDockButtons
             tabs={INSPECTOR_TABS}
             activeTab={activeTab}
-            onSelect={selectInspector}
-            ariaLabel="Wisecracker information"
-            idBase="wisecracker-sheet"
+            onSelect={openInspector}
+            ariaLabel="Open Wisecracker information"
+            isOpen={sheetOpen}
           />
-          <div
-            className="wc-sheet-content__body"
-            id="wisecracker-sheet-panel"
-            role="tabpanel"
-            aria-labelledby={`wisecracker-sheet-tab-${activeTab}`}
-          >
-            {renderInspectorContent()}
-          </div>
         </div>
-      </TabletopBottomSheet>
+
+        <TabletopBottomSheet
+          isOpen={sheetOpen}
+          title={INSPECTOR_TABS.find((tab) => tab.id === activeTab)?.label || 'Game information'}
+          onClose={() => setSheetOpen(false)}
+          contentKey={activeTab}
+        >
+          <div className="wisecracker-theme wc-sheet-content">
+            <TabletopTabs
+              tabs={INSPECTOR_TABS}
+              activeTab={activeTab}
+              onSelect={selectInspector}
+              ariaLabel="Wisecracker information"
+              idBase="wisecracker-sheet"
+            />
+            <div
+              className="wc-sheet-content__body"
+              id="wisecracker-sheet-panel"
+              role="tabpanel"
+              aria-labelledby={`wisecracker-sheet-tab-${activeTab}`}
+            >
+              {renderInspectorContent()}
+            </div>
+          </div>
+        </TabletopBottomSheet>
+      </>}
     </div>
   )
+}
+
+function useTabletopDesktopLayout(): boolean {
+  const [isDesktop, setIsDesktop] = useState(() => (
+    typeof window !== 'undefined' && window.matchMedia('(min-width: 1120px)').matches
+  ))
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(min-width: 1120px)')
+    const handleChange = (event: MediaQueryListEvent) => setIsDesktop(event.matches)
+    setIsDesktop(mediaQuery.matches)
+    mediaQuery.addEventListener('change', handleChange)
+    return () => mediaQuery.removeEventListener('change', handleChange)
+  }, [])
+
+  return isDesktop
 }
 
 function PromptCard({ prompt, featured = false }: { prompt: string; featured?: boolean }) {
@@ -696,7 +711,11 @@ function PlayersInspector({ game, state, currentUserId }: { game: Game; state: W
         const isWinner = state.matchWinnerUserId === id
         return (
           <div key={id} className={`wc-player-row ${isChooser ? 'is-chooser' : ''} ${isWinner ? 'is-winner' : ''}`}>
-            <span className="wc-player-row__avatar">{player?.username?.[0]?.toUpperCase() || '?'}</span>
+            <PlayerAvatar
+              name={player?.username || '?'}
+              size="md"
+              status={isChooser ? 'turn' : connected ? 'online' : 'offline'}
+            />
             <div className="wc-player-row__identity">
               <strong>{player?.username || 'Unknown'}</strong>
               <div>

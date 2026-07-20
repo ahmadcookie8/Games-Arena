@@ -30,6 +30,7 @@ interface ModalProps {
   primaryAction?: ModalAction
   secondaryAction?: ModalAction
   onClose: () => void
+  restoreFocusTo?: HTMLElement | null
 }
 
 const variantStyles: Record<ModalVariant, string> = {
@@ -54,6 +55,7 @@ export default function Modal({
   primaryAction,
   secondaryAction,
   onClose,
+  restoreFocusTo,
 }: ModalProps) {
   const primary = primaryAction ?? { label: 'Close', onClick: onClose }
   const VariantIcon = variantIcons[variant]
@@ -62,9 +64,11 @@ export default function Modal({
   const wasOpenRef = useRef(false)
 
   if (isOpen && !wasOpenRef.current && typeof document !== 'undefined') {
-    restoreFocusRef.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null
+    restoreFocusRef.current = restoreFocusTo?.isConnected
+      ? restoreFocusTo
+      : document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null
   }
   wasOpenRef.current = isOpen
 

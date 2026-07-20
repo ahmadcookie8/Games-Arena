@@ -548,8 +548,8 @@ export default function SnakeGame() {
                       type="button"
                       onClick={() => void updateSettings(size, selectedWallLooping)}
                       disabled={settingsLocked}
-                      className={`min-h-10 cursor-pointer rounded-lg px-3 py-2 text-sm font-medium capitalize transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-70 ${
-                        selectedBoardSize === size ? 'ui-action-primary shadow-accent' : 'border border-border-control bg-elevated text-text-secondary hover:bg-overlay hover:text-text-primary'
+                      className={`tactile-button min-h-10 cursor-pointer rounded-lg px-3 py-2 text-sm font-medium capitalize transition-[color,background-color,border-color,box-shadow,transform] duration-180 disabled:cursor-not-allowed disabled:opacity-70 ${
+                        selectedBoardSize === size ? 'tactile-button--primary ui-action-primary' : 'tactile-button--secondary border border-border-control bg-elevated text-text-secondary hover:bg-overlay hover:text-text-primary'
                       }`}
                     >
                       {size}
@@ -579,7 +579,7 @@ export default function SnakeGame() {
                   <button
                     type="button"
                     onClick={() => void completeRun(snakeState)}
-                    className="min-h-10 cursor-pointer rounded-lg border border-warning/40 bg-warning-subtle px-4 py-2 text-sm font-medium text-warning-text"
+                    className="tactile-button tactile-button--secondary min-h-10 cursor-pointer rounded-lg border border-warning/40 bg-warning-subtle px-4 py-2 text-sm font-medium text-warning-text"
                   >
                     Retry verification
                   </button>
@@ -588,7 +588,7 @@ export default function SnakeGame() {
                   type="button"
                   onClick={() => void retryGame()}
                   disabled={isRetrying}
-                  className="ui-action-primary interactive-lift min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold shadow-accent disabled:cursor-not-allowed disabled:opacity-60"
+                  className="tactile-button tactile-button--primary ui-action-primary min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isRetrying ? 'Starting...' : 'Retry'}
                 </button>}
@@ -649,7 +649,7 @@ export default function SnakeGame() {
                     window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                   }}
                   disabled={!isActive || snakeState.isGameOver || isStarting}
-                  className="ui-action-primary interactive-lift min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold shadow-accent disabled:cursor-not-allowed disabled:opacity-60"
+                  className="tactile-button tactile-button--primary ui-action-primary min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isStarting ? 'Starting...' : !snakeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
@@ -662,7 +662,7 @@ export default function SnakeGame() {
                   onPointerDown={(event) => handleDirectionPress(event, 'up')}
                   onClick={(event) => handleDirectionClick(event, 'up')}
                   onContextMenu={preventTouchContextMenu}
-                  className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
+                  className="tactile-button tactile-button--secondary min-h-12 select-none rounded-lg border border-border-control bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
                 >
                   Up
                 </button>
@@ -672,7 +672,7 @@ export default function SnakeGame() {
                   onPointerDown={(event) => handleDirectionPress(event, 'left')}
                   onClick={(event) => handleDirectionClick(event, 'left')}
                   onContextMenu={preventTouchContextMenu}
-                  className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
+                  className="tactile-button tactile-button--secondary min-h-12 select-none rounded-lg border border-border-control bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
                 >
                   Left
                 </button>
@@ -688,7 +688,7 @@ export default function SnakeGame() {
                     window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                   }}
                   disabled={!isActive || snakeState.isGameOver || isStarting}
-                  className="ui-action-primary min-h-12 rounded-xl text-xs font-bold shadow-accent disabled:opacity-60"
+                  className="tactile-button tactile-button--primary ui-action-primary min-h-12 rounded-xl text-xs font-bold disabled:opacity-60"
                 >
                   {isStarting ? 'Starting' : !snakeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
@@ -697,7 +697,7 @@ export default function SnakeGame() {
                   onPointerDown={(event) => handleDirectionPress(event, 'right')}
                   onClick={(event) => handleDirectionClick(event, 'right')}
                   onContextMenu={preventTouchContextMenu}
-                  className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
+                  className="tactile-button tactile-button--secondary min-h-12 select-none rounded-lg border border-border-control bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
                 >
                   Right
                 </button>
@@ -707,7 +707,7 @@ export default function SnakeGame() {
                   onPointerDown={(event) => handleDirectionPress(event, 'down')}
                   onClick={(event) => handleDirectionClick(event, 'down')}
                   onContextMenu={preventTouchContextMenu}
-                  className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
+                  className="tactile-button tactile-button--secondary min-h-12 select-none rounded-lg border border-border-control bg-elevated text-sm font-bold text-text-primary [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]"
                 >
                   Down
                 </button>

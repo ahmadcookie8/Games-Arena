@@ -82,7 +82,7 @@ export const SelectTrigger = forwardRef<
     <SelectPrimitive.Trigger
       ref={ref}
       className={cn(
-        'electric-control flex min-h-11 w-full items-center justify-between gap-3 px-3.5 py-2.5 text-left text-sm data-[placeholder]:text-text-disabled disabled:cursor-not-allowed disabled:opacity-50',
+        'electric-control flex min-h-11 w-full items-center justify-between gap-3 px-3.5 py-2.5 text-left text-sm transition-[border-color,background-color,box-shadow,transform] duration-180 active:translate-y-px active:scale-[0.995] data-[placeholder]:text-text-disabled disabled:cursor-not-allowed disabled:opacity-50',
         className,
       )}
       {...props}
@@ -106,7 +106,7 @@ export const SelectContent = forwardRef<
         position={position}
         sideOffset={6}
         className={cn(
-          'z-[70] max-h-[min(22rem,var(--radix-select-content-available-height))] min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-xl border border-border bg-surface text-text-primary shadow-lg data-[state=open]:animate-pop-in',
+          'z-[70] max-h-[min(22rem,var(--radix-select-content-available-height))] min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-xl border border-border bg-surface text-text-primary shadow-lg data-[state=closed]:animate-pop-out data-[state=open]:animate-pop-in',
           className,
         )}
         {...props}
@@ -144,7 +144,7 @@ export const SelectItem = forwardRef<
     <SelectPrimitive.Item
       ref={ref}
       className={cn(
-        'relative flex min-h-11 select-none items-center rounded-lg py-2 pl-9 pr-3 text-sm outline-none transition-colors duration-120 data-[disabled]:pointer-events-none data-[disabled]:text-text-disabled data-[highlighted]:bg-accent-subtle data-[highlighted]:text-text-primary data-[highlighted]:outline data-[highlighted]:outline-2 data-[highlighted]:outline-border-focus data-[highlighted]:outline-offset-[-2px]',
+        'relative flex min-h-11 select-none items-center rounded-lg py-2 pl-9 pr-3 text-sm outline-none transition-[color,background-color,transform] duration-120 active:translate-y-px active:scale-[0.99] data-[disabled]:pointer-events-none data-[disabled]:text-text-disabled data-[highlighted]:bg-accent-subtle data-[highlighted]:text-text-primary data-[highlighted]:outline data-[highlighted]:outline-2 data-[highlighted]:outline-border-focus data-[highlighted]:outline-offset-[-2px]',
         className,
       )}
       {...props}

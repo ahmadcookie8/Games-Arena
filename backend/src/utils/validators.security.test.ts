@@ -1,6 +1,7 @@
 import {
   joinGameSchema,
   joinRoomEventSchema,
+  leaveRoomEventSchema,
   makeMoveEventSchema,
   sendChatMessageEventSchema,
   singlePlayerReplaySchema,
@@ -58,6 +59,12 @@ describe('security-sensitive socket validators', () => {
     { gameId, unexpected: true },
   ])('rejects malformed joinRoom payload %#', (payload) => {
     expect(joinRoomEventSchema.safeParse(payload).success).toBe(false)
+  })
+
+  it('accepts only an exact game id for leaveRoom cleanup', () => {
+    expect(leaveRoomEventSchema.safeParse({ gameId }).success).toBe(true)
+    expect(leaveRoomEventSchema.safeParse({ gameId, unexpected: true }).success).toBe(false)
+    expect(leaveRoomEventSchema.safeParse({ gameId: { $ne: null } }).success).toBe(false)
   })
 
   it('accepts only exact Tic Tac Toe cells', () => {

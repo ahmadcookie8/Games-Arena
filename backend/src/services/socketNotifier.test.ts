@@ -4,13 +4,16 @@ import {
   createGameStateEnvelope,
   disconnectUserSockets,
   emitChatMessage,
+  emitGameReplayCreated,
   emitGameOver,
   emitGameUpdated,
   emitGamesChanged,
   emitMoveMade,
   emitPlayerPresenceChanged,
+  releaseActiveGameConnectionLeases,
   setSocketServer,
 } from './socketNotifier'
+import { activeGameConnectionLeases } from './activeGameConnectionLeases'
 
 type Emission = { room: string; event: string; payload: unknown }
 
@@ -138,5 +141,42 @@ describe('socket notifier reliability contract', () => {
     ])
     expect(inRoom).toHaveBeenCalledWith('user:user-1')
     expect(disconnectSockets).toHaveBeenCalledWith(true)
+  })
+
+  it('fans a rematch redirect with the unchanged payload to every source participant', () => {
+    const sourceGame = scrabbleGame()
+    const replayGame = {
+      ...scrabbleGame(),
+      _id: 'game-2',
+      gameCode: 'REPLAY12',
+    } as unknown as IGameDocument
+
+    emitGameReplayCreated(sourceGame, replayGame)
+
+    expect(emissions).toEqual([
+      {
+        room: 'user:user-1',
+        event: 'gameReplayCreated',
+        payload: { oldGameId: 'game-1', gameId: 'game-2', gameCode: 'REPLAY12', gameType: 'scrabble' },
+      },
+      {
+        room: 'user:user-2',
+        event: 'gameReplayCreated',
+        payload: { oldGameId: 'game-1', gameId: 'game-2', gameCode: 'REPLAY12', gameType: 'scrabble' },
+      },
+    ])
+  })
+
+  it('starts terminal lease cleanup before broadcasting the final full state', async () => {
+    const game = scrabbleGame()
+    game.status = 'completed'
+    const release = jest.spyOn(activeGameConnectionLeases, 'releaseGame').mockResolvedValue(2)
+
+    emitGameUpdated(game)
+
+    expect(release).toHaveBeenCalledWith('game-1')
+    expect(emissions.filter(({ event }) => event === 'gameUpdated')).toHaveLength(2)
+    await expect(releaseActiveGameConnectionLeases('game-1')).resolves.toBeUndefined()
+    release.mockRestore()
   })
 })

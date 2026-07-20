@@ -2,8 +2,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { Bot, Clock3, History, MessageCircle, Radio, Users } from 'lucide-react'
 import GameChat from './GameChat'
 import MoveHistory from './MoveHistory'
+import PlayerAvatar from './PlayerAvatar'
 import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs } from './TabletopShell'
+import { Button } from './ui'
 import type { TabletopTab } from './TabletopShell'
+import type { GameActionErrorReporter } from '../types/gameFeedback'
 import {
   formatTicTacToeMove,
   getLatestTicTacToeMoveIndex,
@@ -35,6 +38,7 @@ export interface TicTacToeExperienceProps {
   onPlayAgain?: () => void | Promise<unknown>
   onDifficultyChange?: (difficulty: TicTacToeDifficulty) => void | Promise<unknown>
   onSendChat?: (text: string) => Promise<ChatResponse>
+  onActionError?: GameActionErrorReporter
 }
 
 const DIFFICULTIES: readonly TicTacToeDifficulty[] = ['easy', 'medium', 'hard']
@@ -50,10 +54,10 @@ export default function TicTacToeExperience({
   onPlayAgain,
   onDifficultyChange,
   onSendChat,
+  onActionError,
 }: TicTacToeExperienceProps) {
   const [activeTab, setActiveTab] = useState<InspectorTabId>('players')
   const [isSheetOpen, setIsSheetOpen] = useState(false)
-  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
   const isDesktop = useDesktopLayout()
 
   const mode: GameMode = game.metadata?.mode === 'singlePlayer' ? 'singlePlayer' : 'multiplayer'
@@ -133,17 +137,6 @@ export default function TicTacToeExperience({
     if (mode === 'singlePlayer' && activeTab === 'chat') setActiveTab('players')
   }, [activeTab, mode])
 
-  async function copyInviteCode() {
-    try {
-      if (!navigator.clipboard) throw new Error('Clipboard is unavailable')
-      await navigator.clipboard.writeText(game.gameCode)
-      setCopyStatus('copied')
-      window.setTimeout(() => setCopyStatus('idle'), 2000)
-    } catch {
-      setCopyStatus('failed')
-    }
-  }
-
   function selectMobileTab(tabId: string) {
     setActiveTab(tabId as InspectorTabId)
     setIsSheetOpen(true)
@@ -170,6 +163,7 @@ export default function TicTacToeExperience({
         messages={game.chatMessages || []}
         currentUserId={currentUserId}
         onSend={onSendChat || unavailableChat}
+        onError={onActionError}
         variant="embedded"
       />
     )
@@ -222,15 +216,12 @@ export default function TicTacToeExperience({
 
           <CurrentAction
             actionMode={actionMode}
-            gameCode={game.gameCode}
             currentParticipantName={currentParticipant?.name}
             resultText={resultText}
             mode={mode}
             difficulty={difficulty}
             settingsLocked={settingsLocked}
             isReplaying={isReplaying}
-            copyStatus={copyStatus}
-            onCopyCode={() => { void copyInviteCode() }}
             onPlayAgain={onPlayAgain}
             onDifficultyChange={onDifficultyChange}
           />
@@ -272,7 +263,16 @@ export default function TicTacToeExperience({
             isOpen={isSheetOpen}
             title={activeTabLabel}
             onClose={() => setIsSheetOpen(false)}
+            contentKey={activeTab}
+            idBase={`${mobileIdBase}-sheet`}
           >
+            <TabletopTabs
+              tabs={inspectorTabs}
+              activeTab={activeTab}
+              onSelect={(tabId) => setActiveTab(tabId as InspectorTabId)}
+              ariaLabel="Tic Tac Toe table details"
+              idBase={mobileIdBase}
+            />
             <div
               className="ttt-inspector__panel ttt-inspector__panel--sheet"
               id={`${mobileIdBase}-panel`}
@@ -349,28 +349,22 @@ function TicTacToeHud({
 
 function CurrentAction({
   actionMode,
-  gameCode,
   currentParticipantName,
   resultText,
   mode,
   difficulty,
   settingsLocked,
   isReplaying,
-  copyStatus,
-  onCopyCode,
   onPlayAgain,
   onDifficultyChange,
 }: {
   actionMode: TicTacToeActionMode
-  gameCode: string
   currentParticipantName?: string
   resultText: string
   mode: GameMode
   difficulty: TicTacToeDifficulty
   settingsLocked: boolean
   isReplaying: boolean
-  copyStatus: 'idle' | 'copied' | 'failed'
-  onCopyCode: () => void
   onPlayAgain?: () => void | Promise<unknown>
   onDifficultyChange?: (difficulty: TicTacToeDifficulty) => void | Promise<unknown>
 }) {
@@ -385,25 +379,20 @@ function CurrentAction({
       </div>
 
       {actionMode === 'waitingForPlayer' && (
-        <div className="ttt-invite">
-          <span className="ttt-invite__code" aria-label={`Game code ${gameCode}`}>{gameCode}</span>
-          <button type="button" className="ttt-button ttt-button--primary" onClick={onCopyCode}>
-            {copyStatus === 'copied' ? 'Copied' : copyStatus === 'failed' ? 'Try copy again' : 'Copy code'}
-          </button>
-        </div>
+        <p className="text-sm font-semibold text-text-secondary">Use the invite code above to bring another player to this table.</p>
       )}
 
       {actionMode === 'computerThinking' && <span className="ttt-thinking" aria-hidden="true" />}
 
       {actionMode === 'complete' && onPlayAgain && (
-        <button
+        <Button
           type="button"
           className="ttt-button ttt-button--primary"
           onClick={() => { void onPlayAgain() }}
           disabled={isReplaying}
         >
           {isReplaying ? 'Starting...' : 'Play Again'}
-        </button>
+        </Button>
       )}
 
       {mode === 'singlePlayer' && (actionMode === 'play' || actionMode === 'computerThinking') && (
@@ -414,15 +403,16 @@ function CurrentAction({
           </legend>
           <div className="ttt-difficulty__options">
             {DIFFICULTIES.map((level) => (
-              <button
+              <Button
                 key={level}
                 type="button"
+                variant={difficulty === level ? 'primary' : 'secondary'}
                 className={`ttt-difficulty__option${difficulty === level ? ' ttt-difficulty__option--selected' : ''}`}
                 aria-pressed={difficulty === level}
                 onClick={() => { void onDifficultyChange?.(level) }}
               >
                 {level}
-              </button>
+              </Button>
             ))}
           </div>
         </fieldset>
@@ -451,11 +441,14 @@ function PlayersPanel({
 
         return (
           <article key={participant.id} className={`ttt-player${isCurrent ? ' ttt-player--current' : ''}`}>
-            <span className={`ttt-player__mark ttt-player__mark--${participant.symbol.toLowerCase()}`}>
-              <TicTacToeMark symbol={participant.symbol} size="small" />
-            </span>
+            <PlayerAvatar
+              name={participant.name}
+              size="md"
+              status={isCurrent ? 'turn' : isConnected ? 'online' : 'offline'}
+              ariaLabel={`${participant.name}, ${isConnected ? 'online' : 'offline'}`}
+            />
             <div className="ttt-player__copy">
-              <h3>{participant.name}</h3>
+              <h3>{participant.name} <TicTacToeMark symbol={participant.symbol} size="small" /></h3>
               <p className={isConnected ? 'ttt-player__online' : 'ttt-player__offline'}>
                 {participant.isComputer ? 'Computer opponent' : isConnected ? 'Online' : 'Offline'}
               </p>

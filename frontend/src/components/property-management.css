@@ -470,7 +470,16 @@
   isolation: isolate;
 }
 
-.pm-map-token {
+.pm-map-token.player-avatar {
+  width: clamp(0.64rem, calc(0.9rem * var(--pm-board-scale)), 0.9rem);
+  height: clamp(0.64rem, calc(0.9rem * var(--pm-board-scale)), 0.9rem);
+  margin-left: -0.18rem;
+  border-width: 1px;
+  border-radius: clamp(0.2rem, calc(0.3rem * var(--pm-board-scale)), 0.3rem);
+  font-size: clamp(0.28rem, calc(0.38rem * var(--pm-board-scale)), 0.38rem);
+}
+
+.pm-map-token--more {
   display: inline-flex;
   width: clamp(0.64rem, calc(0.9rem * var(--pm-board-scale)), 0.9rem);
   height: clamp(0.64rem, calc(0.9rem * var(--pm-board-scale)), 0.9rem);
@@ -478,18 +487,11 @@
   justify-content: center;
   margin-left: -0.18rem;
   border: 1px solid white;
-  border-radius: 999px;
+  border-radius: 0.3rem;
+  background: var(--pm-ink-soft);
   color: white;
-  font-family: var(--font-sans);
   font-size: clamp(0.28rem, calc(0.38rem * var(--pm-board-scale)), 0.38rem);
   font-weight: 900;
-  line-height: 1;
-  text-shadow: 0 1px 1px oklch(0% 0 0 / 0.55);
-  box-shadow: 0 1px 3px oklch(0% 0 0 / 0.34);
-}
-
-.pm-map-token--more {
-  background: var(--pm-ink-soft);
 }
 
 .pm-board-grid--overview .pm-tile-content,
@@ -844,13 +846,6 @@
   color: var(--text-secondary);
   font-size: 0.72rem;
   font-weight: 750;
-}
-
-.pm-player-pill > span {
-  width: 0.55rem;
-  height: 0.55rem;
-  flex: none;
-  border-radius: 999px;
 }
 
 .pm-mini-label {

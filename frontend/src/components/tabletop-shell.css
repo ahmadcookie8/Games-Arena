@@ -53,8 +53,6 @@
   font-size: 0.72rem;
 }
 
-.tabletop-route-masthead__code span { color: var(--accent); font-family: var(--font-mono); font-weight: 800; }
-
 .tabletop-route-masthead__actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.55rem; }
 
 .tabletop-route-status {
@@ -131,6 +129,10 @@
 
 .tabletop-tabs button:hover,
 .tabletop-tabs button.is-active { background: var(--accent-subtle); color: var(--accent); }
+
+.tabletop-tabs button:active:not(:disabled) {
+  transform: translateY(1px) scale(0.985);
+}
 
 .tabletop-tabs button:focus-visible,
 .tabletop-route-masthead button:focus-visible {

@@ -1,0 +1,102 @@
+.tactile-button {
+  --tactile-edge: color-mix(in oklch, var(--border-strong) 72%, black);
+  --tactile-glow: color-mix(in oklch, var(--border-strong) 16%, transparent);
+  box-shadow:
+    inset 0 1px 0 oklch(100% 0 0 / 0.28),
+    0 0.2rem 0 var(--tactile-edge),
+    0 0.55rem 1.15rem var(--tactile-glow);
+  transform: translateY(0);
+  will-change: transform;
+}
+
+.tactile-button::before {
+  position: absolute;
+  inset: 1px 0.2rem auto;
+  height: 38%;
+  border-radius: inherit;
+  background: linear-gradient(180deg, oklch(100% 0 0 / 0.16), transparent);
+  content: '';
+  pointer-events: none;
+}
+
+.tactile-button > * {
+  position: relative;
+  z-index: 1;
+}
+
+.tactile-button.tactile-button--primary {
+  --tactile-edge: oklch(30% 0.16 267);
+  --tactile-glow: oklch(48% 0.22 245 / 0.28);
+  box-shadow:
+    inset 0 1px 0 oklch(100% 0 0 / 0.28),
+    0 0.2rem 0 var(--tactile-edge),
+    0 0.55rem 1.15rem var(--tactile-glow);
+}
+
+.tactile-button.tactile-button--secondary {
+  --tactile-edge: color-mix(in oklch, var(--border-control) 66%, black);
+  --tactile-glow: color-mix(in oklch, var(--border-strong) 14%, transparent);
+}
+
+.tactile-button.tactile-button--ghost {
+  --tactile-edge: color-mix(in oklch, var(--border) 72%, black);
+  --tactile-glow: transparent;
+  box-shadow:
+    inset 0 1px 0 oklch(100% 0 0 / 0.16),
+    0 0.14rem 0 var(--tactile-edge);
+}
+
+.tactile-button.tactile-button--danger {
+  --tactile-edge: oklch(31% 0.16 27);
+  --tactile-glow: oklch(48% 0.21 27 / 0.24);
+  box-shadow:
+    inset 0 1px 0 oklch(100% 0 0 / 0.28),
+    0 0.2rem 0 var(--tactile-edge),
+    0 0.55rem 1.15rem var(--tactile-glow);
+}
+
+.tactile-button.tactile-button--success {
+  --tactile-edge: oklch(31% 0.12 155);
+  --tactile-glow: oklch(47% 0.15 155 / 0.22);
+  box-shadow:
+    inset 0 1px 0 oklch(100% 0 0 / 0.28),
+    0 0.2rem 0 var(--tactile-edge),
+    0 0.55rem 1.15rem var(--tactile-glow);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  button.tactile-button:hover:not(:disabled) {
+    box-shadow:
+      inset 0 1px 0 oklch(100% 0 0 / 0.34),
+      0 0.3rem 0 var(--tactile-edge),
+      0 0.72rem 1.35rem var(--tactile-glow);
+    transform: translateY(-0.12rem);
+  }
+
+  button.tactile-button.tactile-button--ghost:hover:not(:disabled) {
+    box-shadow:
+      inset 0 1px 0 oklch(100% 0 0 / 0.18),
+      0 0.22rem 0 var(--tactile-edge);
+  }
+}
+
+button.tactile-button:active:not(:disabled),
+button.tactile-button[data-pressed='true']:not(:disabled) {
+  box-shadow:
+    inset 0 1px 0 oklch(100% 0 0 / 0.16),
+    0 0.03rem 0 var(--tactile-edge),
+    0 0.2rem 0.48rem var(--tactile-glow);
+  transform: translateY(0.17rem) scale(0.99);
+  transition-duration: var(--motion-fast);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tactile-button {
+    will-change: auto;
+  }
+
+  .tactile-button:hover:not(:disabled),
+  .tactile-button:active:not(:disabled) {
+    transform: none;
+  }
+}

@@ -227,18 +227,43 @@ integrationDescribe('real-service security integration', () => {
     await expectSocketRejected(user.cookie, config.corsOrigin)
   })
 
-  test('enforces five live Engine.IO transports per user before namespace CONNECT', async () => {
+  test('limits only active game-room connections to ten and keeps idle or completed sockets exempt', async () => {
     const user = await seedUser('socketlimit')
-    const rawTransports: EngineClientSocket[] = []
-    for (let index = 0; index < 5; index += 1) rawTransports.push(await connectRawEngine(user.cookie))
+    const userId = String(user.document._id)
+    const completedGame = await gameService.createGame(userId, user.document.username, 'ticTacToe')
+    await Game.findByIdAndUpdate(completedGame._id, {
+      $set: { status: 'completed', completedAt: new Date() },
+    })
+    const activeGame = await gameService.createGame(userId, user.document.username, 'ticTacToe')
+    const userSockets: ClientSocket[] = []
 
-    await expectSocketRejected(user.cookie, config.corsOrigin)
-    rawTransports[0].close()
-    engineSockets.delete(rawTransports[0])
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    // Transport handshakes and completed-game views do not consume a slot.
+    for (let index = 0; index < 11; index += 1) {
+      const socket = await connectSocket(user.cookie)
+      userSockets.push(socket)
+      expect((await emitWithAck(socket, 'joinRoom', { gameId: String(completedGame._id) })).ok).toBe(true)
+    }
 
-    const replacement = await connectSocket(user.cookie)
-    expect(replacement.connected).toBe(true)
+    for (const socket of userSockets.slice(0, 10)) {
+      expect((await emitWithAck(socket, 'joinRoom', { gameId: String(activeGame._id) })).ok).toBe(true)
+    }
+    expect(await emitWithAck(userSockets[10], 'joinRoom', { gameId: String(activeGame._id) })).toEqual({
+      ok: false,
+      error: {
+        code: 'SOCKET_CONNECTION_LIMIT',
+        message: 'You can have at most 10 active game connections',
+      },
+    })
+    expect(userSockets[10].connected).toBe(true)
+
+    // Explicit leave is idempotent and makes the capacity reusable immediately.
+    expect((await emitWithAck(userSockets[0], 'leaveRoom', { gameId: String(activeGame._id) })).ok).toBe(true)
+    expect((await emitWithAck(userSockets[0], 'leaveRoom', { gameId: String(activeGame._id) })).ok).toBe(true)
+    expect((await emitWithAck(userSockets[10], 'joinRoom', { gameId: String(activeGame._id) })).ok).toBe(true)
+
+    await gameService.closeGame(String(activeGame._id), userId)
+    const replacementGame = await gameService.createGame(userId, user.document.username, 'ticTacToe')
+    expect((await emitWithAck(userSockets[0], 'joinRoom', { gameId: String(replacementGame._id) })).ok).toBe(true)
   })
 
   test('keeps multi-socket presence accurate and increments disconnects only on the last departure', async () => {
@@ -318,13 +343,20 @@ integrationDescribe('real-service security integration', () => {
 
   test('enforces global, chat, and move event budgets against real Redis', async () => {
     const globalUser = await seedUser('globallimit')
+    const globalGame = await gameService.createGame(
+      String(globalUser.document._id),
+      globalUser.document.username,
+      'ticTacToe'
+    )
     const globalSocket = await connectSocket(globalUser.cookie)
-    for (let eventNumber = 0; eventNumber < 120; eventNumber += 1) {
+    expect((await emitWithAck(globalSocket, 'joinRoom', { gameId: String(globalGame._id) })).ok).toBe(true)
+    for (let eventNumber = 0; eventNumber < 119; eventNumber += 1) {
       const ack = await emitWithAck(globalSocket, 'unsupportedEvent', {})
       expect(ack.error?.code).toBe('UNKNOWN_EVENT')
     }
     const globalLimited = await emitWithAck(globalSocket, 'unsupportedEvent', {})
     expect(globalLimited.error?.code).toBe('RATE_LIMITED')
+    expect((await emitWithAck(globalSocket, 'leaveRoom', { gameId: String(globalGame._id) })).ok).toBe(true)
 
     await disconnectTestSockets()
     await getRedisClient().flushdb()
@@ -668,7 +700,7 @@ integrationDescribe('real-service security integration', () => {
     await expect(getRedisClient().ping()).resolves.toBe('PONG')
   })
 
-  test('lets only the host close a started game and notifies every participant without processing statistics', async () => {
+  test('lets any participant close a started game and notifies every participant without processing statistics', async () => {
     const owner = await seedUser('closeowner')
     const challenger = await seedUser('closechallenger')
     const outsider = await seedUser('closeoutsider')
@@ -682,14 +714,10 @@ integrationDescribe('real-service security integration', () => {
       headers: { Cookie: user.cookie, Origin: config.corsOrigin },
     })
 
-    const nonHostResponse = await closeRequest(challenger)
-    expect(nonHostResponse.status).toBe(403)
-    expect(await nonHostResponse.json()).toMatchObject({ code: 'FORBIDDEN' })
-    expect((await Game.findById(game._id).orFail()).status).toBe('active')
-
     const outsiderResponse = await closeRequest(outsider)
     expect(outsiderResponse.status).toBe(404)
     expect(await outsiderResponse.json()).toMatchObject({ code: 'GAME_NOT_FOUND' })
+    expect((await Game.findById(game._id).orFail()).status).toBe('active')
 
     const ownerSocket = await connectSocket(owner.cookie)
     const challengerSocket = await connectSocket(challenger.cookie)
@@ -703,7 +731,7 @@ integrationDescribe('real-service security integration', () => {
     const challengerUpdate = nextEvent(challengerSocket, 'gameUpdated')
     const challengerRefresh = nextEvent(challengerSocket, 'gamesChanged')
 
-    const response = await closeRequest(owner)
+    const response = await closeRequest(challenger)
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({ game: { status: 'abandoned' } })
 
@@ -743,7 +771,7 @@ integrationDescribe('real-service security integration', () => {
     expect(persistedLargerGame.statsProcessedAt).toBeUndefined()
   })
 
-  test('serializes host close races against moves and resignation', async () => {
+  test('serializes participant close races against moves and resignation', async () => {
     const owner = await seedUser('closeraceowner')
     const challenger = await seedUser('closeracechallenger')
     const ownerId = String(owner.document._id)

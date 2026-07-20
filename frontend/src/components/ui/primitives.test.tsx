@@ -19,14 +19,18 @@ import {
 
 describe('form and action primitives', () => {
   it.each([
-    ['primary', 'ui-action-primary'],
-    ['secondary', 'bg-surface'],
-    ['ghost', 'bg-transparent'],
-    ['success', 'ui-action-success'],
-    ['danger', 'ui-action-danger'],
-  ] as const)('renders the %s button treatment', (variant, expectedClass) => {
+    ['primary', 'ui-action-primary', 'tactile-button--primary'],
+    ['secondary', 'bg-surface', 'tactile-button--secondary'],
+    ['ghost', 'bg-transparent', 'tactile-button--ghost'],
+    ['success', 'ui-action-success', 'tactile-button--success'],
+    ['danger', 'ui-action-danger', 'tactile-button--danger'],
+  ] as const)('renders the %s button treatment', (variant, expectedClass, tactileClass) => {
     render(<Button variant={variant}>{variant} action</Button>)
-    expect(screen.getByRole('button', { name: `${variant} action` })).toHaveClass(expectedClass)
+    expect(screen.getByRole('button', { name: `${variant} action` })).toHaveClass(
+      'tactile-button',
+      tactileClass,
+      expectedClass,
+    )
   })
 
   it('associates visible labels, hints, and errors with a field', () => {

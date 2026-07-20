@@ -37,6 +37,7 @@ export type { BadgeProps } from './badge'
 export { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from './card'
 export type { CardProps } from './card'
 export {
+  AnimatedSheetBody,
   BottomSheet,
   BottomSheetClose,
   BottomSheetContent,
@@ -56,7 +57,7 @@ export {
   DialogTitle,
   DialogTrigger,
 } from './dialog'
-export type { DialogContentProps } from './dialog'
+export type { AnimatedSheetBodyProps, BottomSheetContentProps, DialogContentProps } from './dialog'
 export { Skeleton, SkeletonCard } from './skeleton'
 export type { SkeletonProps } from './skeleton'
 export { EmptyState } from './empty-state'

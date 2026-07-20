@@ -1,17 +1,18 @@
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '../../lib/cn'
+import './tactile-button.css'
 
 export const buttonVariants = cva(
-  'interactive-lift relative inline-flex shrink-0 select-none items-center justify-center gap-2 whitespace-nowrap rounded-xl border text-sm font-semibold tracking-[-0.01em] shadow-sm transition-[color,background-color,border-color,box-shadow,transform,opacity] duration-180 ease-out focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-border-focus focus-visible:ring-offset-2 focus-visible:ring-offset-page disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50',
+  'tactile-button relative inline-flex shrink-0 select-none items-center justify-center gap-2 whitespace-nowrap rounded-xl border text-sm font-semibold tracking-[-0.01em] transition-[color,background-color,border-color,box-shadow,transform,opacity] duration-180 ease-out focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-border-focus focus-visible:ring-offset-2 focus-visible:ring-offset-page disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50',
   {
     variants: {
       variant: {
-        primary: 'ui-action-primary border-transparent shadow-accent',
-        secondary: 'border-border-control bg-surface text-text-primary hover:border-accent-muted hover:bg-elevated',
-        ghost: 'border-transparent bg-transparent text-text-secondary shadow-none hover:bg-overlay hover:text-text-primary',
-        danger: 'ui-action-danger border-transparent',
-        success: 'ui-action-success border-transparent',
+        primary: 'tactile-button--primary ui-action-primary border-transparent',
+        secondary: 'tactile-button--secondary border-border-control bg-surface text-text-primary hover:border-accent-muted hover:bg-elevated',
+        ghost: 'tactile-button--ghost border-border bg-transparent text-text-secondary hover:border-border-control hover:bg-overlay hover:text-text-primary',
+        danger: 'tactile-button--danger ui-action-danger border-transparent',
+        success: 'tactile-button--success ui-action-success border-transparent',
       },
       size: {
         sm: 'min-h-9 px-3 py-1.5 text-xs',

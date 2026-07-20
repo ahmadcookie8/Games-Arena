@@ -23,6 +23,7 @@ jest.mock('./socketNotifier', () => ({
   emitGameUpdated: jest.fn(),
   emitGamesChanged: jest.fn(),
   emitMoveMade: jest.fn(),
+  releaseActiveGameConnectionLeases: jest.fn().mockResolvedValue(undefined),
 }))
 
 jest.mock('./userService', () => ({
@@ -39,11 +40,18 @@ jest.mock('../utils/securityLogger', () => ({
 const { Game } = jest.requireMock('../models/Game') as {
   Game: { create: jest.Mock; findById: jest.Mock }
 }
-const { emitChatMessage, emitGameReplayCreated, emitGameUpdated, emitGamesChanged } = jest.requireMock('./socketNotifier') as {
+const {
+  emitChatMessage,
+  emitGameReplayCreated,
+  emitGameUpdated,
+  emitGamesChanged,
+  releaseActiveGameConnectionLeases,
+} = jest.requireMock('./socketNotifier') as {
   emitChatMessage: jest.Mock
   emitGameReplayCreated: jest.Mock
   emitGameUpdated: jest.Mock
   emitGamesChanged: jest.Mock
+  releaseActiveGameConnectionLeases: jest.Mock
 }
 const { userService } = jest.requireMock('./userService') as {
   userService: {
@@ -201,6 +209,7 @@ describe('gameService.closeGame', () => {
     expect(game.completedAt).toBeInstanceOf(Date)
     expect(game.lastMoveAt).toBeInstanceOf(Date)
     expect(game.save).toHaveBeenCalled()
+    expect(releaseActiveGameConnectionLeases).toHaveBeenCalledWith('game-1')
     expect(emitGameUpdated).toHaveBeenCalledWith(game)
     expect(emitGamesChanged).toHaveBeenCalledWith(game)
     expect(userService.updateStatsAfterGame).not.toHaveBeenCalled()
@@ -235,7 +244,10 @@ describe('gameService.closeGame', () => {
   })
 
   it('allows the host to abandon a started multiplayer game without recording a result or statistics', async () => {
-    const game = createGame({ statsProcessedAt: new Date('2024-01-02T00:00:00.000Z') })
+    const game = createGame({
+      statsProcessedAt: new Date('2024-01-02T00:00:00.000Z'),
+      statsParticipantIds: [{ toString: () => 'user-1' }, { toString: () => 'user-2' }],
+    })
     Game.findById.mockResolvedValue(game)
 
     await expect(gameService.closeGame('game-1', 'user-1')).resolves.toBe(game)
@@ -243,12 +255,21 @@ describe('gameService.closeGame', () => {
     expect(game.status).toBe('abandoned')
     expect(game.result).toBeUndefined()
     expect(game.statsProcessedAt).toBeUndefined()
+    expect(game.statsParticipantIds).toBeUndefined()
     expect(game.save).toHaveBeenCalled()
+    expect(releaseActiveGameConnectionLeases).toHaveBeenCalledWith('game-1')
+    expect(game.save.mock.invocationCallOrder[0]).toBeLessThan(
+      releaseActiveGameConnectionLeases.mock.invocationCallOrder[0]
+    )
+    expect(releaseActiveGameConnectionLeases.mock.invocationCallOrder[0]).toBeLessThan(
+      emitGameUpdated.mock.invocationCallOrder[0]
+    )
     expect(userService.updateStatsAfterGame).not.toHaveBeenCalled()
     expect(userService.invalidateLeaderboardCache).not.toHaveBeenCalled()
     expect(emitGameUpdated).toHaveBeenCalledWith(game)
     expect(emitGamesChanged).toHaveBeenCalledWith(game)
-    expect(logSecurityEvent).toHaveBeenCalledWith('game.host_closed_in_progress', {
+    expect(logSecurityEvent).toHaveBeenCalledWith('game.participant_closed_in_progress', {
+      closedByUserId: 'user-1',
       gameId: 'game-1',
       gameType: 'ticTacToe',
       hostUserId: 'user-1',
@@ -270,21 +291,32 @@ describe('gameService.closeGame', () => {
     await expect(gameService.closeGame('game-1', 'user-1')).resolves.toBe(game)
 
     expect(game.status).toBe('abandoned')
-    expect(logSecurityEvent).toHaveBeenCalledWith('game.host_closed_in_progress', expect.objectContaining({
+    expect(logSecurityEvent).toHaveBeenCalledWith('game.participant_closed_in_progress', expect.objectContaining({
+      closedByUserId: 'user-1',
+      hostUserId: 'user-1',
       gameType: 'wisecracker',
       playerCount: 3,
     }))
   })
 
-  it('rejects an in-progress close from a non-host participant', async () => {
+  it('allows a non-host participant to close an in-progress game', async () => {
     const game = createGame()
     Game.findById.mockResolvedValue(game)
 
-    await expect(gameService.closeGame('game-1', 'user-2')).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(gameService.closeGame('game-1', 'user-2')).resolves.toBe(game)
 
-    expect(game.status).toBe('active')
-    expect(game.save).not.toHaveBeenCalled()
-    expect(logSecurityEvent).not.toHaveBeenCalled()
+    expect(game.status).toBe('abandoned')
+    expect(game.result).toBeUndefined()
+    expect(game.save).toHaveBeenCalled()
+    expect(logSecurityEvent).toHaveBeenCalledWith('game.participant_closed_in_progress', {
+      closedByUserId: 'user-2',
+      gameId: 'game-1',
+      gameType: 'ticTacToe',
+      hostUserId: 'user-1',
+      playerCount: 2,
+    })
+    expect(emitGameUpdated).toHaveBeenCalledWith(game)
+    expect(emitGamesChanged).toHaveBeenCalledWith(game)
   })
 })
 
@@ -360,13 +392,13 @@ describe('gameService.replayGame', () => {
     jest.clearAllMocks()
   })
 
-  it('creates a fresh invite-only Tic Tac Toe room for the replay requester', async () => {
+  it('creates one fresh Tic Tac Toe room containing the completed roster', async () => {
     const sourceGame = createGame({ status: 'completed', chatMessages: [{ messageId: 'old' }], moveHistory: [{ moveNumber: 1 }] })
     const replayGame = createGame({ _id: 'game-2', status: 'active', gameCode: 'REPLAY', moveHistory: [], chatMessages: [] })
     Game.findById.mockResolvedValue(sourceGame)
     Game.create.mockResolvedValue(replayGame)
 
-    const result = await gameService.replayGame('game-1', 'user-2')
+    const result = await gameService.replayGame('game-1', 'user-1')
 
     expect(result).toBe(replayGame)
     expect(Game.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -374,19 +406,21 @@ describe('gameService.replayGame', () => {
       moveHistory: [],
       chatMessages: [],
       currentTurnIndex: 0,
-      currentTurn: sourceGame.players[1].userId,
+      rematchOf: sourceGame._id,
+      currentTurn: sourceGame.players[0].userId,
       gameState: { board: Array(9).fill(null), currentSymbol: 'X' },
       metadata: { ratedGame: false, mode: 'multiplayer', infiniteLetters: undefined },
     }))
     expect(Game.create.mock.calls[0][0].players).toEqual([
-      expect.objectContaining({ userId: sourceGame.players[1].userId, username: 'bob', index: 0, isConnected: false }),
+      expect.objectContaining({ userId: sourceGame.players[0].userId, username: 'alice', index: 0, isConnected: false }),
+      expect.objectContaining({ userId: sourceGame.players[1].userId, username: 'bob', index: 1, isConnected: false }),
     ])
-    expect(emitGameReplayCreated).toHaveBeenCalledWith(sourceGame, replayGame, 'user-2')
+    expect(emitGameReplayCreated).toHaveBeenCalledWith(sourceGame, replayGame)
     expect(emitGamesChanged).not.toHaveBeenCalledWith(sourceGame)
     expect(emitGamesChanged).toHaveBeenCalledWith(replayGame)
   })
 
-  it('preserves Scrabble infinite letters and creates a fresh rack only for the requester', async () => {
+  it('preserves Scrabble infinite letters and deals fresh racks to the completed roster', async () => {
     const sourceGame = createGame({
       gameType: 'scrabble',
       status: 'completed',
@@ -401,14 +435,16 @@ describe('gameService.replayGame', () => {
     const created = Game.create.mock.calls[0][0]
     expect(created.metadata).toEqual({ ratedGame: false, mode: 'multiplayer', infiniteLetters: true })
     expect(created.gameState.infiniteLetters).toBe(true)
-    expect(Object.keys(created.gameState.racks)).toEqual(['user-1'])
-    expect(created.gameState.scores).toEqual({ 'user-1': 0 })
+    expect(Object.keys(created.gameState.racks)).toEqual(['user-1', 'user-2'])
+    expect(created.gameState.scores).toEqual({ 'user-1': 0, 'user-2': 0 })
     expect(created.gameState.board.flat().every((cell: unknown) => cell === null)).toBe(true)
   })
 
   it('rejects non-players, non-completed games, single-player games, and unsupported games', async () => {
     Game.findById.mockResolvedValue(createGame({ status: 'completed' }))
     await expect(gameService.replayGame('game-1', 'user-3')).rejects.toBeInstanceOf(NotFoundError)
+
+    await expect(gameService.replayGame('game-1', 'user-2')).rejects.toBeInstanceOf(ForbiddenError)
 
     Game.findById.mockResolvedValue(createGame({ status: 'active' }))
     await expect(gameService.replayGame('game-1', 'user-1')).rejects.toBeInstanceOf(BadRequestError)

@@ -25,7 +25,7 @@ export const TabsTrigger = forwardRef<
     <TabsPrimitive.Trigger
       ref={ref}
       className={cn(
-        'inline-flex min-h-9 flex-1 select-none items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-semibold outline-none transition-[color,background-color,box-shadow,transform] duration-180 focus-visible:ring-3 focus-visible:ring-border-focus disabled:pointer-events-none disabled:text-text-disabled data-[state=active]:bg-surface data-[state=active]:text-text-primary data-[state=active]:shadow-sm hover:text-text-primary',
+        'inline-flex min-h-9 flex-1 select-none items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-semibold outline-none transition-[color,background-color,box-shadow,transform] duration-180 active:translate-y-px active:scale-[0.985] focus-visible:ring-3 focus-visible:ring-border-focus disabled:pointer-events-none disabled:text-text-disabled data-[state=active]:bg-surface data-[state=active]:text-text-primary data-[state=active]:shadow-sm hover:text-text-primary',
         className,
       )}
       {...props}
@@ -40,7 +40,7 @@ export const TabsContent = forwardRef<
   return (
     <TabsPrimitive.Content
       ref={ref}
-      className={cn('mt-4 outline-none data-[state=active]:animate-fade-in focus-visible:ring-3 focus-visible:ring-border-focus', className)}
+      className={cn('mt-4 outline-none data-[state=active]:animate-panel-in focus-visible:ring-3 focus-visible:ring-border-focus', className)}
       {...props}
     />
   )
@@ -113,7 +113,7 @@ export function SegmentedControl({ items, value, onValueChange, ariaLabel, class
             disabled={item.disabled}
             onClick={() => onValueChange(item.value)}
             onKeyDown={(event) => handleKeyDown(event, index)}
-            className="inline-flex min-h-9 select-none items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-semibold outline-none transition-[color,background-color,box-shadow,transform] duration-180 focus-visible:ring-3 focus-visible:ring-border-focus disabled:pointer-events-none disabled:text-text-disabled aria-checked:bg-surface aria-checked:text-text-primary aria-checked:shadow-sm hover:text-text-primary"
+            className="inline-flex min-h-9 select-none items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-semibold outline-none transition-[color,background-color,box-shadow,transform] duration-180 active:translate-y-px active:scale-[0.985] focus-visible:ring-3 focus-visible:ring-border-focus disabled:pointer-events-none disabled:text-text-disabled aria-checked:bg-surface aria-checked:text-text-primary aria-checked:shadow-sm hover:text-text-primary"
           >
             {item.label}
           </button>

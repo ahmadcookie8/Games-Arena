@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Game } from '../types/game'
-import { canHostCloseGame, getCloseGamePrompt } from './gameClose'
+import { canParticipantCloseGame, getCloseGamePrompt } from './gameClose'
 
 function createGame(overrides: Partial<Game> = {}): Game {
   return {
@@ -22,20 +22,20 @@ function createGame(overrides: Partial<Game> = {}): Game {
   }
 }
 
-describe('host close permission', () => {
-  it('allows the first player to close an active game', () => {
-    expect(canHostCloseGame(createGame(), 'host-1')).toBe(true)
-  })
-
-  it('does not allow another participant or a nonparticipant to close it', () => {
+describe('participant close permission', () => {
+  it('allows every participant to close an active game', () => {
     const game = createGame()
 
-    expect(canHostCloseGame(game, 'guest-1')).toBe(false)
-    expect(canHostCloseGame(game, 'stranger-1')).toBe(false)
+    expect(canParticipantCloseGame(game, 'host-1')).toBe(true)
+    expect(canParticipantCloseGame(game, 'guest-1')).toBe(true)
   })
 
-  it.each(['paused', 'completed', 'abandoned'] as const)('does not allow an active host to close a %s game', (status) => {
-    expect(canHostCloseGame(createGame({ status }), 'host-1')).toBe(false)
+  it('does not allow a nonparticipant to close it', () => {
+    expect(canParticipantCloseGame(createGame(), 'stranger-1')).toBe(false)
+  })
+
+  it.each(['paused', 'completed', 'abandoned'] as const)('does not allow a participant to close a %s game', (status) => {
+    expect(canParticipantCloseGame(createGame({ status }), 'host-1')).toBe(false)
   })
 
   it('allows the sole host to close an active solo game', () => {
@@ -44,12 +44,12 @@ describe('host close permission', () => {
       metadata: { mode: 'singlePlayer' },
     })
 
-    expect(canHostCloseGame(game, 'host-1')).toBe(true)
+    expect(canParticipantCloseGame(game, 'host-1')).toBe(true)
   })
 
-  it('fails closed when the current user or host is unavailable', () => {
-    expect(canHostCloseGame(createGame(), undefined)).toBe(false)
-    expect(canHostCloseGame(createGame({ players: [] }), 'host-1')).toBe(false)
+  it('fails closed when the current user or roster is unavailable', () => {
+    expect(canParticipantCloseGame(createGame(), undefined)).toBe(false)
+    expect(canParticipantCloseGame(createGame({ players: [] }), 'host-1')).toBe(false)
   })
 })
 

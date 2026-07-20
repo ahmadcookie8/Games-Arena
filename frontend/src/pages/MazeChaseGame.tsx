@@ -801,7 +801,7 @@ export default function MazeChaseGame() {
                   <button
                     type="button"
                     onClick={() => void completeRun(mazeState)}
-                    className="min-h-10 cursor-pointer rounded-lg border border-warning/40 bg-warning-subtle px-4 py-2 text-sm font-medium text-warning-text"
+                    className="tactile-button tactile-button--secondary min-h-10 cursor-pointer rounded-lg border border-warning/40 bg-warning-subtle px-4 py-2 text-sm font-medium text-warning-text"
                   >
                     Retry verification
                   </button>
@@ -810,7 +810,7 @@ export default function MazeChaseGame() {
                   type="button"
                   onClick={() => void retryGame()}
                   disabled={isRetrying}
-                  className="ui-action-primary interactive-lift min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold shadow-accent disabled:cursor-not-allowed disabled:opacity-60"
+                  className="tactile-button tactile-button--primary ui-action-primary min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isRetrying ? 'Starting...' : 'Retry'}
                 </button>}
@@ -899,7 +899,7 @@ export default function MazeChaseGame() {
                     window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                   }}
                   disabled={!isActive || mazeState.isGameOver || isCountingDown || isStarting}
-                  className="ui-action-primary interactive-lift min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold shadow-accent disabled:cursor-not-allowed disabled:opacity-60"
+                  className="tactile-button tactile-button--primary ui-action-primary min-h-11 cursor-pointer rounded-xl px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isStarting ? 'Starting...' : !mazeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
@@ -907,9 +907,9 @@ export default function MazeChaseGame() {
               </div>
               <div className="mx-auto mt-4 grid w-44 select-none grid-cols-3 gap-2 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent] sm:hidden" aria-label="Touch controls">
                 <span />
-                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'up')} onClick={(event) => handleDirectionClick(event, 'up')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Up</button>
+                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'up')} onClick={(event) => handleDirectionClick(event, 'up')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="tactile-button tactile-button--secondary min-h-12 select-none rounded-lg border border-border-control bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Up</button>
                 <span />
-                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'left')} onClick={(event) => handleDirectionClick(event, 'left')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Left</button>
+                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'left')} onClick={(event) => handleDirectionClick(event, 'left')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="tactile-button tactile-button--secondary min-h-12 select-none rounded-lg border border-border-control bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Left</button>
                 <button
                   type="button"
                   onClick={() => {
@@ -923,13 +923,13 @@ export default function MazeChaseGame() {
                     window.requestAnimationFrame(() => boardRef.current?.focus({ preventScroll: true }))
                   }}
                   disabled={!isActive || mazeState.isGameOver || isCountingDown || isStarting}
-                  className="ui-action-primary min-h-12 rounded-xl text-xs font-bold shadow-accent disabled:opacity-60"
+                  className="tactile-button tactile-button--primary ui-action-primary min-h-12 rounded-xl text-xs font-bold disabled:opacity-60"
                 >
                   {isStarting ? 'Starting' : !mazeState.hasStarted ? 'Start' : isPlaying ? 'Pause' : 'Play'}
                 </button>
-                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'right')} onClick={(event) => handleDirectionClick(event, 'right')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Right</button>
+                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'right')} onClick={(event) => handleDirectionClick(event, 'right')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="tactile-button tactile-button--secondary min-h-12 select-none rounded-lg border border-border-control bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Right</button>
                 <span />
-                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'down')} onClick={(event) => handleDirectionClick(event, 'down')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="min-h-12 select-none rounded-lg bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Down</button>
+                <button type="button" onPointerDown={(event) => handleDirectionPress(event, 'down')} onClick={(event) => handleDirectionClick(event, 'down')} onContextMenu={preventTouchContextMenu} disabled={isCountingDown} className="tactile-button tactile-button--secondary min-h-12 select-none rounded-lg border border-border-control bg-elevated text-sm font-bold text-text-primary disabled:opacity-60 [touch-action:manipulation] [-webkit-tap-highlight-color:transparent]">Down</button>
                 <span />
               </div>
             </div>

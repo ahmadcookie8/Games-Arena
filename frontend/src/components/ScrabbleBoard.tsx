@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeftRight, Crosshair, History, Maximize2, MessageSquare, Minus, Plus, Star, Users } from 'lucide-react'
 import { Game, Player, ScrabblePremium, ScrabbleScoreEvent, ScrabbleState, ScrabbleTile } from '../types/game'
+import type { GameActionErrorReporter } from '../types/gameFeedback'
 import { User } from '../types/user'
 import api from '../lib/api'
 import { isInteractiveKeyTarget } from '../lib/keyboard'
@@ -23,9 +24,9 @@ import {
   type ScrabblePendingTradeRole,
 } from '../lib/scrabbleBoardUi'
 import GameChat from './GameChat'
-import GameInvite from './GameInvite'
 import Modal from './Modal'
 import MoveHistory from './MoveHistory'
+import PlayerAvatar from './PlayerAvatar'
 import { TabletopBottomSheet, TabletopDockButtons, TabletopTabs, type TabletopTab } from './TabletopShell'
 import { Select } from './ui'
 import './scrabble-tabletop.css'
@@ -36,6 +37,7 @@ interface Props {
   isMyTurn: boolean
   onMove: (move: ScrabbleMove) => Promise<{ success: boolean; game?: Game; error?: string; handledGlobally?: boolean }>
   onSendChat: (text: string) => Promise<{ success: boolean; error?: string; handledGlobally?: boolean }>
+  onActionError?: GameActionErrorReporter
 }
 
 interface PendingPlacement {
@@ -78,8 +80,9 @@ const PREMIUM_NAMES: Record<ScrabblePremium, string> = {
   TW: 'triple word score',
 }
 
-export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat }: Props) {
+export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat, onActionError }: Props) {
   const state = game.gameState as unknown as ScrabbleState
+  const isDesktopLayout = useTabletopDesktopLayout()
   const myId = user?._id ?? ''
   const myRack = useMemo(() => state.racks[myId] ?? EMPTY_RACK, [myId, state.racks])
   const [selectedTileId, setSelectedTileId] = useState<string | null>(null)
@@ -87,7 +90,6 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
   const [selectedRackIds, setSelectedRackIds] = useState<string[]>([])
   const [tradeTargetId, setTradeTargetId] = useState('')
   const [isSavingSettings, setIsSavingSettings] = useState(false)
-  const [settingsError, setSettingsError] = useState<string | null>(null)
   const [swapMode, setSwapMode] = useState(false)
   const [scoreHighlight, setScoreHighlight] = useState<ScoreHighlight | null>(null)
   const [blankPlacement, setBlankPlacement] = useState<PendingPlacement | null>(null)
@@ -96,7 +98,6 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
   const [activeTab, setActiveTab] = useState<InspectorTab>('players')
   const [sheetOpen, setSheetOpen] = useState(false)
   const [busyAction, setBusyAction] = useState<string | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
   const [showGiveUpModal, setShowGiveUpModal] = useState(false)
 
   const closeBlankLetterModal = useCallback(() => {
@@ -184,7 +185,6 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
     setSelectedTileId(null)
     setSelectedRackIds([])
     setSwapMode(false)
-    setActionError(null)
     closeBlankLetterModal()
   }, [state.lastScoreEvent?.moveNumber, game.currentTurnIndex, closeBlankLetterModal])
 
@@ -203,6 +203,10 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
   useEffect(() => {
     if (tradeTargetId && !canOfferToTarget) setTradeTargetId('')
   }, [canOfferToTarget, tradeTargetId])
+
+  useEffect(() => {
+    if (isDesktopLayout) setSheetOpen(false)
+  }, [isDesktopLayout])
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -287,13 +291,13 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
 
   async function act(move: ScrabbleMove, actionName: string) {
     if (busyAction) return
+    const restoreFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setBusyAction(actionName)
-    setActionError(null)
     try {
       const result = await onMove(move)
-      if (!result.success && !result.handledGlobally) setActionError(result.error ?? 'Action failed')
+      if (!result.success && !result.handledGlobally) onActionError?.(result.error ?? 'Action failed', restoreFocusTo)
     } catch {
-      setActionError('Network error. Try again.')
+      onActionError?.('The action could not reach the game server. Try again.', restoreFocusTo)
     } finally {
       setBusyAction(null)
     }
@@ -324,18 +328,18 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
   }
 
   async function updateInfiniteLetters(infiniteLetters: boolean) {
+    const restoreFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setIsSavingSettings(true)
-    setSettingsError(null)
     try {
       await api.patch(`/api/games/${game._id}/settings`, { infiniteLetters })
     } catch {
-      setSettingsError('Could not update the room setting. Try again.')
+      onActionError?.('Could not update the room setting. Try again.', restoreFocusTo)
     } finally {
       setIsSavingSettings(false)
     }
   }
 
-  function RackTiles({ mirrored = false }: { mirrored?: boolean }) {
+  function renderRackTiles(mirrored = false) {
     const canChooseMultiple = Boolean(pendingTradeForMe) || (isMyTurn && !state.pendingTrade && (swapMode || mirrored))
     const canChoosePlacement = isMyTurn && !state.pendingTrade && !swapMode && !mirrored
     return (
@@ -373,7 +377,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
     )
   }
 
-  function ActionPanel({ compact = false }: { compact?: boolean }) {
+  function renderActionPanel(compact = false) {
     const title = actionTitle(actionMode)
     return (
       <section className={`scr-action-surface ${compact ? 'scr-action-surface--compact' : ''}`} aria-label="Current action">
@@ -385,36 +389,36 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
           {busyAction && <span className="scr-busy-label" role="status">Working…</span>}
         </header>
 
-        {!isWaitingForPlayer && <RackTiles />}
+        {!isWaitingForPlayer && renderRackTiles()}
 
         {actionMode === 'completed' && (
           <p className="scr-action-copy">{game.result?.winnerName ? `${game.result.winnerName} won the table.` : 'The final scores are in.'}</p>
         )}
         {actionMode === 'waitingForPlayer' && (
-          <div className="scr-invite"><GameInvite gameCode={game.gameCode} /></div>
+          <p className="scr-action-copy">Invite another player with the code shown above the board.</p>
         )}
         {actionMode === 'observing' && <p className="scr-action-copy">You gave up this round. You can still follow the board, scores, history, and chat.</p>}
         {actionMode === 'waitingTurn' && <p className="scr-action-copy">{currentPlayer ? `${currentPlayer.username} is choosing their play.` : 'Waiting for the next play.'}</p>}
         {actionMode === 'tradePending' && (
           <div className="scr-action-stack">
             <p className="scr-action-copy">{offeredByMe ? `Waiting for ${playerName(game.players, state.pendingTrade?.targetUserId ?? '')} to answer your trade.` : 'Another player is considering a trade.'}</p>
-            <button type="button" className="scr-secondary-button" onClick={() => openInspector('trade')}>View trade</button>
+            <button type="button" className="tactile-button tactile-button--secondary scr-secondary-button" onClick={() => openInspector('trade')}>View trade</button>
           </div>
         )}
         {actionMode === 'incomingTrade' && (
           <div className="scr-action-stack">
             <p className="scr-action-copy">{playerName(game.players, pendingTradeForMe?.fromUserId ?? '')} offered {pendingTradeTileCount} tile{pendingTradeTileCount === 1 ? '' : 's'}.</p>
-            <button type="button" className="scr-primary-button" onClick={() => openInspector('trade')}>Review trade</button>
+            <button type="button" className="tactile-button tactile-button--primary scr-primary-button" onClick={() => openInspector('trade')}>Review trade</button>
           </div>
         )}
         {actionMode === 'place' && (
           <>
             <p className="scr-action-copy">{selectedTileId ? 'Choose an open board square.' : placements.length ? `${placements.length} tile${placements.length === 1 ? '' : 's'} ready to play.` : 'Select a rack tile, then choose its square.'}</p>
             <div className="scr-action-grid">
-              <button type="button" className="scr-primary-button" onClick={submitPlacements} disabled={placements.length === 0 || Boolean(busyAction)}>Play tiles</button>
-              <button type="button" className="scr-secondary-button" onClick={toggleSwapMode} disabled={Boolean(busyAction)}>Swap tiles</button>
-              <button type="button" className="scr-secondary-button" onClick={() => void act(multiplayerActions.scrabble.pass(), 'pass')} disabled={Boolean(busyAction)}>Pass</button>
-              <button type="button" className="scr-danger-button" onClick={() => setShowGiveUpModal(true)} disabled={Boolean(busyAction)}>Give up</button>
+              <button type="button" className="tactile-button tactile-button--primary scr-primary-button" onClick={submitPlacements} disabled={placements.length === 0 || Boolean(busyAction)}>Play tiles</button>
+              <button type="button" className="tactile-button tactile-button--secondary scr-secondary-button" onClick={toggleSwapMode} disabled={Boolean(busyAction)}>Swap tiles</button>
+              <button type="button" className="tactile-button tactile-button--secondary scr-secondary-button" onClick={() => void act(multiplayerActions.scrabble.pass(), 'pass')} disabled={Boolean(busyAction)}>Pass</button>
+              <button type="button" className="tactile-button tactile-button--danger scr-danger-button" onClick={() => setShowGiveUpModal(true)} disabled={Boolean(busyAction)}>Give up</button>
             </div>
           </>
         )}
@@ -425,20 +429,19 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
               <p className="scr-inline-error" role="status">The bag has only {state.bagCount ?? 0} tile{state.bagCount === 1 ? '' : 's'}. Reduce the selection to exchange, or offer a player trade.</p>
             )}
             <div className="scr-action-grid">
-              <button type="button" className="scr-primary-button" onClick={exchangeSelected} disabled={!canExchangeSelection || Boolean(busyAction)}>Exchange ({selectedRackIds.length})</button>
-              <button type="button" className="scr-secondary-button" onClick={() => openInspector('trade')} disabled={selectedRackIds.length === 0}>Offer trade</button>
-              <button type="button" className="scr-secondary-button" onClick={toggleSwapMode}>Cancel</button>
-              <button type="button" className="scr-secondary-button" onClick={() => void act(multiplayerActions.scrabble.pass(), 'pass')} disabled={Boolean(busyAction)}>Pass</button>
-              <button type="button" className="scr-danger-button" onClick={() => setShowGiveUpModal(true)} disabled={Boolean(busyAction)}>Give up</button>
+              <button type="button" className="tactile-button tactile-button--primary scr-primary-button" onClick={exchangeSelected} disabled={!canExchangeSelection || Boolean(busyAction)}>Exchange ({selectedRackIds.length})</button>
+              <button type="button" className="tactile-button tactile-button--secondary scr-secondary-button" onClick={() => openInspector('trade')} disabled={selectedRackIds.length === 0}>Offer trade</button>
+              <button type="button" className="tactile-button tactile-button--secondary scr-secondary-button" onClick={toggleSwapMode}>Cancel</button>
+              <button type="button" className="tactile-button tactile-button--secondary scr-secondary-button" onClick={() => void act(multiplayerActions.scrabble.pass(), 'pass')} disabled={Boolean(busyAction)}>Pass</button>
+              <button type="button" className="tactile-button tactile-button--danger scr-danger-button" onClick={() => setShowGiveUpModal(true)} disabled={Boolean(busyAction)}>Give up</button>
             </div>
           </>
         )}
-        {actionError && <p className="scr-inline-error" role="alert">{actionError}</p>}
       </section>
     )
   }
 
-  function PlayersPanel() {
+  function renderPlayersPanel() {
     return (
       <div className="scr-panel-stack">
         <div className="scr-player-list">
@@ -447,7 +450,11 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
             const current = game.status === 'active' && index === game.currentTurnIndex
             return (
               <div key={player.userId} className={`scr-player-row ${current ? 'is-current' : ''}`}>
-                <span className="scr-player-avatar" aria-hidden="true">{getInitials(player.username)}</span>
+                <PlayerAvatar
+                  name={player.username}
+                  size="md"
+                  status={current ? 'turn' : player.isConnected === false ? 'offline' : 'online'}
+                />
                 <span className="scr-player-name">
                   <strong className={gaveUp ? 'line-through' : ''}>{player.username}</strong>
                   <small>{gaveUp ? 'Gave up' : player.isConnected === false ? 'Offline' : index === 0 ? 'Host' : current ? 'Playing' : 'At the table'}</small>
@@ -473,13 +480,12 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
             />
             <span>{state.infiniteLetters ? 'On' : 'Off'}</span>
           </label>
-          {settingsError && <p className="scr-inline-error" role="alert">{settingsError}</p>}
         </section>
       </div>
     )
   }
 
-  function TradePanel() {
+  function renderTradePanel() {
     if (pendingTradeForMe) {
       const required = pendingTradeTileCount
       return (
@@ -492,11 +498,11 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
           <div>
             <h3 className="scr-panel-title">Choose {required} tile{required === 1 ? '' : 's'} in return</h3>
             <p className="scr-panel-copy">Selected {selectedRackIds.length} of {required}</p>
-            <RackTiles mirrored />
+            {renderRackTiles(true)}
           </div>
           <div className="scr-action-grid">
-            <button type="button" className="scr-primary-button" onClick={acceptTrade} disabled={selectedRackIds.length !== required || Boolean(busyAction)}>Accept trade</button>
-            <button type="button" className="scr-secondary-button" onClick={() => void act(multiplayerActions.scrabble.declineTrade(pendingTradeForMe.offerId), 'decline')} disabled={Boolean(busyAction)}>Decline</button>
+            <button type="button" className="tactile-button tactile-button--primary scr-primary-button" onClick={acceptTrade} disabled={selectedRackIds.length !== required || Boolean(busyAction)}>Accept trade</button>
+            <button type="button" className="tactile-button tactile-button--secondary scr-secondary-button" onClick={() => void act(multiplayerActions.scrabble.declineTrade(pendingTradeForMe.offerId), 'decline')} disabled={Boolean(busyAction)}>Decline</button>
           </div>
         </div>
       )
@@ -509,7 +515,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
           <h3>{offeredByMe ? 'Offer sent' : 'Players are negotiating'}</h3>
           <p>{offeredByMe ? `${playerName(game.players, state.pendingTrade.targetUserId)} is choosing a response.` : 'The board will unlock when the trade is accepted or declined.'}</p>
           {(offeredByMe || isHost) && (
-            <button type="button" className="scr-secondary-button" onClick={cancelPendingTrade} disabled={Boolean(busyAction)}>Cancel trade</button>
+            <button type="button" className="tactile-button tactile-button--secondary scr-secondary-button" onClick={cancelPendingTrade} disabled={Boolean(busyAction)}>Cancel trade</button>
           )}
         </div>
       )
@@ -519,7 +525,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
       <div className="scr-panel-stack">
         <div>
           <p className="scr-panel-copy">Select tiles here or turn on Swap in the action panel. Your selection stays synchronized.</p>
-          <RackTiles mirrored />
+          {renderRackTiles(true)}
         </div>
         <div className="scr-field-label">
           <span>Trade with</span>
@@ -536,7 +542,7 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
             ]}
           />
         </div>
-        <button type="button" className="scr-primary-button" onClick={offerTrade} disabled={!isMyTurn || !canOfferToTarget || selectedRackIds.length === 0 || Boolean(busyAction)}>
+        <button type="button" className="tactile-button tactile-button--primary scr-primary-button" onClick={offerTrade} disabled={!isMyTurn || !canOfferToTarget || selectedRackIds.length === 0 || Boolean(busyAction)}>
           {selectedRackIds.length ? `Offer ${selectedRackIds.length} tile${selectedRackIds.length === 1 ? '' : 's'}` : 'Offer trade'}
         </button>
         <p className="scr-panel-copy">Only connected players with enough tiles are shown. They must return the same number of tiles or decline.</p>
@@ -544,12 +550,12 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
     )
   }
 
-  function InspectorContent() {
+  function renderInspectorContent() {
     switch (activeTab) {
-      case 'trade': return <TradePanel />
+      case 'trade': return renderTradePanel()
       case 'history': return <MoveHistory moves={game.moveHistory} variant="embedded" />
-      case 'chat': return <GameChat messages={game.chatMessages ?? []} currentUserId={myId} onSend={onSendChat} variant="embedded" />
-      default: return <PlayersPanel />
+      case 'chat': return <GameChat messages={game.chatMessages ?? []} currentUserId={myId} onSend={onSendChat} onError={onActionError} variant="embedded" />
+      default: return renderPlayersPanel()
     }
   }
 
@@ -559,7 +565,11 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
     <div className="scrabble-tabletop min-w-0">
       <section className="scr-hud" aria-label="Scrabble game status">
         <div className="scr-hud-turn">
-          <span className="scr-turn-token" aria-hidden="true">{getInitials(currentPlayer?.username ?? '?')}</span>
+          <PlayerAvatar
+            name={currentPlayer?.username ?? '?'}
+            size="lg"
+            status={game.status === 'active' ? 'turn' : undefined}
+          />
           <div>
             <p className="scr-section-label">{game.status === 'completed' ? 'Final table' : isMyTurn ? 'Your turn' : 'Current turn'}</p>
             <strong>{game.status === 'completed' ? 'Game complete' : currentPlayer?.username ?? 'Waiting'}</strong>
@@ -582,28 +592,34 @@ export default function ScrabbleBoard({ game, user, isMyTurn, onMove, onSendChat
           onRemove={removePending}
         />
 
-        <aside className="scr-desktop-rail" aria-label="Scrabble controls and information">
-          <ActionPanel />
-          <section className="scr-inspector-surface">
-            <TabletopTabs tabs={inspectorTabs} activeTab={activeTab} onSelect={selectInspector} ariaLabel="Scrabble information" idBase="scrabble-desktop" />
-            <div id="scrabble-desktop-panel" className="scr-inspector-content" role="tabpanel" aria-labelledby={`scrabble-desktop-tab-${activeTab}`}>
-              <InspectorContent />
+        {isDesktopLayout && (
+          <aside className="scr-desktop-rail" aria-label="Scrabble controls and information">
+            {renderActionPanel()}
+            <section className="scr-inspector-surface">
+              <TabletopTabs tabs={inspectorTabs} activeTab={activeTab} onSelect={selectInspector} ariaLabel="Scrabble information" idBase="scrabble-desktop" />
+              <div id="scrabble-desktop-panel" className="scr-inspector-content" role="tabpanel" aria-labelledby={`scrabble-desktop-tab-${activeTab}`}>
+                {renderInspectorContent()}
+              </div>
+            </section>
+          </aside>
+        )}
+      </div>
+
+      {!isDesktopLayout && (
+        <>
+          <div className="scr-mobile-dock">
+            {renderActionPanel(true)}
+            <TabletopDockButtons tabs={inspectorTabs} activeTab={activeTab} onSelect={openInspector} ariaLabel="Open Scrabble information" isOpen={sheetOpen} />
+          </div>
+
+          <TabletopBottomSheet isOpen={sheetOpen} title={activeTabLabel} onClose={() => setSheetOpen(false)} idBase="scrabble-info-sheet" contentKey={activeTab}>
+            <TabletopTabs tabs={inspectorTabs} activeTab={activeTab} onSelect={selectInspector} ariaLabel="Scrabble information" idBase="scrabble-sheet" />
+            <div id="scrabble-sheet-panel" className="scr-sheet-content" role="tabpanel" aria-labelledby={`scrabble-sheet-tab-${activeTab}`}>
+              {renderInspectorContent()}
             </div>
-          </section>
-        </aside>
-      </div>
-
-      <div className="scr-mobile-dock">
-        <ActionPanel compact />
-        <TabletopDockButtons tabs={inspectorTabs} activeTab={activeTab} onSelect={openInspector} ariaLabel="Open Scrabble information" isOpen={sheetOpen} />
-      </div>
-
-      <TabletopBottomSheet isOpen={sheetOpen} title={activeTabLabel} onClose={() => setSheetOpen(false)} idBase="scrabble-info-sheet">
-        <TabletopTabs tabs={inspectorTabs} activeTab={activeTab} onSelect={selectInspector} ariaLabel="Scrabble information" idBase="scrabble-sheet" />
-        <div id="scrabble-sheet-panel" className="scr-sheet-content" role="tabpanel" aria-labelledby={`scrabble-sheet-tab-${activeTab}`}>
-          <InspectorContent />
-        </div>
-      </TabletopBottomSheet>
+          </TabletopBottomSheet>
+        </>
+      )}
 
       <Modal
         isOpen={Boolean(blankPlacement)}
@@ -774,11 +790,11 @@ function ScrabbleCamera({
           <strong aria-live="polite">{Math.round(zoom * 100)}% zoom</strong>
         </div>
         <div className="scr-camera-controls">
-          <button type="button" onClick={() => changeZoom(stepScrabbleZoom(zoom, -1))} disabled={zoom <= SCRABBLE_BOARD_MIN_ZOOM} aria-label="Zoom out"><Minus /></button>
-          <button type="button" onClick={() => changeZoom(stepScrabbleZoom(zoom, 1))} disabled={zoom >= SCRABBLE_BOARD_MAX_ZOOM} aria-label="Zoom in"><Plus /></button>
-          <button type="button" className="scr-camera-action" onClick={fitBoard} aria-label="Fit whole board"><Maximize2 /><span>Fit</span></button>
-          <button type="button" className="scr-camera-action" onClick={() => centerSquare(7, 7)} aria-label="Center board"><Crosshair /><span>Center</span></button>
-          <button type="button" className="scr-camera-action" disabled={!lastPlayCenter} onClick={() => lastPlayCenter && centerSquare(lastPlayCenter.row, lastPlayCenter.col)} aria-label="Center last scoring play"><Star /><span>Last play</span></button>
+          <button type="button" className="tactile-button tactile-button--secondary" onClick={() => changeZoom(stepScrabbleZoom(zoom, -1))} disabled={zoom <= SCRABBLE_BOARD_MIN_ZOOM} aria-label="Zoom out"><Minus /></button>
+          <button type="button" className="tactile-button tactile-button--secondary" onClick={() => changeZoom(stepScrabbleZoom(zoom, 1))} disabled={zoom >= SCRABBLE_BOARD_MAX_ZOOM} aria-label="Zoom in"><Plus /></button>
+          <button type="button" className="tactile-button tactile-button--secondary scr-camera-action" onClick={fitBoard} aria-label="Fit whole board"><Maximize2 /><span>Fit</span></button>
+          <button type="button" className="tactile-button tactile-button--secondary scr-camera-action" onClick={() => centerSquare(7, 7)} aria-label="Center board"><Crosshair /><span>Center</span></button>
+          <button type="button" className="tactile-button tactile-button--secondary scr-camera-action" disabled={!lastPlayCenter} onClick={() => lastPlayCenter && centerSquare(lastPlayCenter.row, lastPlayCenter.col)} aria-label="Center last scoring play"><Star /><span>Last play</span></button>
         </div>
       </header>
 
@@ -971,12 +987,6 @@ function playerName(players: Player[], userId: string): string {
   return players.find((player) => player.userId === userId)?.username ?? 'Unknown player'
 }
 
-function getInitials(username: string): string {
-  const parts = username.trim().split(/[\s_-]+/).filter(Boolean)
-  if (parts.length > 1) return `${parts[0][0]}${parts[1][0]}`.toUpperCase()
-  return username.slice(0, 2).toUpperCase()
-}
-
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches)
   useEffect(() => {
@@ -986,4 +996,20 @@ function usePrefersReducedMotion(): boolean {
     return () => query.removeEventListener('change', update)
   }, [])
   return reduced
+}
+
+function useTabletopDesktopLayout(): boolean {
+  const [isDesktop, setIsDesktop] = useState(() => (
+    typeof window !== 'undefined' && window.matchMedia('(min-width: 1120px)').matches
+  ))
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(min-width: 1120px)')
+    const handleChange = (event: MediaQueryListEvent) => setIsDesktop(event.matches)
+    setIsDesktop(mediaQuery.matches)
+    mediaQuery.addEventListener('change', handleChange)
+    return () => mediaQuery.removeEventListener('change', handleChange)
+  }, [])
+
+  return isDesktop
 }
